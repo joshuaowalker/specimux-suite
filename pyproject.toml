@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specimux-suite"
+version = "0.1.0"
+description = "Orchestration and UX layer for the Mycomap fungal DNA barcoding pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "watchdog>=3.0",
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "sse-starlette>=1.8",
+    "adjusted-identity>=0.2.4",
+    "biopython>=1.82",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+specimux-suite = "specimux_suite.cli:main"
+specimux-simulate = "specimux_suite.cli:simulate_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

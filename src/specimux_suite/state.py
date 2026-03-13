@@ -1,0 +1,201 @@
+"""Pipeline state — in-memory materialized view rebuilt from events."""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+from .events import Event, EventLog
+
+
+class SpecimenStatus(str, Enum):
+    WAITING = "waiting"
+    CONSENSUS_RUNNING = "consensus_running"
+    CONSENSUS_DONE = "consensus_done"
+    IDENTIFIED = "identified"
+    ERROR = "error"
+
+
+@dataclass
+class ClusterInfo:
+    name: str
+    size: int
+    ric: Optional[int] = None
+    rid: Optional[float] = None
+
+
+@dataclass
+class IdentificationMatch:
+    cluster: str
+    top_hits: list[dict] = field(default_factory=list)
+    # Each hit: {ref_id, name, identity, adjusted_identity}
+
+
+@dataclass
+class SpecimenState:
+    specimen_id: str
+    pool: str = ""
+    total_reads: int = 0
+    reads_at_last_consensus: int = 0
+    consensus_version: int = 0
+    status: SpecimenStatus = SpecimenStatus.WAITING
+    clusters: list[ClusterInfo] = field(default_factory=list)
+    identification: list[IdentificationMatch] = field(default_factory=list)
+    active_job_id: Optional[str] = None
+
+
+@dataclass
+class FileState:
+    path: str
+    size_bytes: int = 0
+    stable: bool = False
+    processed: bool = False
+
+
+class PipelineState:
+    """In-memory materialized view of the pipeline, rebuilt from events."""
+
+    def __init__(self):
+        self.specimens: dict[str, SpecimenState] = {}
+        self.files: dict[str, FileState] = {}
+        self.version: int = 0
+        self.mode: Optional[str] = None
+        self.errors: list[dict] = []
+
+    def apply(self, event: Event) -> None:
+        """Apply a single event to update state."""
+        self.version = event.version
+        handler = self._handlers.get(event.type)
+        if handler:
+            handler(self, event.data)
+
+    def rebuild(self, event_log: EventLog) -> None:
+        """Rebuild state by replaying all events."""
+        for event in event_log.replay():
+            self.apply(event)
+
+    def get_specimen(self, specimen_id: str) -> SpecimenState:
+        if specimen_id not in self.specimens:
+            self.specimens[specimen_id] = SpecimenState(specimen_id=specimen_id)
+        return self.specimens[specimen_id]
+
+    def to_dict(self) -> dict:
+        """Serialize full state for API."""
+        return {
+            "version": self.version,
+            "mode": self.mode,
+            "specimens": {
+                sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
+            },
+            "errors": self.errors,
+        }
+
+    # --- Event handlers ---
+
+    def _on_pipeline_started(self, data: dict):
+        self.mode = data.get("mode")
+
+    def _on_file_detected(self, data: dict):
+        path = data["path"]
+        self.files[path] = FileState(path=path, size_bytes=data.get("size_bytes", 0))
+
+    def _on_file_stable(self, data: dict):
+        path = data["path"]
+        if path in self.files:
+            self.files[path].stable = True
+            self.files[path].size_bytes = data.get("size_bytes", self.files[path].size_bytes)
+
+    def _on_specimux_started(self, data: dict):
+        pass  # tracked for logging, no state change needed
+
+    def _on_specimux_completed(self, data: dict):
+        specimens = data.get("specimens", {})
+        for name, read_count in specimens.items():
+            spec = self.get_specimen(name)
+            spec.total_reads = read_count
+            # Pool info comes from specimen name convention or data
+            if "pool" in data:
+                spec.pool = data["pool"]
+        file_path = data.get("file_path")
+        if file_path and file_path in self.files:
+            self.files[file_path].processed = True
+
+    def _on_specimen_updated(self, data: dict):
+        spec = self.get_specimen(data["specimen_id"])
+        if "pool" in data:
+            spec.pool = data["pool"]
+        spec.total_reads = data.get("total_reads", spec.total_reads)
+        if "consensus_version" in data:
+            spec.consensus_version = data["consensus_version"]
+
+    def _on_consensus_started(self, data: dict):
+        spec = self.get_specimen(data["specimen_id"])
+        spec.status = SpecimenStatus.CONSENSUS_RUNNING
+        spec.active_job_id = data.get("job_id")
+
+    def _on_consensus_completed(self, data: dict):
+        spec = self.get_specimen(data["specimen_id"])
+        spec.status = SpecimenStatus.CONSENSUS_DONE
+        spec.active_job_id = None
+        spec.reads_at_last_consensus = spec.total_reads
+        spec.consensus_version += 1
+        clusters = []
+        for c in data.get("clusters", []):
+            clusters.append(ClusterInfo(
+                name=c["name"],
+                size=c["size"],
+                ric=c.get("ric"),
+                rid=c.get("rid"),
+            ))
+        spec.clusters = clusters
+
+    def _on_identification_completed(self, data: dict):
+        spec = self.get_specimen(data["specimen_id"])
+        spec.status = SpecimenStatus.IDENTIFIED
+        matches = []
+        for m in data.get("matches", []):
+            matches.append(IdentificationMatch(
+                cluster=m["cluster"],
+                top_hits=m.get("top_hits", []),
+            ))
+        spec.identification = matches
+
+    def _on_pipeline_error(self, data: dict):
+        self.errors.append(data)
+        # If it's a specimen-level error, mark it
+        if "specimen_id" in data:
+            spec = self.get_specimen(data["specimen_id"])
+            spec.status = SpecimenStatus.ERROR
+            spec.active_job_id = None
+
+    _handlers = {
+        "pipeline.started": _on_pipeline_started,
+        "file.detected": _on_file_detected,
+        "file.stable": _on_file_stable,
+        "specimux.started": _on_specimux_started,
+        "specimux.completed": _on_specimux_completed,
+        "specimen.updated": _on_specimen_updated,
+        "consensus.started": _on_consensus_started,
+        "consensus.completed": _on_consensus_completed,
+        "identification.completed": _on_identification_completed,
+        "pipeline.error": _on_pipeline_error,
+    }
+
+
+def _specimen_to_dict(s: SpecimenState) -> dict:
+    result = {
+        "specimen_id": s.specimen_id,
+        "pool": s.pool,
+        "total_reads": s.total_reads,
+        "reads_at_last_consensus": s.reads_at_last_consensus,
+        "consensus_version": s.consensus_version,
+        "status": s.status.value,
+        "clusters": [
+            {"name": c.name, "size": c.size, "ric": c.ric, "rid": c.rid}
+            for c in s.clusters
+        ],
+        "identification": [
+            {"cluster": m.cluster, "top_hits": m.top_hits}
+            for m in s.identification
+        ],
+    }
+    return result

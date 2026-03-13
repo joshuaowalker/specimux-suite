@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>specimux-suite Dashboard</title>
+<style>
+:root {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --border: #0f3460;
+  --text: #e0e0e0;
+  --text-dim: #8888aa;
+  --accent: #0f3460;
+  --waiting: #555;
+  --processing: #c4a000;
+  --done: #4e9a06;
+  --identified: #2e7d32;
+  --error: #cc0000;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+header h1 { font-size: 1.25rem; font-weight: 600; }
+#status-badge {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  background: var(--accent);
+}
+#status-badge.connected { background: var(--done); color: #fff; }
+#status-badge.disconnected { background: var(--error); color: #fff; }
+
+.controls {
+  padding: 0.75rem 1.5rem;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+#search {
+  flex: 1;
+  min-width: 200px;
+  max-width: 400px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.stats {
+  display: flex;
+  gap: 1.5rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.stats span { font-weight: 600; color: var(--text); }
+
+.table-wrap {
+  padding: 0 1rem;
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 2px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+th:hover { color: var(--text); }
+
+td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+tr:hover { background: rgba(255,255,255,0.03); }
+
+.status-pill {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.status-waiting { background: var(--waiting); }
+.status-consensus_running { background: var(--processing); color: #000; }
+.status-consensus_done { background: var(--done); color: #fff; }
+.status-identified { background: var(--identified); color: #fff; }
+.status-error { background: var(--error); color: #fff; }
+
+.identity-bar {
+  display: inline-block;
+  height: 6px;
+  border-radius: 3px;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.top-hit { white-space: nowrap; }
+.hit-name { font-style: italic; }
+.hit-pct { color: var(--text-dim); margin-left: 0.25rem; }
+
+@media (max-width: 768px) {
+  header { padding: 0.75rem 1rem; }
+  .controls { padding: 0.5rem 1rem; }
+  table { font-size: 0.8rem; }
+  th, td { padding: 0.4rem 0.5rem; }
+  .hide-mobile { display: none; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>specimux-suite</h1>
+  <div id="status-badge" class="disconnected">disconnected</div>
+</header>
+
+<div class="controls">
+  <input type="text" id="search" placeholder="Search specimens...">
+  <div class="stats">
+    Total: <span id="stat-total">0</span>
+    &nbsp;Identified: <span id="stat-identified">0</span>
+    &nbsp;Processing: <span id="stat-processing">0</span>
+    &nbsp;Waiting: <span id="stat-waiting">0</span>
+  </div>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th data-sort="specimen_id">Specimen</th>
+      <th data-sort="pool" class="hide-mobile">Pool</th>
+      <th data-sort="total_reads">Reads</th>
+      <th data-sort="status">Status</th>
+      <th data-sort="clusters" class="hide-mobile">Clusters</th>
+      <th>Top ID Match</th>
+      <th data-sort="top_identity">Identity</th>
+    </tr>
+  </thead>
+  <tbody id="specimen-table"></tbody>
+</table>
+</div>
+
+<script>
+const state = { specimens: {}, version: 0 };
+let sortKey = 'specimen_id';
+let sortAsc = true;
+let searchTerm = '';
+
+// SSE connection
+function connect() {
+  const badge = document.getElementById('status-badge');
+  const es = new EventSource(`/events?after_version=${state.version}`);
+
+  es.onopen = () => {
+    badge.className = 'connected';
+    badge.textContent = 'live';
+  };
+
+  es.onerror = () => {
+    badge.className = 'disconnected';
+    badge.textContent = 'reconnecting...';
+    es.close();
+    setTimeout(connect, 3000);
+  };
+
+  es.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    state.version = event.version;
+    applyEvent(event);
+    render();
+  };
+
+  // Listen for specific event types too
+  for (const type of [
+    'specimux.completed', 'specimen.updated',
+    'consensus.started', 'consensus.completed',
+    'identification.completed', 'pipeline.error'
+  ]) {
+    es.addEventListener(type, (e) => {
+      const event = JSON.parse(e.data);
+      state.version = Math.max(state.version, event.version);
+      applyEvent(event);
+      render();
+    });
+  }
+}
+
+function applyEvent(event) {
+  const d = event.data;
+  switch (event.type) {
+    case 'specimux.completed':
+      for (const [name, reads] of Object.entries(d.specimens || {})) {
+        if (!state.specimens[name]) state.specimens[name] = { specimen_id: name, total_reads: 0, status: 'waiting', clusters: [], identification: [] };
+        state.specimens[name].total_reads = reads;
+      }
+      break;
+    case 'specimen.updated':
+      if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [] };
+      Object.assign(state.specimens[d.specimen_id], { pool: d.pool, total_reads: d.total_reads });
+      break;
+    case 'consensus.started':
+      if (state.specimens[d.specimen_id]) state.specimens[d.specimen_id].status = 'consensus_running';
+      break;
+    case 'consensus.completed':
+      if (state.specimens[d.specimen_id]) {
+        state.specimens[d.specimen_id].status = 'consensus_done';
+        state.specimens[d.specimen_id].clusters = d.clusters || [];
+      }
+      break;
+    case 'identification.completed':
+      if (state.specimens[d.specimen_id]) {
+        state.specimens[d.specimen_id].status = 'identified';
+        state.specimens[d.specimen_id].identification = d.matches || [];
+      }
+      break;
+    case 'pipeline.error':
+      if (d.specimen_id && state.specimens[d.specimen_id]) {
+        state.specimens[d.specimen_id].status = 'error';
+      }
+      break;
+  }
+}
+
+function render() {
+  let specs = Object.values(state.specimens);
+
+  // Filter
+  if (searchTerm) {
+    const q = searchTerm.toLowerCase();
+    specs = specs.filter(s =>
+      s.specimen_id.toLowerCase().includes(q) ||
+      (s.pool || '').toLowerCase().includes(q) ||
+      getTopHitName(s).toLowerCase().includes(q)
+    );
+  }
+
+  // Sort
+  specs.sort((a, b) => {
+    let va = getSortValue(a, sortKey);
+    let vb = getSortValue(b, sortKey);
+    if (va < vb) return sortAsc ? -1 : 1;
+    if (va > vb) return sortAsc ? 1 : -1;
+    return 0;
+  });
+
+  // Stats
+  const all = Object.values(state.specimens);
+  document.getElementById('stat-total').textContent = all.length;
+  document.getElementById('stat-identified').textContent = all.filter(s => s.status === 'identified').length;
+  document.getElementById('stat-processing').textContent = all.filter(s => s.status === 'consensus_running').length;
+  document.getElementById('stat-waiting').textContent = all.filter(s => s.status === 'waiting').length;
+
+  // Table
+  const tbody = document.getElementById('specimen-table');
+  tbody.innerHTML = specs.map(s => {
+    const topHit = getTopHit(s);
+    const identity = topHit ? (topHit.adjusted_identity || topHit.identity || 0) : 0;
+    const pct = (identity * 100).toFixed(1);
+    const barWidth = Math.max(0, Math.min(100, identity * 100));
+    const barColor = identity >= 0.97 ? 'var(--identified)' : identity >= 0.90 ? 'var(--done)' : 'var(--processing)';
+
+    return `<tr>
+      <td><strong>${esc(s.specimen_id)}</strong></td>
+      <td class="hide-mobile">${esc(s.pool || '')}</td>
+      <td>${s.total_reads.toLocaleString()}</td>
+      <td><span class="status-pill status-${s.status}">${s.status.replace('_', ' ')}</span></td>
+      <td class="hide-mobile">${(s.clusters || []).length}</td>
+      <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>` : '—'}</td>
+      <td>${topHit ? `<span class="identity-bar" style="width:${barWidth}px;background:${barColor}"></span><span class="hit-pct">${pct}%</span>` : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+function getTopHit(s) {
+  if (!s.identification || !s.identification.length) return null;
+  const hits = s.identification[0].top_hits;
+  return hits && hits.length ? hits[0] : null;
+}
+
+function getTopHitName(s) {
+  const h = getTopHit(s);
+  return h ? (h.name || h.ref_id || '') : '';
+}
+
+function getSortValue(s, key) {
+  if (key === 'top_identity') {
+    const h = getTopHit(s);
+    return h ? (h.adjusted_identity || h.identity || 0) : 0;
+  }
+  if (key === 'clusters') return (s.clusters || []).length;
+  return s[key] || '';
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Sort headers
+document.querySelectorAll('th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (sortKey === key) sortAsc = !sortAsc;
+    else { sortKey = key; sortAsc = true; }
+    render();
+  });
+});
+
+// Search
+document.getElementById('search').addEventListener('input', (e) => {
+  searchTerm = e.target.value;
+  render();
+});
+
+// Initial load
+fetch('/api/state').then(r => r.json()).then(data => {
+  if (data.specimens) {
+    state.specimens = data.specimens;
+    state.version = data.version || 0;
+  }
+  render();
+  connect();
+}).catch(() => connect());
+</script>
+</body>
+</html>
