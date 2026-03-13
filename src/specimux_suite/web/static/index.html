@@ -181,6 +181,23 @@ tr:hover { background: rgba(255,255,255,0.03); }
 .cluster-detail .hit-name { color: var(--text-dim); }
 .alt-hit { color: var(--text-dim); font-size: 0.75rem; }
 
+.demux-indicator {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: var(--processing);
+  color: #000;
+  animation: pulse 1.5s ease-in-out infinite;
+  margin-right: 0.5rem;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 @media (max-width: 768px) {
   header { padding: 0.75rem 1rem; }
   .controls { padding: 0.5rem 1rem; }
@@ -200,6 +217,7 @@ tr:hover { background: rgba(255,255,255,0.03); }
 <div class="controls">
   <input type="text" id="search" placeholder="Search specimens...">
   <div class="stats-group">
+    <span id="stat-demuxing" class="demux-indicator" style="display:none">Demuxing</span>
     Reads: <span id="stat-reads">0</span>
     &nbsp;Matched: <span id="stat-matched">0</span>
     &nbsp;Specimens: <span id="stat-total">0</span>
@@ -232,7 +250,7 @@ tr:hover { background: rgba(255,255,255,0.03); }
 </div>
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0 };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false };
 let sortKey = 'specimen_id';
 let sortAsc = true;
 let searchTerm = '';
@@ -266,7 +284,7 @@ function connect() {
 
   // Listen for specific event types too
   for (const type of [
-    'pipeline.started', 'specimens.loaded', 'specimux.completed', 'specimen.updated',
+    'pipeline.started', 'specimens.loaded', 'specimux.started', 'specimux.completed', 'specimen.updated',
     'consensus.started', 'consensus.completed',
     'identification.completed', 'pipeline.error'
   ]) {
@@ -296,7 +314,11 @@ function applyEvent(event) {
         if (s.pool) state.specimens[s.specimen_id].pool = s.pool;
       }
       break;
+    case 'specimux.started':
+      state.demuxing = true;
+      break;
     case 'specimux.completed':
+      state.demuxing = false;
       for (const [name, reads] of Object.entries(d.specimens || {})) {
         if (!state.specimens[name]) state.specimens[name] = { specimen_id: name, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
         state.specimens[name].total_reads = reads;
@@ -365,8 +387,13 @@ function inatLink(specimen_id) {
 }
 
 function buildClusterBadge(s) {
+  const clusters = s.clusters || [];
+  if (clusters.length === 0) return '';
   const matches = (s.identification || []).filter(m => m.top_hits && m.top_hits.length);
-  if (matches.length <= 1) return '';
+  if (matches.length <= 1) {
+    // Single or no ID matches — show a simple expand toggle if there are clusters
+    return `<span class="cluster-badge badge-variants" data-sid="${esc(s.specimen_id)}">${clusters.length} seq${clusters.length > 1 ? 's' : ''}</span>`;
+  }
   const topName = getTopHitName(s);
   let variants = 0;
   let organisms = 0;
@@ -377,6 +404,7 @@ function buildClusterBadge(s) {
   }
   const parts = [];
   if (variants > 1) parts.push(`<span class="cluster-badge badge-variants" data-sid="${esc(s.specimen_id)}">${variants} seqs</span>`);
+  else parts.push(`<span class="cluster-badge badge-variants" data-sid="${esc(s.specimen_id)}">${clusters.length} seq${clusters.length > 1 ? 's' : ''}</span>`);
   if (organisms > 0) parts.push(`<span class="cluster-badge badge-organisms" data-sid="${esc(s.specimen_id)}">+${organisms} other${organisms > 1 ? 's' : ''}</span>`);
   return parts.join('');
 }
@@ -402,6 +430,9 @@ function render() {
     if (va > vb) return sortAsc ? 1 : -1;
     return 0;
   });
+
+  // Demuxing indicator
+  document.getElementById('stat-demuxing').style.display = state.demuxing ? '' : 'none';
 
   // Stats — two orthogonal groups
   const all = Object.values(state.specimens);
@@ -451,20 +482,23 @@ function render() {
       <td>${s.total_reads.toLocaleString()}</td>
       <td><span class="status-pill status-${displayStatus}">${statusLabel}</span></td>
       <td class="hide-mobile">${(s.clusters || []).length}</td>
-      <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>${clusterBadge}` : '—'}</td>
+      <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>${clusterBadge}` : `${clusterBadge || '—'}`}</td>
       <td>${topHit ? `<span class="identity-bar" style="width:${barWidth}px;background:${barColor}"></span><span class="hit-pct">${pct}%</span>` : ''}</td>
     </tr>`);
 
     // Expanded cluster detail rows
-    if (isExpanded && s.identification && s.identification.length > 1) {
-      for (const match of s.identification) {
-        const clusterName = match.cluster || '?';
-        const clusterSize = getClusterSize(s, clusterName);
-        const hits = match.top_hits || [];
+    if (isExpanded && (s.clusters || []).length > 0) {
+      const idByCluster = {};
+      for (const match of (s.identification || [])) {
+        idByCluster[match.cluster] = match;
+      }
+      for (const cluster of s.clusters) {
+        const clusterName = cluster.name || '?';
+        const match = idByCluster[clusterName];
+        const hits = match ? (match.top_hits || []) : [];
         const top = hits[0];
-        if (!top) continue;
-        const cId = top.adjusted_identity || top.identity || 0;
-        const cPct = (cId * 100).toFixed(1);
+        const cId = top ? (top.adjusted_identity || top.identity || 0) : 0;
+        const cPct = top ? (cId * 100).toFixed(1) : '';
         let altHits = '';
         if (hits.length > 1) {
           altHits = '<br>' + hits.slice(1, 4).map(h => {
@@ -474,10 +508,10 @@ function render() {
         }
         rows.push(`<tr class="cluster-detail">
           <td colspan="2">${esc(clusterName)}</td>
-          <td>${clusterSize !== null ? clusterSize : ''}</td>
+          <td>${cluster.size != null ? cluster.size : ''}</td>
           <td colspan="2"></td>
-          <td class="top-hit"><span class="hit-name">${esc(top.name || top.ref_id || '')}</span>${altHits}</td>
-          <td><span class="hit-pct">${cPct}%</span></td>
+          <td class="top-hit">${top ? `<span class="hit-name">${esc(top.name || top.ref_id || '')}</span>${altHits}` : '<span class="alt-hit">—</span>'}</td>
+          <td>${cPct ? `<span class="hit-pct">${cPct}%</span>` : ''}</td>
         </tr>`);
       }
     }
