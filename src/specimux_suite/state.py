@@ -1,5 +1,6 @@
 """Pipeline state — in-memory materialized view rebuilt from events."""
 
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -55,6 +56,7 @@ class PipelineState:
     """In-memory materialized view of the pipeline, rebuilt from events."""
 
     def __init__(self):
+        self._lock = threading.Lock()
         self.specimens: dict[str, SpecimenState] = {}
         self.files: dict[str, FileState] = {}
         self.version: int = 0
@@ -62,16 +64,21 @@ class PipelineState:
         self.errors: list[dict] = []
 
     def apply(self, event: Event) -> None:
-        """Apply a single event to update state."""
-        self.version = event.version
-        handler = self._handlers.get(event.type)
-        if handler:
-            handler(self, event.data)
+        """Apply a single event to update state (thread-safe)."""
+        with self._lock:
+            self.version = event.version
+            handler = self._handlers.get(event.type)
+            if handler:
+                handler(self, event.data)
 
     def rebuild(self, event_log: EventLog) -> None:
         """Rebuild state by replaying all events."""
-        for event in event_log.replay():
-            self.apply(event)
+        with self._lock:
+            for event in event_log.replay():
+                self.version = event.version
+                handler = self._handlers.get(event.type)
+                if handler:
+                    handler(self, event.data)
 
     def get_specimen(self, specimen_id: str) -> SpecimenState:
         if specimen_id not in self.specimens:
@@ -79,15 +86,16 @@ class PipelineState:
         return self.specimens[specimen_id]
 
     def to_dict(self) -> dict:
-        """Serialize full state for API."""
-        return {
-            "version": self.version,
-            "mode": self.mode,
-            "specimens": {
-                sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
-            },
-            "errors": self.errors,
-        }
+        """Serialize full state for API (thread-safe snapshot)."""
+        with self._lock:
+            return {
+                "version": self.version,
+                "mode": self.mode,
+                "specimens": {
+                    sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
+                },
+                "errors": list(self.errors),
+            }
 
     # --- Event handlers ---
 

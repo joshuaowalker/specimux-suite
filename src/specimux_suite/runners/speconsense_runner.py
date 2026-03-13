@@ -76,7 +76,15 @@ class SpeconsenseRunner:
             self.event_log.emit("consensus.completed", {
                 "specimen_id": specimen_id,
                 "job_id": job_id,
+                "read_count": read_count,
                 "clusters": clusters,
+            })
+
+            # Emit explicit specimen update with consensus version info
+            self.event_log.emit("specimen.updated", {
+                "specimen_id": specimen_id,
+                "total_reads": read_count,
+                "consensus_version": None,  # incremented by state handler
             })
 
             return clusters

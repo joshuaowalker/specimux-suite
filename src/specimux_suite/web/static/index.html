@@ -311,8 +311,11 @@ function render() {
 
 function getTopHit(s) {
   if (!s.identification || !s.identification.length) return null;
-  const hits = s.identification[0].top_hits;
-  return hits && hits.length ? hits[0] : null;
+  // Find the first cluster that actually has hits
+  for (const match of s.identification) {
+    if (match.top_hits && match.top_hits.length) return match.top_hits[0];
+  }
+  return null;
 }
 
 function getTopHitName(s) {

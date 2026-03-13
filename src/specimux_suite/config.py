@@ -44,6 +44,9 @@ class PipelineConfig:
     vsearch_max_accepts: int = 10
     vsearch_threads: int = 1
 
+    # Job timeout (seconds) — kill subprocess if it exceeds this
+    job_timeout: float = 3600.0  # 1 hour default
+
     # Web server
     web_host: str = "0.0.0.0"
     web_port: int = 8077

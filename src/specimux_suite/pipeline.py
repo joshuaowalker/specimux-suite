@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
 from pathlib import Path
 
 from .config import PipelineConfig
@@ -14,6 +14,12 @@ from .runners.speconsense_runner import SpeconsenseRunner
 from .runners.identify_runner import IdentifyRunner
 
 logger = logging.getLogger(__name__)
+
+
+def _check_tool_on_path(name: str) -> bool:
+    """Check if an external tool is available on PATH."""
+    import shutil
+    return shutil.which(name) is not None
 
 
 class Pipeline:
@@ -33,8 +39,20 @@ class Pipeline:
         self._futures: dict[str, Future] = {}
         self._shutdown = threading.Event()
 
+    def validate_tools(self) -> list[str]:
+        """Check that required external tools are on PATH. Returns list of missing tools."""
+        required = ["specimux", "speconsense"]
+        if self.config.reference_db:
+            required.append("vsearch")
+        return [t for t in required if not _check_tool_on_path(t)]
+
     def run_batch(self) -> None:
         """Run the full batch pipeline: specimux → consensus → identification."""
+        missing = self.validate_tools()
+        if missing:
+            logger.error(f"Required tools not found on PATH: {', '.join(missing)}")
+            raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
+
         # Rebuild state from any existing events
         self.state.rebuild(self.event_log)
 
@@ -78,6 +96,11 @@ class Pipeline:
     def run_live(self) -> None:
         """Run the live pipeline with file watching."""
         from .watcher import FileWatcher
+
+        missing = self.validate_tools()
+        if missing:
+            logger.error(f"Required tools not found on PATH: {', '.join(missing)}")
+            raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
         self.state.rebuild(self.event_log)
 
@@ -213,42 +236,73 @@ class Pipeline:
         return None
 
     def _wait_for_any_future(self) -> None:
-        """Wait for at least one future to complete."""
-        from concurrent.futures import as_completed
+        """Wait for at least one future to complete, with timeout."""
+        from concurrent.futures import as_completed, TimeoutError
         if self._futures:
-            done = next(as_completed(self._futures.values()))
-            # Find and remove the completed one
+            timeout = self.config.job_timeout
+            try:
+                done_iter = as_completed(self._futures.values(), timeout=timeout)
+                next(done_iter)
+            except (StopIteration, TimeoutError):
+                pass
+            # Find and remove completed (or timed-out) futures
             for sid, fut in list(self._futures.items()):
                 if fut.done():
                     del self._futures[sid]
                     try:
                         fut.result()
                     except Exception as e:
-                        logger.error(f"Consensus job failed for {sid}: {e}")
+                        logger.error(f"Job failed for {sid}: {e}")
+                        self.event_log.emit("pipeline.error", {
+                            "component": "pipeline",
+                            "specimen_id": sid,
+                            "message": str(e),
+                        })
 
     def _wait_all_futures(self) -> None:
-        """Wait for all pending futures."""
+        """Wait for all pending futures, with timeout."""
+        timeout = self.config.job_timeout
         for sid, fut in list(self._futures.items()):
             try:
-                fut.result()
+                fut.result(timeout=timeout)
+            except TimeoutError:
+                logger.error(f"Job timed out for {sid} after {timeout}s")
+                self.event_log.emit("pipeline.error", {
+                    "component": "pipeline",
+                    "specimen_id": sid,
+                    "message": f"Job timed out after {timeout}s",
+                })
             except Exception as e:
-                logger.error(f"Consensus job failed for {sid}: {e}")
+                logger.error(f"Job failed for {sid}: {e}")
+                self.event_log.emit("pipeline.error", {
+                    "component": "pipeline",
+                    "specimen_id": sid,
+                    "message": str(e),
+                })
         self._futures.clear()
 
     def _check_completed_futures(self) -> None:
         """Check for completed futures and trigger identification."""
         completed = []
+        errored = []
         for sid, fut in list(self._futures.items()):
             if fut.done():
-                completed.append(sid)
                 try:
                     fut.result()
+                    completed.append(sid)
                 except Exception as e:
-                    logger.error(f"Consensus job failed for {sid}: {e}")
+                    logger.error(f"Job failed for {sid}: {e}")
+                    self.event_log.emit("pipeline.error", {
+                        "component": "pipeline",
+                        "specimen_id": sid,
+                        "message": str(e),
+                    })
+                    errored.append(sid)
 
-        for sid in completed:
+        for sid in completed + errored:
             del self._futures[sid]
 
+        for sid in completed:
             # Trigger identification if available
             if self.identify:
                 self.state = PipelineState()
@@ -258,7 +312,7 @@ class Pipeline:
                     self._executor.submit(self.identify.run, sid, consensus_fasta)
 
         # Check for new consensus work
-        if completed:
+        if completed or errored:
             self.state = PipelineState()
             self.state.rebuild(self.event_log)
             self._schedule_consensus()

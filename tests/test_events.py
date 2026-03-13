@@ -85,3 +85,28 @@ def test_event_jsonl_format(tmp_output):
     assert data["type"] == "test.event"
     assert data["data"]["key"] == "value"
     assert "ts" in data
+
+
+def test_log_rotation(tmp_output):
+    """Event log rotates when it exceeds max_bytes."""
+    path = tmp_output / "events.jsonl"
+    # Use a tiny max to force rotation quickly
+    log = EventLog(path, max_bytes=200)
+
+    # Emit enough events to trigger rotation
+    for i in range(20):
+        log.emit("test", {"i": i})
+
+    # Should have created archive file(s)
+    archives = sorted(tmp_output.glob("events.*.jsonl"))
+    assert len(archives) >= 1
+
+    # Replay should yield all events in order
+    events = list(log.replay())
+    assert len(events) == 20
+    assert events[0].version == 1
+    assert events[-1].version == 20
+
+    # Version recovery across rotation
+    log2 = EventLog(path, max_bytes=200)
+    assert log2.version == 20

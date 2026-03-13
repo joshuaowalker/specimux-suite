@@ -100,6 +100,15 @@ class IdentifyRunner:
             })
             return {}
 
+        if result.returncode != 0:
+            logger.error(f"vsearch failed (exit {result.returncode}): {result.stderr}")
+            self.event_log.emit("pipeline.error", {
+                "component": "vsearch",
+                "message": f"vsearch exited with code {result.returncode}",
+                "details": result.stderr[-2000:] if result.stderr else "",
+            })
+            return {}
+
         hits: dict[str, list[dict]] = {}
         for line in result.stdout.splitlines():
             parts = line.strip().split("\t")

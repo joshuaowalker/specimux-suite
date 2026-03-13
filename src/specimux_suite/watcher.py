@@ -70,11 +70,11 @@ class _FastqHandler(FileSystemEventHandler):
         self.on_new_file = on_new_file
 
     def on_created(self, event):
-        if not event.is_directory and fnmatch.fnmatch(event.src_path, self.pattern):
+        if not event.is_directory and fnmatch.fnmatch(Path(event.src_path).name, self.pattern):
             self.on_new_file(Path(event.src_path))
 
     def on_modified(self, event):
-        if not event.is_directory and fnmatch.fnmatch(event.src_path, self.pattern):
+        if not event.is_directory and fnmatch.fnmatch(Path(event.src_path).name, self.pattern):
             self.on_new_file(Path(event.src_path))
 
 
@@ -110,7 +110,7 @@ class FileWatcher:
                 self._handle_file(path)
 
         handler = _FastqHandler(
-            pattern=str(self.watch_dir / self.pattern),
+            pattern=self.pattern,
             on_new_file=self._handle_file,
         )
         self._observer.schedule(handler, str(self.watch_dir), recursive=False)
