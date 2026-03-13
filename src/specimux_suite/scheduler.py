@@ -34,7 +34,7 @@ class Scheduler:
         - Only reprocess if ratio > reprocess_ratio
         """
         if max_jobs is None:
-            max_jobs = self.config.max_concurrent_consensus
+            max_jobs = self.config.workers
 
         jobs = []
 
@@ -82,4 +82,4 @@ class Scheduler:
 
     def available_slots(self) -> int:
         """How many more consensus jobs can we start."""
-        return max(0, self.config.max_concurrent_consensus - self.count_running())
+        return max(0, self.config.workers - self.count_running())

@@ -1,6 +1,7 @@
 """Identification runner: vsearch + adjusted-identity scoring."""
 
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,6 +19,7 @@ class IdentifyRunner:
         self.config = config
         self.event_log = event_log
         self._udb_path: Path | None = None
+        self._name_lookup: dict[str, str] = {}
 
     def ensure_db(self) -> bool:
         """Build UDB from reference FASTA if needed. Returns True on success."""
@@ -34,6 +36,7 @@ class IdentifyRunner:
         udb = ref.with_suffix(".udb")
         if udb.exists():
             self._udb_path = udb
+            self._load_name_lookup()
             return True
 
         # Build UDB
@@ -52,6 +55,22 @@ class IdentifyRunner:
             # Fall back to using FASTA directly
             self._udb_path = ref
             return True
+        finally:
+            self._load_name_lookup()
+
+    def _load_name_lookup(self) -> None:
+        """Scan reference FASTA headers for name="..." fields."""
+        ref = self.config.reference_db
+        if not ref or not ref.exists():
+            return
+        name_re = re.compile(r'name="([^"]+)"')
+        with open(ref) as f:
+            for line in f:
+                if line.startswith(">"):
+                    seq_id = line[1:].strip().split()[0]
+                    m = name_re.search(line)
+                    if m:
+                        self._name_lookup[seq_id] = m.group(1)
 
     def run(self, specimen_id: str, consensus_fasta: Path) -> list[dict]:
         """Identify consensus clusters against reference DB.
@@ -86,7 +105,7 @@ class IdentifyRunner:
             "--userfields", "query+target+id+alnlen+qcov",
             "--id", str(self.config.vsearch_min_identity),
             "--maxaccepts", str(self.config.vsearch_max_accepts),
-            "--threads", str(self.config.vsearch_threads),
+            "--threads", "1",
             "--output_no_hits",
         ]
 
@@ -119,7 +138,7 @@ class IdentifyRunner:
                 continue
             hits.setdefault(query, []).append({
                 "ref_id": target,
-                "name": _extract_species_name(target),
+                "name": self._name_lookup.get(target, _extract_species_name(target)),
                 "identity": float(identity) / 100.0 if float(identity) > 1 else float(identity),
                 "alnlen": int(alnlen),
                 "qcov": float(qcov) / 100.0 if float(qcov) > 1 else float(qcov),

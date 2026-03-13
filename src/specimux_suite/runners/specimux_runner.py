@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..config import PipelineConfig
 from ..events import EventLog
-from ..util import scan_specimen_reads
+from ..util import count_fastq_reads_fast, scan_specimen_reads
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +26,12 @@ class SpecimuxRunner:
         """
         job_id = str(uuid.uuid4())[:8]
         output_dir = self.config.specimux_output_dir
+        input_reads = count_fastq_reads_fast(fastq_path)
 
         self.event_log.emit("specimux.started", {
             "job_id": job_id,
             "file_path": str(fastq_path),
+            "input_reads": input_reads,
         })
 
         cmd = self._build_command(fastq_path, output_dir)
@@ -61,12 +63,15 @@ class SpecimuxRunner:
             # Scan output directory for specimen read counts
             specimens = scan_specimen_reads(output_dir)
             specimen_counts = {sid: info["reads"] for sid, info in specimens.items()}
+            matched_reads = sum(specimen_counts.values())
 
             self.event_log.emit("specimux.completed", {
                 "job_id": job_id,
                 "exit_code": 0,
                 "specimens": specimen_counts,
                 "file_path": str(fastq_path),
+                "input_reads": input_reads,
+                "matched_reads": matched_reads,
             })
 
             # Emit per-specimen updates
@@ -98,6 +103,7 @@ class SpecimuxRunner:
             str(fastq_path),
             "-F",  # output to files
             "-O", str(output_dir),
+            "-t", str(self.config.workers),
         ]
         cmd.extend(self.config.specimux_args)
         return cmd

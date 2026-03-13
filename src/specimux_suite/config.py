@@ -1,5 +1,6 @@
 """Pipeline configuration."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -27,7 +28,7 @@ class PipelineConfig:
     # Scheduler tuning
     min_reads: int = 30
     reprocess_ratio: float = 0.5
-    max_concurrent_consensus: int = 2
+    workers: int = 0  # 0 = auto (total cores / 2)
 
     # Watcher tuning (live mode)
     settle_time: float = 30.0
@@ -42,7 +43,6 @@ class PipelineConfig:
     # vsearch settings
     vsearch_min_identity: float = 0.85
     vsearch_max_accepts: int = 10
-    vsearch_threads: int = 1
 
     # Job timeout (seconds) — kill subprocess if it exceeds this
     job_timeout: float = 3600.0  # 1 hour default
@@ -63,6 +63,8 @@ class PipelineConfig:
             self.reference_db = Path(self.reference_db)
         if self.event_log_path is None:
             self.event_log_path = self.output_dir / "events.jsonl"
+        if self.workers <= 0:
+            self.workers = max(1, os.cpu_count() // 2)
 
     @property
     def specimux_output_dir(self) -> Path:
@@ -87,5 +89,5 @@ class PipelineConfig:
             "reference_db": str(self.reference_db) if self.reference_db else None,
             "min_reads": self.min_reads,
             "reprocess_ratio": self.reprocess_ratio,
-            "max_concurrent_consensus": self.max_concurrent_consensus,
+            "workers": self.workers,
         }

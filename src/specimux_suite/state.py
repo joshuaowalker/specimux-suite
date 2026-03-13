@@ -13,6 +13,7 @@ class SpecimenStatus(str, Enum):
     CONSENSUS_RUNNING = "consensus_running"
     CONSENSUS_DONE = "consensus_done"
     IDENTIFIED = "identified"
+    NO_MATCH = "no_match"
     ERROR = "error"
 
 
@@ -62,6 +63,8 @@ class PipelineState:
         self.version: int = 0
         self.mode: Optional[str] = None
         self.errors: list[dict] = []
+        self.total_input_reads: int = 0
+        self.total_matched_reads: int = 0
 
     def apply(self, event: Event) -> None:
         """Apply a single event to update state (thread-safe)."""
@@ -91,6 +94,8 @@ class PipelineState:
             return {
                 "version": self.version,
                 "mode": self.mode,
+                "total_input_reads": self.total_input_reads,
+                "total_matched_reads": self.total_matched_reads,
                 "specimens": {
                     sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
                 },
@@ -101,6 +106,12 @@ class PipelineState:
 
     def _on_pipeline_started(self, data: dict):
         self.mode = data.get("mode")
+
+    def _on_specimens_loaded(self, data: dict):
+        for s in data.get("specimens", []):
+            spec = self.get_specimen(s["specimen_id"])
+            if s.get("pool"):
+                spec.pool = s["pool"]
 
     def _on_file_detected(self, data: dict):
         path = data["path"]
@@ -126,13 +137,17 @@ class PipelineState:
         file_path = data.get("file_path")
         if file_path and file_path in self.files:
             self.files[file_path].processed = True
+        self.total_input_reads += data.get("input_reads", 0)
+        # Recompute matched reads from specimen totals (scan_specimen_reads
+        # returns cumulative counts, so accumulating would double-count)
+        self.total_matched_reads = sum(s.total_reads for s in self.specimens.values())
 
     def _on_specimen_updated(self, data: dict):
         spec = self.get_specimen(data["specimen_id"])
         if "pool" in data:
             spec.pool = data["pool"]
         spec.total_reads = data.get("total_reads", spec.total_reads)
-        if "consensus_version" in data:
+        if "consensus_version" in data and data["consensus_version"] is not None:
             spec.consensus_version = data["consensus_version"]
 
     def _on_consensus_started(self, data: dict):
@@ -158,7 +173,6 @@ class PipelineState:
 
     def _on_identification_completed(self, data: dict):
         spec = self.get_specimen(data["specimen_id"])
-        spec.status = SpecimenStatus.IDENTIFIED
         matches = []
         for m in data.get("matches", []):
             matches.append(IdentificationMatch(
@@ -166,6 +180,8 @@ class PipelineState:
                 top_hits=m.get("top_hits", []),
             ))
         spec.identification = matches
+        has_hits = any(m.top_hits for m in matches)
+        spec.status = SpecimenStatus.IDENTIFIED if has_hits else SpecimenStatus.NO_MATCH
 
     def _on_pipeline_error(self, data: dict):
         self.errors.append(data)
@@ -177,6 +193,7 @@ class PipelineState:
 
     _handlers = {
         "pipeline.started": _on_pipeline_started,
+        "specimens.loaded": _on_specimens_loaded,
         "file.detected": _on_file_detected,
         "file.stable": _on_file_stable,
         "specimux.started": _on_specimux_started,

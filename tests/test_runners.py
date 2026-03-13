@@ -18,6 +18,31 @@ def _make_config(tmp_path, **kwargs):
     return PipelineConfig(**defaults)
 
 
+def test_parse_specimens_file(tmp_path):
+    """parse_specimens_file should extract SampleID and PrimerPool."""
+    from specimux_suite.util import parse_specimens_file
+
+    index = tmp_path / "Index.txt"
+    index.write_text(
+        "SampleID\tPrimerPool\tFwIndex\tFwPrimer\tRvIndex\tRvPrimer\n"
+        "ONT01.01-A01--iNat233404001\tITS\tAGC\tITS1F\tAAC\tITS4\n"
+        "ONT01.02-B01--iNat233404080\tITS\tAGC\tITS1F\tACT\tITS4\n"
+    )
+
+    specimens = parse_specimens_file(index)
+    assert len(specimens) == 2
+    assert specimens[0]["specimen_id"] == "ONT01.01-A01--iNat233404001"
+    assert specimens[0]["pool"] == "ITS"
+    assert specimens[1]["specimen_id"] == "ONT01.02-B01--iNat233404080"
+
+
+def test_workers_default_auto(tmp_path):
+    """workers=0 should auto-resolve to cpu_count // 2."""
+    import os
+    config = _make_config(tmp_path, workers=0)
+    assert config.workers == max(1, os.cpu_count() // 2)
+
+
 def test_specimux_command_construction(tmp_path):
     config = _make_config(tmp_path)
     log = EventLog(tmp_path / "events.jsonl")
@@ -93,6 +118,42 @@ def test_cluster_header_parsing():
     assert m.group(2) == "10"
     assert m.group(3) is None  # no ric
     assert m.group(4) is None  # no rid
+
+
+def test_specimux_thread_flag(tmp_path):
+    """specimux command should include -t with workers count."""
+    config = _make_config(tmp_path, workers=4)
+    log = EventLog(tmp_path / "events.jsonl")
+    runner = SpecimuxRunner(config, log)
+
+    cmd = runner._build_command(
+        Path("/data/reads.fastq"),
+        config.specimux_output_dir,
+    )
+
+    idx = cmd.index("-t")
+    assert cmd[idx + 1] == "4"
+
+
+def test_name_lookup_from_fasta(tmp_path):
+    """IdentifyRunner should parse name= fields from reference FASTA."""
+    from specimux_suite.runners.identify_runner import IdentifyRunner
+
+    ref = tmp_path / "refs.fasta"
+    ref.write_text(
+        '>iNaturalist_28125417_Coprinellus_sp size=1 name="Coprinellus sp. \'radians IN02\'"\n'
+        "ACGTACGT\n"
+        ">iNaturalist_99999_Russula_emetica size=1\n"
+        "TGCATGCA\n"
+    )
+
+    config = _make_config(tmp_path, reference_db=ref)
+    log = EventLog(tmp_path / "events.jsonl")
+    runner = IdentifyRunner(config, log)
+    runner._load_name_lookup()
+
+    assert runner._name_lookup["iNaturalist_28125417_Coprinellus_sp"] == "Coprinellus sp. 'radians IN02'"
+    assert "iNaturalist_99999_Russula_emetica" not in runner._name_lookup
 
 
 def test_parse_clusters_from_fasta(tmp_path):

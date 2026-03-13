@@ -12,7 +12,7 @@ def _make_config(tmp_path, **kwargs):
         specimens_file=tmp_path / "specimens.tsv",
         min_reads=30,
         reprocess_ratio=0.5,
-        max_concurrent_consensus=2,
+        workers=2,
     )
     defaults.update(kwargs)
     return PipelineConfig(**defaults)
@@ -85,7 +85,7 @@ def test_skip_running(tmp_path):
 
 
 def test_available_slots(tmp_path):
-    config = _make_config(tmp_path, max_concurrent_consensus=2)
+    config = _make_config(tmp_path, workers=2)
     log = EventLog(tmp_path / "events.jsonl")
 
     log.emit("specimen.updated", {"specimen_id": "A", "pool": "p1", "total_reads": 100})

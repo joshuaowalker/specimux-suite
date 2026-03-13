@@ -43,6 +43,38 @@ def test_batch_pipeline_emits_started_event(tmp_path):
     assert started.data["mode"] == "batch"
 
 
+def test_submit_consensus_skips_inflight(tmp_path):
+    """_submit_consensus should not resubmit a specimen already in _futures."""
+    config = _make_config(tmp_path)
+    (tmp_path / "reads.fastq").write_text("@r1\nACGT\n+\nIIII\n")
+
+    with patch("specimux_suite.pipeline.SpecimuxRunner"), \
+         patch("specimux_suite.pipeline.SpeconsenseRunner"), \
+         patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+
+        # Set up a specimen in state
+        pipeline.state.get_specimen("A").pool = "p1"
+        pipeline.state.get_specimen("A").total_reads = 100
+
+        # Create a dummy fastq so _find_specimen_fastq works
+        full_dir = config.specimux_output_dir / "full" / "p1"
+        full_dir.mkdir(parents=True)
+        (full_dir / "A.fastq").write_text("@r1\nACGT\n+\nIIII\n")
+
+        # First submit should work
+        pipeline._submit_consensus("A")
+        assert "A" in pipeline._futures
+        first_future = pipeline._futures["A"]
+
+        # Second submit should be a no-op (same future retained)
+        pipeline._submit_consensus("A")
+        assert pipeline._futures["A"] is first_future
+
+        pipeline._executor.shutdown(wait=False)
+
+
 def test_validate_tools_reports_missing(tmp_path):
     """validate_tools should report tools not on PATH."""
     config = _make_config(tmp_path)

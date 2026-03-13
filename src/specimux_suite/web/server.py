@@ -1,11 +1,12 @@
 """FastAPI server with SSE for live dashboard updates."""
 
+import asyncio
 import json
 import logging
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from sse_starlette.sse import EventSourceResponse
@@ -21,13 +22,15 @@ app = FastAPI(title="specimux-suite")
 # These get set by start_web_server
 _event_log: EventLog = None
 _state: PipelineState = None
+_config: PipelineConfig = None
 
 
-def create_app(event_log: EventLog, state: PipelineState) -> FastAPI:
+def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig = None) -> FastAPI:
     """Create the FastAPI app with references to shared state."""
-    global _event_log, _state
+    global _event_log, _state, _config
     _event_log = event_log
     _state = state
+    _config = config
 
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
@@ -54,7 +57,10 @@ async def get_state():
     # Rebuild from events for freshness
     fresh = PipelineState()
     fresh.rebuild(_event_log)
-    return fresh.to_dict()
+    result = fresh.to_dict()
+    if _config:
+        result["config_summary"] = _config.summary()
+    return result
 
 
 @app.get("/api/specimens")
@@ -68,12 +74,20 @@ async def get_specimens():
 
 
 @app.get("/events")
-async def event_stream(after_version: int = 0):
+async def event_stream(request: Request, after_version: int = 0):
     """SSE endpoint — streams events as they arrive."""
     async def generate():
         version = after_version
+        loop = asyncio.get_event_loop()
         while True:
-            for event in _event_log.tail(after_version=version, timeout=30.0):
+            if await request.is_disconnected():
+                return
+            # Run the blocking tail() in a thread to avoid blocking the event loop
+            events = await loop.run_in_executor(
+                None,
+                lambda: list(_event_log.tail(after_version=version, timeout=5.0))
+            )
+            for event in events:
                 version = event.version
                 yield {
                     "event": event.type,
@@ -88,7 +102,7 @@ def start_web_server(event_log: EventLog, state: PipelineState, config: Pipeline
     """Start the web server in a background thread."""
     import uvicorn
 
-    app_instance = create_app(event_log, state)
+    app_instance = create_app(event_log, state, config)
 
     def run():
         uvicorn.run(

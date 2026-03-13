@@ -53,7 +53,7 @@ def main():
         reference_db=args.reference_db,
         min_reads=args.min_reads,
         reprocess_ratio=args.reprocess_ratio,
-        max_concurrent_consensus=args.max_concurrent,
+        workers=args.workers,
         specimux_args=args.specimux_args if args.specimux_args else [],
         speconsense_args=args.speconsense_args if args.speconsense_args else [],
         web_host=args.web_host,
@@ -72,6 +72,10 @@ def main():
         if not args.no_web:
             from .web.server import start_web_server
             start_web_server(pipeline.event_log, pipeline.state, config)
+            if not args.no_open:
+                import webbrowser
+                url = f"http://localhost:{config.web_port}"
+                webbrowser.open(url)
         pipeline.run_live()
 
 
@@ -85,8 +89,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Minimum reads before consensus (default: 30)")
     parser.add_argument("--reprocess-ratio", type=float, default=0.5,
                         help="New/old reads ratio to trigger reprocessing (default: 0.5)")
-    parser.add_argument("--max-concurrent", type=int, default=2,
-                        help="Max concurrent consensus jobs (default: 2)")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Total processing cores — specimux uses all, consensus uses 1 each (default: half of CPU cores)")
     parser.add_argument("--specimux-args", nargs=argparse.REMAINDER, default=[],
                         help="Extra arguments passed through to specimux")
     parser.add_argument("--speconsense-args", nargs=argparse.REMAINDER, default=[],
@@ -97,6 +101,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Web server port (default: 8077)")
     parser.add_argument("--no-web", action="store_true",
                         help="Disable the web dashboard")
+    parser.add_argument("--no-open", action="store_true",
+                        help="Don't auto-open the dashboard in a browser")
 
 
 def simulate_main():

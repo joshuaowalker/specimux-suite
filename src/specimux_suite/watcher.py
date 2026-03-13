@@ -19,9 +19,13 @@ logger = logging.getLogger(__name__)
 class FileStabilityChecker:
     """Wait for a file to stop growing before processing."""
 
-    def __init__(self, settle_time: float = 30.0, check_interval: float = 5.0):
+    def __init__(self, settle_time: float = 30.0, check_interval: float = None):
         self.settle_time = settle_time
-        self.check_interval = check_interval
+        # Default check interval: 1/3 of settle time, clamped to [1, 10] seconds
+        if check_interval is None:
+            self.check_interval = max(1.0, min(10.0, settle_time / 3))
+        else:
+            self.check_interval = check_interval
 
     def wait_for_stable(self, path: Path) -> bool:
         """Block until file size is stable. Returns True if stable, False if disappeared."""
@@ -97,7 +101,10 @@ class FileWatcher:
 
         self._checker = FileStabilityChecker(settle_time=settle_time)
         self._tracker = ProcessedFilesTracker()
+        self._pending: set[str] = set()  # files currently in stability check
+        self._pending_lock = threading.Lock()
         self._observer = Observer()
+        self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
@@ -105,9 +112,7 @@ class FileWatcher:
         self.watch_dir.mkdir(parents=True, exist_ok=True)
 
         # Process any existing files first
-        for path in sorted(self.watch_dir.glob(self.pattern)):
-            if not self._tracker.is_processed(path):
-                self._handle_file(path)
+        self._scan_existing()
 
         handler = _FastqHandler(
             pattern=self.pattern,
@@ -116,8 +121,28 @@ class FileWatcher:
         self._observer.schedule(handler, str(self.watch_dir), recursive=False)
         self._observer.start()
 
+        # Start a polling thread as fallback for platforms where FSEvents
+        # may coalesce or delay notifications (e.g. macOS)
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
+
+    def _scan_existing(self) -> None:
+        """Scan for existing files matching the pattern."""
+        for path in sorted(self.watch_dir.glob(self.pattern)):
+            if not self._tracker.is_processed(path):
+                self._handle_file(path)
+
+    def _poll_loop(self) -> None:
+        """Periodic scan to catch files that watchdog may miss."""
+        while not self._stop_event.is_set():
+            self._stop_event.wait(timeout=self._checker.check_interval)
+            if self._stop_event.is_set():
+                break
+            self._scan_existing()
+
     def stop(self) -> None:
         """Stop watching."""
+        self._stop_event.set()
         self._observer.stop()
         self._observer.join()
         for t in self._threads:
@@ -125,12 +150,21 @@ class FileWatcher:
 
     def _handle_file(self, path: Path) -> None:
         """Handle a detected file — check stability in a separate thread."""
+        path_str = str(path)
         if self._tracker.is_processed(path):
             return
 
+        with self._pending_lock:
+            if path_str in self._pending:
+                return  # already being checked
+            self._pending.add(path_str)
+
+        size = path.stat().st_size if path.exists() else 0
+        logger.info(f"Detected new file: {path.name} ({size} bytes)")
+
         self.event_log.emit("file.detected", {
-            "path": str(path),
-            "size_bytes": path.stat().st_size if path.exists() else 0,
+            "path": path_str,
+            "size_bytes": size,
         })
 
         t = threading.Thread(
@@ -152,9 +186,12 @@ class FileWatcher:
 
         self._tracker.mark_processed(path)
 
+        size = path.stat().st_size
+        logger.info(f"File stable: {path.name} ({size} bytes), processing")
+
         self.event_log.emit("file.stable", {
             "path": str(path),
-            "size_bytes": path.stat().st_size,
+            "size_bytes": size,
         })
 
         try:

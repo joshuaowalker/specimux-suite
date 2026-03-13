@@ -53,6 +53,33 @@ def scan_specimen_reads(specimux_output_dir: Path) -> dict[str, dict]:
     return results
 
 
+def parse_specimens_file(path: Path) -> list[dict]:
+    """Parse a specimens TSV file (specimux index format).
+
+    Returns list of {"specimen_id": str, "pool": str} dicts.
+    Expects a header row with at least SampleID and PrimerPool columns.
+    """
+    specimens = []
+    if not path.exists():
+        return specimens
+    with open(path) as f:
+        header = f.readline().strip().split("\t")
+        try:
+            id_col = header.index("SampleID")
+            pool_col = header.index("PrimerPool")
+        except ValueError:
+            # Fallback: assume first two columns
+            id_col, pool_col = 0, 1
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) > max(id_col, pool_col):
+                specimens.append({
+                    "specimen_id": parts[id_col],
+                    "pool": parts[pool_col],
+                })
+    return specimens
+
+
 def atomic_write(path: Path, content: bytes) -> None:
     """Write content atomically via temp file + rename."""
     tmp = path.with_suffix(path.suffix + ".tmp")

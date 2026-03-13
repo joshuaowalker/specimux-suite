@@ -81,6 +81,75 @@ def test_error_state(tmp_output):
     assert len(state.errors) == 1
 
 
+def test_specimens_loaded(tmp_output):
+    """specimens.loaded should pre-populate specimens with 0 reads."""
+    log = EventLog(tmp_output / "events.jsonl")
+
+    log.emit("specimens.loaded", {
+        "specimens": [
+            {"specimen_id": "A", "pool": "ITS"},
+            {"specimen_id": "B", "pool": "ITS"},
+        ],
+    })
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    assert len(state.specimens) == 2
+    assert state.specimens["A"].pool == "ITS"
+    assert state.specimens["A"].total_reads == 0
+    assert state.specimens["A"].status == SpecimenStatus.WAITING
+    assert state.specimens["B"].pool == "ITS"
+
+
+def test_read_totals(tmp_output):
+    """specimux.completed events should accumulate input/matched read totals."""
+    log = EventLog(tmp_output / "events.jsonl")
+
+    log.emit("specimux.completed", {
+        "job_id": "a", "exit_code": 0,
+        "specimens": {"s1": 100, "s2": 50},
+        "input_reads": 500, "matched_reads": 150,
+    })
+    log.emit("specimux.completed", {
+        "job_id": "b", "exit_code": 0,
+        "specimens": {"s1": 200, "s2": 80},
+        "input_reads": 600, "matched_reads": 280,
+    })
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    assert state.total_input_reads == 1100
+    # matched_reads is recomputed from specimen totals (not accumulated)
+    # After second event: s1=200, s2=80 → total=280
+    assert state.total_matched_reads == 280
+    d = state.to_dict()
+    assert d["total_input_reads"] == 1100
+    assert d["total_matched_reads"] == 280
+
+
+def test_no_match_status(tmp_output):
+    """identification.completed with no hits should set NO_MATCH status."""
+    log = EventLog(tmp_output / "events.jsonl")
+
+    log.emit("specimen.updated", {"specimen_id": "s1", "pool": "p1", "total_reads": 100})
+    log.emit("consensus.started", {"specimen_id": "s1", "job_id": "j1", "read_count": 100})
+    log.emit("consensus.completed", {
+        "specimen_id": "s1", "job_id": "j1",
+        "clusters": [{"name": "s1-c0", "size": 80}],
+    })
+    log.emit("identification.completed", {
+        "specimen_id": "s1",
+        "matches": [{"cluster": "s1-c0", "top_hits": []}],
+    })
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    assert state.specimens["s1"].status == SpecimenStatus.NO_MATCH
+
+
 def test_to_dict(tmp_output):
     log = EventLog(tmp_output / "events.jsonl")
     log.emit("pipeline.started", {"mode": "batch"})

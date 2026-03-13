@@ -9,6 +9,7 @@ from .config import PipelineConfig
 from .events import EventLog
 from .state import PipelineState
 from .scheduler import Scheduler
+from .util import parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
 from .runners.speconsense_runner import SpeconsenseRunner
 from .runners.identify_runner import IdentifyRunner
@@ -35,9 +36,25 @@ class Pipeline:
         self.speconsense = SpeconsenseRunner(config, self.event_log)
         self.identify = IdentifyRunner(config, self.event_log) if config.reference_db else None
 
-        self._executor = ThreadPoolExecutor(max_workers=config.max_concurrent_consensus)
+        self._executor = ThreadPoolExecutor(max_workers=config.workers)
         self._futures: dict[str, Future] = {}
         self._shutdown = threading.Event()
+        self._draining = False  # True while waiting for specimux to run
+
+    def _rebuild_state(self) -> None:
+        """Rebuild state from event log and update scheduler reference."""
+        self.state = PipelineState()
+        self.state.rebuild(self.event_log)
+        self.scheduler.state = self.state
+
+    def _load_specimens(self) -> None:
+        """Parse the specimens file and emit specimens.loaded event."""
+        specimens = parse_specimens_file(self.config.specimens_file)
+        if specimens:
+            self.event_log.emit("specimens.loaded", {
+                "specimens": specimens,
+            })
+            logger.info(f"Loaded {len(specimens)} specimens from index file")
 
     def validate_tools(self) -> list[str]:
         """Check that required external tools are on PATH. Returns list of missing tools."""
@@ -54,12 +71,13 @@ class Pipeline:
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
         # Rebuild state from any existing events
-        self.state.rebuild(self.event_log)
+        self._rebuild_state()
 
         self.event_log.emit("pipeline.started", {
             "mode": "batch",
             "config_summary": self.config.summary(),
         })
+        self._load_specimens()
 
         # Ensure output dirs exist
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -79,8 +97,7 @@ class Pipeline:
             return
 
         # Rebuild state after specimux events
-        self.state = PipelineState()
-        self.state.rebuild(self.event_log)
+        self._rebuild_state()
 
         # Step 2: Schedule and run consensus jobs
         logger.info(f"Found {len(specimens)} specimens, scheduling consensus")
@@ -102,12 +119,13 @@ class Pipeline:
             logger.error(f"Required tools not found on PATH: {', '.join(missing)}")
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
-        self.state.rebuild(self.event_log)
+        self._rebuild_state()
 
         self.event_log.emit("pipeline.started", {
             "mode": "live",
             "config_summary": self.config.summary(),
         })
+        self._load_specimens()
 
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self.config.specimux_output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,13 +160,36 @@ class Pipeline:
         self._shutdown.set()
 
     def _on_file_stable(self, file_path: Path) -> None:
-        """Called by watcher when a new stable FASTQ is detected."""
+        """Called by watcher when a new stable FASTQ is detected.
+
+        Drains all in-flight jobs, runs specimux with all cores, then resumes scheduling.
+        """
         logger.info(f"Processing new file: {file_path}")
+
+        # 1. Stop scheduling new consensus jobs
+        self._draining = True
+
+        # 2. Wait for all in-flight futures to complete
+        drained_sids = []
+        if self._futures:
+            logger.info(f"Draining {len(self._futures)} in-flight jobs before specimux")
+            drained_sids = self._wait_all_futures()
+
+        # 3. Run specimux with all cores
         specimens = self.specimux.run(file_path)
 
-        # Rebuild state and check for work
-        self.state = PipelineState()
-        self.state.rebuild(self.event_log)
+        # 4. Resume scheduling
+        self._draining = False
+        self._rebuild_state()
+
+        # 5. Trigger identification for consensus jobs that completed during drain
+        if self.identify and drained_sids:
+            for sid in drained_sids:
+                consensus_fasta = self.speconsense.get_consensus_fasta(sid)
+                if consensus_fasta:
+                    logger.info(f"Identifying {sid} (deferred from drain)")
+                    self._executor.submit(self.identify.run, sid, consensus_fasta)
+
         self._schedule_consensus()
 
     def _run_consensus_round(self) -> None:
@@ -167,9 +208,7 @@ class Pipeline:
             if slots <= 0:
                 # Wait for a future to complete
                 self._wait_for_any_future()
-                # Rebuild state
-                self.state = PipelineState()
-                self.state.rebuild(self.event_log)
+                self._rebuild_state()
                 continue
 
             batch = pending[:slots]
@@ -183,21 +222,33 @@ class Pipeline:
 
     def _schedule_consensus(self) -> None:
         """Check scheduler and submit consensus jobs for available slots."""
-        slots = self.scheduler.available_slots()
+        if self._draining:
+            return
+        # Use _futures as ground truth for in-flight work, since state may lag
+        # behind actual submissions (consensus.started not yet emitted)
+        slots = self.config.workers - len(self._futures)
         if slots <= 0:
             return
         jobs = self.scheduler.get_ready_jobs(max_jobs=slots)
+        logger.info(f"Scheduler: {len(jobs)} specimens ready for consensus ({slots} slots available)")
         for job in jobs:
             self._submit_consensus(job.specimen_id)
 
     def _submit_consensus(self, specimen_id: str) -> None:
         """Submit a consensus job to the thread pool."""
+        # Guard: don't submit if already in-flight (race between submit and
+        # consensus.started event being written to the log)
+        if specimen_id in self._futures:
+            logger.debug(f"Skipping {specimen_id}: already in-flight")
+            return
+
         spec = self.state.get_specimen(specimen_id)
         specimen_fastq = self._find_specimen_fastq(specimen_id, spec.pool)
         if not specimen_fastq:
             logger.warning(f"No FASTQ found for specimen {specimen_id}")
             return
 
+        logger.info(f"Submitting consensus job for {specimen_id} ({spec.total_reads} reads)")
         future = self._executor.submit(self._run_consensus_job, specimen_id, specimen_fastq)
         self._futures[specimen_id] = future
 
@@ -207,8 +258,7 @@ class Pipeline:
 
     def _run_identification(self) -> None:
         """Run identification on all specimens with completed consensus."""
-        self.state = PipelineState()
-        self.state.rebuild(self.event_log)
+        self._rebuild_state()
 
         for sid, spec in self.state.specimens.items():
             if spec.clusters and not spec.identification:
@@ -259,12 +309,17 @@ class Pipeline:
                             "message": str(e),
                         })
 
-    def _wait_all_futures(self) -> None:
-        """Wait for all pending futures, with timeout."""
+    def _wait_all_futures(self) -> list[str]:
+        """Wait for all pending futures, with timeout.
+
+        Returns list of specimen IDs whose consensus completed successfully.
+        """
+        completed = []
         timeout = self.config.job_timeout
         for sid, fut in list(self._futures.items()):
             try:
                 fut.result(timeout=timeout)
+                completed.append(sid)
             except TimeoutError:
                 logger.error(f"Job timed out for {sid} after {timeout}s")
                 self.event_log.emit("pipeline.error", {
@@ -280,6 +335,7 @@ class Pipeline:
                     "message": str(e),
                 })
         self._futures.clear()
+        return completed
 
     def _check_completed_futures(self) -> None:
         """Check for completed futures and trigger identification."""
@@ -305,14 +361,12 @@ class Pipeline:
         for sid in completed:
             # Trigger identification if available
             if self.identify:
-                self.state = PipelineState()
-                self.state.rebuild(self.event_log)
+                self._rebuild_state()
                 consensus_fasta = self.speconsense.get_consensus_fasta(sid)
                 if consensus_fasta:
                     self._executor.submit(self.identify.run, sid, consensus_fasta)
 
         # Check for new consensus work
         if completed or errored:
-            self.state = PipelineState()
-            self.state.rebuild(self.event_log)
+            self._rebuild_state()
             self._schedule_consensus()

@@ -13,9 +13,12 @@
   --text-dim: #8888aa;
   --accent: #0f3460;
   --waiting: #555;
+  --queued: #1a6b7a;
   --processing: #c4a000;
+  --updating: #7a6a1a;
   --done: #4e9a06;
   --identified: #2e7d32;
+  --no-match: #8b6914;
   --error: #cc0000;
 }
 
@@ -69,14 +72,19 @@ header h1 { font-size: 1.25rem; font-weight: 600; }
   font-size: 0.9rem;
 }
 
-.stats {
+.stats-group {
   display: flex;
-  gap: 1.5rem;
+  gap: 1rem;
   font-size: 0.85rem;
   color: var(--text-dim);
 }
-
-.stats span { font-weight: 600; color: var(--text); }
+.stats-group span { font-weight: 600; color: var(--text); }
+.stats-sep {
+  width: 1px;
+  background: var(--border);
+  align-self: stretch;
+  margin: 0 0.25rem;
+}
 
 .table-wrap {
   padding: 0 1rem;
@@ -118,9 +126,12 @@ tr:hover { background: rgba(255,255,255,0.03); }
   text-transform: uppercase;
 }
 .status-waiting { background: var(--waiting); }
+.status-queued { background: var(--queued); color: #fff; }
 .status-consensus_running { background: var(--processing); color: #000; }
+.status-updating { background: var(--updating); color: #fff; }
 .status-consensus_done { background: var(--done); color: #fff; }
 .status-identified { background: var(--identified); color: #fff; }
+.status-no_match { background: var(--no-match); color: #fff; }
 .status-error { background: var(--error); color: #fff; }
 
 .identity-bar {
@@ -134,6 +145,41 @@ tr:hover { background: rgba(255,255,255,0.03); }
 .top-hit { white-space: nowrap; }
 .hit-name { font-style: italic; }
 .hit-pct { color: var(--text-dim); margin-left: 0.25rem; }
+
+.inat-link {
+  font-size: 0.7rem;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  background: #3a6b35;
+  color: #cde6c8;
+  text-decoration: none;
+  vertical-align: middle;
+}
+.inat-link:hover { background: #4e9a06; color: #fff; }
+
+.cluster-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.cluster-badge:hover { opacity: 0.85; }
+.badge-variants {
+  background: var(--accent);
+  color: var(--text-dim);
+}
+.badge-organisms {
+  background: #6b3a7a;
+  color: #ddc8e6;
+}
+
+.cluster-detail { background: rgba(255,255,255,0.02); }
+.cluster-detail td { padding: 0.3rem 0.75rem 0.3rem 2rem; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8rem; }
+.cluster-detail .hit-name { color: var(--text-dim); }
+.alt-hit { color: var(--text-dim); font-size: 0.75rem; }
 
 @media (max-width: 768px) {
   header { padding: 0.75rem 1rem; }
@@ -153,11 +199,18 @@ tr:hover { background: rgba(255,255,255,0.03); }
 
 <div class="controls">
   <input type="text" id="search" placeholder="Search specimens...">
-  <div class="stats">
-    Total: <span id="stat-total">0</span>
-    &nbsp;Identified: <span id="stat-identified">0</span>
-    &nbsp;Processing: <span id="stat-processing">0</span>
-    &nbsp;Waiting: <span id="stat-waiting">0</span>
+  <div class="stats-group">
+    Reads: <span id="stat-reads">0</span>
+    &nbsp;Matched: <span id="stat-matched">0</span>
+    &nbsp;Specimens: <span id="stat-total">0</span>
+    <div class="stats-sep"></div>
+    Identified: <span id="stat-identified">0</span>
+    &nbsp;No match: <span id="stat-nomatch">0</span>
+    &nbsp;Low reads: <span id="stat-lowreads">0</span>
+    <div class="stats-sep"></div>
+    Processing: <span id="stat-processing">0</span>
+    &nbsp;Queued: <span id="stat-queued-new">0</span>
+    &nbsp;Reprocess: <span id="stat-queued-reprocess">0</span>
   </div>
 </div>
 
@@ -179,10 +232,13 @@ tr:hover { background: rgba(255,255,255,0.03); }
 </div>
 
 <script>
-const state = { specimens: {}, version: 0 };
+const state = { specimens: {}, version: 0, totalInputReads: 0 };
 let sortKey = 'specimen_id';
 let sortAsc = true;
 let searchTerm = '';
+let minReads = 30;
+let reprocessRatio = 0.5;
+const expandedSpecimens = new Set();
 
 // SSE connection
 function connect() {
@@ -210,7 +266,7 @@ function connect() {
 
   // Listen for specific event types too
   for (const type of [
-    'specimux.completed', 'specimen.updated',
+    'pipeline.started', 'specimens.loaded', 'specimux.completed', 'specimen.updated',
     'consensus.started', 'consensus.completed',
     'identification.completed', 'pipeline.error'
   ]) {
@@ -226,14 +282,29 @@ function connect() {
 function applyEvent(event) {
   const d = event.data;
   switch (event.type) {
-    case 'specimux.completed':
-      for (const [name, reads] of Object.entries(d.specimens || {})) {
-        if (!state.specimens[name]) state.specimens[name] = { specimen_id: name, total_reads: 0, status: 'waiting', clusters: [], identification: [] };
-        state.specimens[name].total_reads = reads;
+    case 'pipeline.started':
+      if (d.config_summary) {
+        if (d.config_summary.min_reads) minReads = d.config_summary.min_reads;
+        if (d.config_summary.reprocess_ratio != null) reprocessRatio = d.config_summary.reprocess_ratio;
       }
       break;
+    case 'specimens.loaded':
+      for (const s of (d.specimens || [])) {
+        if (!state.specimens[s.specimen_id]) {
+          state.specimens[s.specimen_id] = { specimen_id: s.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
+        }
+        if (s.pool) state.specimens[s.specimen_id].pool = s.pool;
+      }
+      break;
+    case 'specimux.completed':
+      for (const [name, reads] of Object.entries(d.specimens || {})) {
+        if (!state.specimens[name]) state.specimens[name] = { specimen_id: name, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
+        state.specimens[name].total_reads = reads;
+      }
+      state.totalInputReads += d.input_reads || 0;
+      break;
     case 'specimen.updated':
-      if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [] };
+      if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
       Object.assign(state.specimens[d.specimen_id], { pool: d.pool, total_reads: d.total_reads });
       break;
     case 'consensus.started':
@@ -241,14 +312,19 @@ function applyEvent(event) {
       break;
     case 'consensus.completed':
       if (state.specimens[d.specimen_id]) {
-        state.specimens[d.specimen_id].status = 'consensus_done';
-        state.specimens[d.specimen_id].clusters = d.clusters || [];
+        const sc = state.specimens[d.specimen_id];
+        sc.status = 'consensus_done';
+        sc.clusters = d.clusters || [];
+        sc.consensus_version = (sc.consensus_version || 0) + 1;
+        sc.reads_at_last_consensus = sc.total_reads;
       }
       break;
     case 'identification.completed':
       if (state.specimens[d.specimen_id]) {
-        state.specimens[d.specimen_id].status = 'identified';
-        state.specimens[d.specimen_id].identification = d.matches || [];
+        const matches = d.matches || [];
+        const hasHits = matches.some(m => m.top_hits && m.top_hits.length > 0);
+        state.specimens[d.specimen_id].status = hasHits ? 'identified' : 'no_match';
+        state.specimens[d.specimen_id].identification = matches;
       }
       break;
     case 'pipeline.error':
@@ -257,6 +333,52 @@ function applyEvent(event) {
       }
       break;
   }
+}
+
+// Has this specimen ever been identified (has hits in identification array)?
+function hasIdentification(s) {
+  return (s.identification || []).some(m => m.top_hits && m.top_hits.length > 0);
+}
+
+// ID result category: independent of current pipeline activity
+function getIdResult(s) {
+  if (hasIdentification(s)) return 'identified';
+  if (s.status === 'no_match') return 'no_match';
+  return 'pending';
+}
+
+// Display status for the status pill in the table
+function getDisplayStatus(s) {
+  if (s.status === 'consensus_running') {
+    return hasIdentification(s) ? 'updating' : 'consensus_running';
+  }
+  if (s.status === 'waiting') {
+    return s.total_reads >= minReads ? 'queued' : 'waiting';
+  }
+  return s.status;
+}
+
+function inatLink(specimen_id) {
+  const m = specimen_id.match(/iNat(\d+)/);
+  if (!m) return '';
+  return ` <a class="inat-link" href="https://www.inaturalist.org/observations/${m[1]}" target="_blank" title="iNaturalist observation">iNat</a>`;
+}
+
+function buildClusterBadge(s) {
+  const matches = (s.identification || []).filter(m => m.top_hits && m.top_hits.length);
+  if (matches.length <= 1) return '';
+  const topName = getTopHitName(s);
+  let variants = 0;
+  let organisms = 0;
+  for (const m of matches) {
+    const name = m.top_hits[0].name || m.top_hits[0].ref_id || '';
+    if (name === topName) variants++;
+    else organisms++;
+  }
+  const parts = [];
+  if (variants > 1) parts.push(`<span class="cluster-badge badge-variants" data-sid="${esc(s.specimen_id)}">${variants} seqs</span>`);
+  if (organisms > 0) parts.push(`<span class="cluster-badge badge-organisms" data-sid="${esc(s.specimen_id)}">+${organisms} other${organisms > 1 ? 's' : ''}</span>`);
+  return parts.join('');
 }
 
 function render() {
@@ -281,41 +403,120 @@ function render() {
     return 0;
   });
 
-  // Stats
+  // Stats — two orthogonal groups
   const all = Object.values(state.specimens);
+  const totalMatchedReads = all.reduce((sum, s) => sum + (s.total_reads || 0), 0);
+  const matchPct = state.totalInputReads > 0 ? ((totalMatchedReads / state.totalInputReads) * 100).toFixed(1) + '%' : '';
+  document.getElementById('stat-reads').textContent = state.totalInputReads.toLocaleString();
+  document.getElementById('stat-matched').textContent = totalMatchedReads.toLocaleString() + (matchPct ? ` (${matchPct})` : '');
   document.getElementById('stat-total').textContent = all.length;
-  document.getElementById('stat-identified').textContent = all.filter(s => s.status === 'identified').length;
+
+  // ID results: identified / no match / low reads (not enough data to process)
+  document.getElementById('stat-identified').textContent = all.filter(s => getIdResult(s) === 'identified').length;
+  document.getElementById('stat-nomatch').textContent = all.filter(s => getIdResult(s) === 'no_match').length;
+  document.getElementById('stat-lowreads').textContent = all.filter(s => s.total_reads < minReads).length;
+
+  // Pipeline activity: processing / queued (new) / queued (reprocess)
   document.getElementById('stat-processing').textContent = all.filter(s => s.status === 'consensus_running').length;
-  document.getElementById('stat-waiting').textContent = all.filter(s => s.status === 'waiting').length;
+  document.getElementById('stat-queued-new').textContent = all.filter(s =>
+    (s.consensus_version || 0) === 0 && s.total_reads >= minReads && s.status !== 'consensus_running'
+  ).length;
+  document.getElementById('stat-queued-reprocess').textContent = all.filter(s => {
+    if ((s.consensus_version || 0) === 0) return false;
+    if (s.status === 'consensus_running') return false;
+    const newReads = s.total_reads - (s.reads_at_last_consensus || 0);
+    const base = s.reads_at_last_consensus || 0;
+    const ratio = base > 0 ? newReads / base : (newReads > 0 ? Infinity : 0);
+    return ratio > reprocessRatio;
+  }).length;
 
   // Table
   const tbody = document.getElementById('specimen-table');
-  tbody.innerHTML = specs.map(s => {
+  const rows = [];
+  for (const s of specs) {
     const topHit = getTopHit(s);
     const identity = topHit ? (topHit.adjusted_identity || topHit.identity || 0) : 0;
     const pct = (identity * 100).toFixed(1);
     const barWidth = Math.max(0, Math.min(100, identity * 100));
     const barColor = identity >= 0.97 ? 'var(--identified)' : identity >= 0.90 ? 'var(--done)' : 'var(--processing)';
+    const displayStatus = getDisplayStatus(s);
+    const statusLabels = { queued: 'queued', no_match: 'no match', consensus_running: 'processing', consensus_done: 'consensus done', updating: 'updating' };
+    const statusLabel = statusLabels[displayStatus] || displayStatus.replace('_', ' ');
+    const clusterBadge = buildClusterBadge(s);
+    const isExpanded = expandedSpecimens.has(s.specimen_id);
 
-    return `<tr>
-      <td><strong>${esc(s.specimen_id)}</strong></td>
+    rows.push(`<tr>
+      <td><strong>${esc(s.specimen_id)}</strong>${inatLink(s.specimen_id)}</td>
       <td class="hide-mobile">${esc(s.pool || '')}</td>
       <td>${s.total_reads.toLocaleString()}</td>
-      <td><span class="status-pill status-${s.status}">${s.status.replace('_', ' ')}</span></td>
+      <td><span class="status-pill status-${displayStatus}">${statusLabel}</span></td>
       <td class="hide-mobile">${(s.clusters || []).length}</td>
-      <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>` : '—'}</td>
+      <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>${clusterBadge}` : '—'}</td>
       <td>${topHit ? `<span class="identity-bar" style="width:${barWidth}px;background:${barColor}"></span><span class="hit-pct">${pct}%</span>` : ''}</td>
-    </tr>`;
-  }).join('');
+    </tr>`);
+
+    // Expanded cluster detail rows
+    if (isExpanded && s.identification && s.identification.length > 1) {
+      for (const match of s.identification) {
+        const clusterName = match.cluster || '?';
+        const clusterSize = getClusterSize(s, clusterName);
+        const hits = match.top_hits || [];
+        const top = hits[0];
+        if (!top) continue;
+        const cId = top.adjusted_identity || top.identity || 0;
+        const cPct = (cId * 100).toFixed(1);
+        let altHits = '';
+        if (hits.length > 1) {
+          altHits = '<br>' + hits.slice(1, 4).map(h => {
+            const hPct = ((h.adjusted_identity || h.identity || 0) * 100).toFixed(1);
+            return `<span class="alt-hit">${esc(h.name || h.ref_id || '')} ${hPct}%</span>`;
+          }).join('<br>');
+        }
+        rows.push(`<tr class="cluster-detail">
+          <td colspan="2">${esc(clusterName)}</td>
+          <td>${clusterSize !== null ? clusterSize : ''}</td>
+          <td colspan="2"></td>
+          <td class="top-hit"><span class="hit-name">${esc(top.name || top.ref_id || '')}</span>${altHits}</td>
+          <td><span class="hit-pct">${cPct}%</span></td>
+        </tr>`);
+      }
+    }
+  }
+  tbody.innerHTML = rows.join('');
+
+  // Attach cluster badge click handlers
+  tbody.querySelectorAll('.cluster-badge').forEach(badge => {
+    badge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const sid = badge.dataset.sid;
+      if (expandedSpecimens.has(sid)) expandedSpecimens.delete(sid);
+      else expandedSpecimens.add(sid);
+      render();
+    });
+  });
+}
+
+function getClusterSize(s, clusterName) {
+  if (!s.clusters) return null;
+  const c = s.clusters.find(c => c.name === clusterName);
+  return c ? c.size : null;
 }
 
 function getTopHit(s) {
   if (!s.identification || !s.identification.length) return null;
-  // Find the first cluster that actually has hits
+  // Find the hit from the largest cluster (by size)
+  let bestHit = null;
+  let bestSize = -1;
   for (const match of s.identification) {
-    if (match.top_hits && match.top_hits.length) return match.top_hits[0];
+    if (!match.top_hits || !match.top_hits.length) continue;
+    const clusterSize = getClusterSize(s, match.cluster);
+    const size = clusterSize !== null ? clusterSize : 0;
+    if (bestHit === null || size > bestSize) {
+      bestHit = match.top_hits[0];
+      bestSize = size;
+    }
   }
-  return null;
+  return bestHit;
 }
 
 function getTopHitName(s) {
@@ -329,6 +530,7 @@ function getSortValue(s, key) {
     return h ? (h.adjusted_identity || h.identity || 0) : 0;
   }
   if (key === 'clusters') return (s.clusters || []).length;
+  if (key === 'status') return getDisplayStatus(s);
   return s[key] || '';
 }
 
@@ -355,6 +557,11 @@ fetch('/api/state').then(r => r.json()).then(data => {
   if (data.specimens) {
     state.specimens = data.specimens;
     state.version = data.version || 0;
+  }
+  state.totalInputReads = data.total_input_reads || 0;
+  if (data.config_summary) {
+    if (data.config_summary.min_reads) minReads = data.config_summary.min_reads;
+    if (data.config_summary.reprocess_ratio != null) reprocessRatio = data.config_summary.reprocess_ratio;
   }
   render();
   connect();
