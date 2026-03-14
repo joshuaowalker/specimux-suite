@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from ..config import PipelineConfig
@@ -23,6 +23,8 @@ app = FastAPI(title="specimux-suite")
 _event_log: EventLog = None
 _state: PipelineState = None
 _config: PipelineConfig = None
+_sse_clients: int = 0
+_sse_lock = threading.Lock()
 
 
 def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig = None) -> FastAPI:
@@ -60,6 +62,13 @@ async def get_state():
     result = fresh.to_dict()
     if _config:
         result["config_summary"] = _config.summary()
+        if _config.share_url:
+            result["share"] = {
+                "url": _config.share_url,
+                "max_clients": _config.share_max_clients,
+            }
+    with _sse_lock:
+        result["sse_clients"] = _sse_clients
     return result
 
 
@@ -76,24 +85,43 @@ async def get_specimens():
 @app.get("/events")
 async def event_stream(request: Request, after_version: int = 0):
     """SSE endpoint — streams events as they arrive."""
+    global _sse_clients
+
+    # Check connection limit
+    if _config and _config.share_max_clients > 0:
+        with _sse_lock:
+            if _sse_clients >= _config.share_max_clients:
+                return JSONResponse(
+                    status_code=503,
+                    content={"error": "Dashboard is full, try again later",
+                             "max_clients": _config.share_max_clients},
+                )
+
     async def generate():
-        version = after_version
-        loop = asyncio.get_event_loop()
-        while True:
-            if await request.is_disconnected():
-                return
-            # Run the blocking tail() in a thread to avoid blocking the event loop
-            events = await loop.run_in_executor(
-                None,
-                lambda: list(_event_log.tail(after_version=version, timeout=5.0))
-            )
-            for event in events:
-                version = event.version
-                yield {
-                    "event": event.type,
-                    "id": str(event.version),
-                    "data": json.dumps(_event_to_dict(event)),
-                }
+        global _sse_clients
+        with _sse_lock:
+            _sse_clients += 1
+        try:
+            version = after_version
+            loop = asyncio.get_event_loop()
+            while True:
+                if await request.is_disconnected():
+                    return
+                # Run the blocking tail() in a thread to avoid blocking the event loop
+                events = await loop.run_in_executor(
+                    None,
+                    lambda: list(_event_log.tail(after_version=version, timeout=5.0))
+                )
+                for event in events:
+                    version = event.version
+                    yield {
+                        "event": event.type,
+                        "id": str(event.version),
+                        "data": json.dumps(_event_to_dict(event)),
+                    }
+        finally:
+            with _sse_lock:
+                _sse_clients -= 1
 
     return EventSourceResponse(generate())
 

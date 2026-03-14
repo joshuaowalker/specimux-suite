@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 # Default max log size before rotation (100 MB)
 DEFAULT_MAX_LOG_BYTES = 100 * 1024 * 1024
+
+# In-memory ring buffer size for tail() — avoids re-reading JSONL files.
+# With typical events ~500 bytes each, 10K events ≈ 5 MB.
+_TAIL_BUFFER_SIZE = 10_000
 
 
 @dataclass
@@ -28,7 +33,13 @@ class Event:
 
 
 class EventLog:
-    """Append-only JSONL event log with thread-safe write and tail support."""
+    """Append-only JSONL event log with thread-safe write and tail support.
+
+    Events are persisted to JSONL files on disk and also kept in a bounded
+    in-memory ring buffer. The tail() method serves events from the buffer
+    when possible, falling back to disk replay only when a client is too
+    far behind.
+    """
 
     def __init__(self, path: Path, max_bytes: int = DEFAULT_MAX_LOG_BYTES):
         self.path = Path(path)
@@ -36,15 +47,21 @@ class EventLog:
         self._version = 0
         self._condition = threading.Condition(self._lock)
         self._max_bytes = max_bytes
+        self._buffer: deque[Event] = deque(maxlen=_TAIL_BUFFER_SIZE)
 
         # Ensure parent dir exists
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Recover version from existing log (and any rotated archives)
+        # Recover version and populate buffer from existing log
         for log_path in self._all_log_paths():
             for line in log_path.read_text().splitlines():
-                if line.strip():
+                line = line.strip()
+                if line:
                     self._version += 1
+                    try:
+                        self._buffer.append(_dict_to_event(json.loads(line)))
+                    except (json.JSONDecodeError, KeyError):
+                        pass
 
     def emit(self, event_type: str, data: Optional[dict] = None) -> Event:
         """Append an event and return it with its assigned version."""
@@ -59,6 +76,7 @@ class EventLog:
             self._maybe_rotate()
             with open(self.path, "a") as f:
                 f.write(json.dumps(_event_to_dict(event)) + "\n")
+            self._buffer.append(event)
             self._condition.notify_all()
             return event
 
@@ -74,41 +92,71 @@ class EventLog:
     def tail(self, after_version: int = 0, timeout: float = 30.0) -> Generator[Event, None, None]:
         """Yield events with version > after_version, blocking up to timeout for new ones.
 
-        Returns immediately after yielding any buffered events. Only blocks
-        (up to timeout) when no new events are available yet.
+        Serves from the in-memory buffer when possible. Falls back to disk
+        replay only when the client needs events older than the buffer.
+        Returns immediately after yielding any events.
         """
-        # First yield any already-written events
-        yielded = False
-        for event in self.replay():
-            if event.version > after_version:
-                yield event
-                after_version = event.version
-                yielded = True
-
-        # If we yielded buffered events, return immediately so the SSE
-        # endpoint can flush them to the client without waiting.
-        if yielded:
+        events = self._get_buffered_events(after_version)
+        if events is None:
+            # Client needs events before buffer range — fall back to disk
+            for event in self.replay():
+                if event.version > after_version:
+                    yield event
+                    after_version = event.version
             return
 
-        # No buffered events — wait for new ones
+        if events:
+            yield from events
+            return
+
+        # No new events yet — wait for them
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
             with self._condition:
-                current = self._version
-                if current <= after_version:
+                if self._version <= after_version:
                     self._condition.wait(timeout=min(remaining, 1.0))
                     if self._version <= after_version:
                         continue
 
-            # New events available — read and yield them, then return
-            for event in self.replay():
-                if event.version > after_version:
-                    yield event
-                    after_version = event.version
+            # New events available — serve from buffer
+            events = self._get_buffered_events(after_version)
+            if events is None:
+                # Shouldn't happen (we just got notified), but handle gracefully
+                for event in self.replay():
+                    if event.version > after_version:
+                        yield event
+                        after_version = event.version
+            elif events:
+                yield from events
             return
+
+    def _get_buffered_events(self, after_version: int) -> list[Event] | None:
+        """Get events from the in-memory buffer after a given version.
+
+        Returns:
+            list[Event]: Events newer than after_version (may be empty if caught up)
+            None: Client needs events before buffer range, caller should use replay()
+        """
+        with self._lock:
+            if not self._buffer:
+                # Buffer is empty; if events exist on disk, signal fallback
+                return None if self._version > after_version else []
+
+            buf_start = self._buffer[0].version
+            buf_end = self._buffer[-1].version
+
+            if after_version >= buf_end:
+                return []  # fully caught up
+
+            if after_version < buf_start - 1:
+                return None  # too far behind, need disk replay
+
+            # Compute offset: versions are sequential, so index math works
+            start_idx = max(0, after_version - buf_start + 1)
+            return [self._buffer[i] for i in range(start_idx, len(self._buffer))]
 
     @property
     def version(self) -> int:

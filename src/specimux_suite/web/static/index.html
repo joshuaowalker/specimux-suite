@@ -227,8 +227,15 @@ col.col-identity { width: 10%; }
 <body>
 
 <header>
-  <h1>specimux-suite</h1>
-  <div id="status-badge" class="disconnected">disconnected</div>
+  <div style="display:flex;align-items:center;gap:0.75rem">
+    <h1>specimux-suite</h1>
+    <div id="status-badge" class="disconnected">disconnected</div>
+    <span id="viewer-count" style="font-size:0.8rem;color:var(--text-dim);display:none"></span>
+  </div>
+  <div id="qr-panel" style="display:none;text-align:center;cursor:pointer" title="Click to toggle QR code">
+    <canvas id="qr-canvas" width="100" height="100" style="image-rendering:pixelated;width:100px;height:100px;border-radius:4px"></canvas>
+    <div id="qr-label" style="font-size:0.65rem;color:var(--text-dim);margin-top:0.25rem"></div>
+  </div>
 </header>
 
 <div class="controls">
@@ -253,6 +260,7 @@ col.col-identity { width: 10%; }
   </div>
 </div>
 
+<script src="/static/vendor/qrcode.min.js"></script>
 <div class="table-wrap">
 <table>
   <colgroup>
@@ -638,9 +646,71 @@ fetch('/api/state').then(r => r.json()).then(data => {
     if (data.config_summary.min_reads) minReads = data.config_summary.min_reads;
     if (data.config_summary.reprocess_ratio != null) reprocessRatio = data.config_summary.reprocess_ratio;
   }
+  if (data.share) initQrCode(data.share);
+  if (data.sse_clients != null) updateViewerCount(data.sse_clients);
   render();
   connect();
 }).catch(() => connect());
+
+// --- QR Code ---
+
+function updateViewerCount(n) {
+  const el = document.getElementById('viewer-count');
+  if (n > 0) {
+    el.textContent = `${n} viewer${n !== 1 ? 's' : ''}`;
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+// Periodically refresh viewer count
+setInterval(() => {
+  fetch('/api/state').then(r => r.json()).then(data => {
+    if (data.sse_clients != null) updateViewerCount(data.sse_clients);
+  }).catch(() => {});
+}, 10000);
+
+function initQrCode(share) {
+  const panel = document.getElementById('qr-panel');
+  const canvas = document.getElementById('qr-canvas');
+  const label = document.getElementById('qr-label');
+
+  const url = share.url;
+  const ip = url.replace(/^https?:\/\//, '').replace(/:\d+$/, '');
+  const isPrivate = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(ip);
+
+  // Generate QR using vendored qrcode-generator library
+  const qr = qrcode(0, 'L');
+  qr.addData(url);
+  qr.make();
+  const count = qr.getModuleCount();
+  const scale = Math.ceil(100 / count);
+  canvas.width = canvas.height = count * scale;
+  canvas.style.width = canvas.style.height = '100px';
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#000000';
+  for (let y = 0; y < count; y++)
+    for (let x = 0; x < count; x++)
+      if (qr.isDark(y, x)) ctx.fillRect(x * scale, y * scale, scale, scale);
+
+  label.textContent = isPrivate ? 'local wifi only' : 'publicly accessible';
+  if (!isPrivate) label.style.color = 'var(--error)';
+  panel.style.display = '';
+
+  // Toggle QR size on click
+  let expanded = false;
+  panel.addEventListener('click', () => {
+    expanded = !expanded;
+    canvas.style.width = canvas.style.height = expanded ? '200px' : '100px';
+  });
+}
+
+// QR code generation uses vendored qrcode-generator library (MIT licensed)
+// See static/vendor/qrcode.min.js
+
 </script>
 </body>
 </html>

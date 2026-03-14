@@ -44,6 +44,20 @@ def main():
         datefmt="%H:%M:%S",
     )
 
+    # Handle --share: bind to all interfaces and detect LAN IP
+    web_host = args.web_host
+    share_url = None
+    share_max_clients = 0
+    if args.share is not None:
+        web_host = "0.0.0.0"
+        share_max_clients = args.share
+        lan_ip = _detect_lan_ip()
+        if lan_ip:
+            share_url = f"http://{lan_ip}:{args.web_port}"
+            logging.getLogger(__name__).info(f"Sharing dashboard at {share_url} (max {share_max_clients} clients)")
+        else:
+            logging.getLogger(__name__).warning("Could not detect LAN IP; QR code will not be shown")
+
     config = PipelineConfig(
         primers_file=args.primers,
         specimens_file=args.specimens,
@@ -56,8 +70,10 @@ def main():
         workers=args.workers,
         specimux_args=args.specimux_args if args.specimux_args else [],
         speconsense_args=args.speconsense_args if args.speconsense_args else [],
-        web_host=args.web_host,
+        web_host=web_host,
         web_port=args.web_port,
+        share_url=share_url,
+        share_max_clients=share_max_clients,
         settle_time=getattr(args, "settle_time", 30.0),
         watch_pattern=getattr(args, "watch_pattern", "*.fastq"),
     )
@@ -95,14 +111,28 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Extra arguments passed through to specimux")
     parser.add_argument("--speconsense-args", nargs=argparse.REMAINDER, default=[],
                         help="Extra arguments passed through to speconsense")
-    parser.add_argument("--web-host", default="0.0.0.0",
-                        help="Web server host (default: 0.0.0.0)")
+    parser.add_argument("--web-host", default="127.0.0.1",
+                        help="Web server host (default: 127.0.0.1)")
     parser.add_argument("--web-port", type=int, default=8077,
                         help="Web server port (default: 8077)")
+    parser.add_argument("--share", nargs="?", type=int, const=20, default=None, metavar="MAX_CLIENTS",
+                        help="Share dashboard on LAN with QR code (default max: 20 clients)")
     parser.add_argument("--no-web", action="store_true",
                         help="Disable the web dashboard")
     parser.add_argument("--no-open", action="store_true",
                         help="Don't auto-open the dashboard in a browser")
+
+
+def _detect_lan_ip() -> str | None:
+    """Detect the machine's LAN IP address by connecting to a public DNS server."""
+    import socket
+    try:
+        # Connect to a public IP (doesn't actually send data) to find our route
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return None
 
 
 def simulate_main():

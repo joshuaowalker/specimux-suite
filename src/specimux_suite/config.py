@@ -48,8 +48,10 @@ class PipelineConfig:
     job_timeout: float = 3600.0  # 1 hour default
 
     # Web server
-    web_host: str = "0.0.0.0"
+    web_host: str = "127.0.0.1"
     web_port: int = 8077
+    share_url: Optional[str] = None  # set by --share; the URL for QR code
+    share_max_clients: int = 0  # max concurrent SSE clients; 0 = unlimited
 
     def __post_init__(self):
         self.primers_file = Path(self.primers_file)
