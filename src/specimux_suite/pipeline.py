@@ -153,6 +153,10 @@ class Pipeline:
         watcher.start()
         logger.info(f"Watching {self.config.watch_dir} for new FASTQ files")
 
+        # Schedule any work that's ready from rebuilt state (e.g. specimens
+        # that gained reads before previous shutdown but never got consensus)
+        self._schedule_consensus()
+
         try:
             while not self._shutdown.is_set():
                 self._shutdown.wait(timeout=2.0)
