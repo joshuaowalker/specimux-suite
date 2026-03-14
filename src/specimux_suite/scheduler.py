@@ -81,6 +81,44 @@ class Scheduler:
 
         return jobs[:max_jobs]
 
+    def get_all_eligible_jobs(self, max_jobs: Optional[int] = None) -> list[ConsensusJob]:
+        """Return ALL specimens eligible for consensus, ignoring reprocess_ratio.
+
+        Like get_ready_jobs() but skips the reprocess_ratio check — any specimen
+        with total_reads >= min_reads that isn't currently running is returned.
+        Used for finalization when the operator knows no more data is coming.
+        """
+        jobs = []
+
+        for sid, spec in self.state.specimens.items():
+            if spec.status == SpecimenStatus.CONSENSUS_RUNNING:
+                continue
+
+            if spec.total_reads < self.config.min_reads:
+                continue
+
+            if spec.consensus_version == 0:
+                # Never processed — highest priority tier
+                priority = 1_000_000 + spec.total_reads
+            elif spec.total_reads > spec.reads_at_last_consensus:
+                # Has new reads since last consensus — worth reprocessing
+                priority = spec.total_reads
+            else:
+                # No new reads — skip, reprocessing would be redundant
+                continue
+
+            jobs.append(ConsensusJob(
+                specimen_id=sid,
+                read_count=spec.total_reads,
+                priority=priority,
+            ))
+
+        jobs.sort(key=lambda j: j.priority, reverse=True)
+
+        if max_jobs is not None:
+            return jobs[:max_jobs]
+        return jobs
+
     def count_running(self) -> int:
         """Count specimens currently running consensus."""
         return sum(

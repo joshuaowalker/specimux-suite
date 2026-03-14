@@ -84,6 +84,70 @@ def test_skip_running(tmp_path):
     assert len(jobs) == 0
 
 
+def test_get_all_eligible_jobs_ignores_reprocess_ratio(tmp_path):
+    """get_all_eligible_jobs returns specimens that get_ready_jobs skips due to reprocess_ratio."""
+    config = _make_config(tmp_path, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+
+    # Specimen A: previously processed, only 20% new reads (below 0.5 ratio)
+    log.emit("specimen.updated", {"specimen_id": "A", "pool": "p1", "total_reads": 100})
+    log.emit("consensus.started", {"specimen_id": "A", "job_id": "j1", "read_count": 100})
+    log.emit("consensus.completed", {"specimen_id": "A", "job_id": "j1", "clusters": []})
+    log.emit("specimen.updated", {"specimen_id": "A", "pool": "p1", "total_reads": 120})
+
+    # Specimen B: never processed, above min_reads
+    log.emit("specimen.updated", {"specimen_id": "B", "pool": "p1", "total_reads": 50})
+
+    # Specimen C: below min_reads
+    log.emit("specimen.updated", {"specimen_id": "C", "pool": "p1", "total_reads": 10})
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    scheduler = Scheduler(config, state)
+
+    # get_ready_jobs should skip A (ratio 0.2 < 0.5)
+    ready = scheduler.get_ready_jobs(max_jobs=10)
+    assert len(ready) == 1
+    assert ready[0].specimen_id == "B"
+
+    # get_all_eligible_jobs should include both A and B
+    eligible = scheduler.get_all_eligible_jobs()
+    assert len(eligible) == 2
+    sids = [j.specimen_id for j in eligible]
+    assert "A" in sids
+    assert "B" in sids
+    # B (never-processed) should have higher priority than A (previously processed)
+    assert eligible[0].specimen_id == "B"
+    assert eligible[1].specimen_id == "A"
+
+
+def test_get_all_eligible_jobs_skips_no_new_reads(tmp_path):
+    """get_all_eligible_jobs skips specimens with no new reads since last consensus."""
+    config = _make_config(tmp_path)
+    log = EventLog(tmp_path / "events.jsonl")
+
+    # Specimen A: processed, no new reads (total_reads == reads_at_last_consensus)
+    log.emit("specimen.updated", {"specimen_id": "A", "pool": "p1", "total_reads": 100})
+    log.emit("consensus.started", {"specimen_id": "A", "job_id": "j1", "read_count": 100})
+    log.emit("consensus.completed", {"specimen_id": "A", "job_id": "j1", "clusters": [{"name": "c1", "size": 80}]})
+
+    # Specimen B: processed, has new reads
+    log.emit("specimen.updated", {"specimen_id": "B", "pool": "p1", "total_reads": 100})
+    log.emit("consensus.started", {"specimen_id": "B", "job_id": "j2", "read_count": 100})
+    log.emit("consensus.completed", {"specimen_id": "B", "job_id": "j2", "clusters": [{"name": "c1", "size": 80}]})
+    log.emit("specimen.updated", {"specimen_id": "B", "pool": "p1", "total_reads": 110})
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    scheduler = Scheduler(config, state)
+    eligible = scheduler.get_all_eligible_jobs()
+
+    assert len(eligible) == 1
+    assert eligible[0].specimen_id == "B"
+
+
 def test_available_slots(tmp_path):
     config = _make_config(tmp_path, workers=2)
     log = EventLog(tmp_path / "events.jsonl")

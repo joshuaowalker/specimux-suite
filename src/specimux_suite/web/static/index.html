@@ -247,6 +247,7 @@ col.col-reads { width: 10%; }
   <div class="controls-row">
     <input type="text" id="search" placeholder="Search specimens...">
     <span id="stat-demuxing" class="demux-indicator" style="display:none">Demuxing</span>
+    <span id="stat-finalizing" class="demux-indicator" style="display:none">Finalizing</span>
   </div>
   <div class="controls-row">
     <div class="stats-group">
@@ -289,7 +290,7 @@ col.col-reads { width: 10%; }
 </div>
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, finalizing: false };
 let sortKey = 'specimen_id';
 let sortAsc = true;
 let searchTerm = '';
@@ -334,7 +335,8 @@ function connect() {
   for (const type of [
     'pipeline.started', 'specimens.loaded', 'specimux.started', 'specimux.completed', 'specimen.updated',
     'consensus.started', 'consensus.completed',
-    'identification.completed', 'pipeline.error'
+    'identification.completed', 'pipeline.error',
+    'finalization.started', 'finalization.completed'
   ]) {
     es.addEventListener(type, (e) => {
       const event = JSON.parse(e.data);
@@ -373,6 +375,12 @@ function applyEvent(event) {
       }
       state.totalInputReads += d.input_reads || 0;
       break;
+    case 'finalization.started':
+      state.finalizing = true;
+      break;
+    case 'finalization.completed':
+      state.finalizing = false;
+      break;
     case 'specimen.updated':
       if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
       Object.assign(state.specimens[d.specimen_id], { pool: d.pool, total_reads: d.total_reads });
@@ -385,6 +393,7 @@ function applyEvent(event) {
         const sc = state.specimens[d.specimen_id];
         sc.status = 'consensus_done';
         sc.clusters = d.clusters || [];
+        sc.identification = [];  // Clear stale identification for re-identification
         sc.consensus_version = (sc.consensus_version || 0) + 1;
         sc.reads_at_last_consensus = sc.total_reads;
       }
@@ -483,6 +492,7 @@ function render() {
 
   // Demuxing indicator
   document.getElementById('stat-demuxing').style.display = state.demuxing ? '' : 'none';
+  document.getElementById('stat-finalizing').style.display = state.finalizing ? '' : 'none';
 
   // Stats — two orthogonal groups
   const all = Object.values(state.specimens);

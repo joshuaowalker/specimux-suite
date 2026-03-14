@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 from specimux_suite.config import PipelineConfig
 from specimux_suite.events import EventLog
+from specimux_suite.scheduler import ConsensusJob
 from specimux_suite.state import PipelineState
 
 
@@ -98,3 +99,78 @@ def test_validate_tools_includes_vsearch_when_ref_db(tmp_path):
     with patch("specimux_suite.pipeline._check_tool_on_path", return_value=False):
         missing = pipeline.validate_tools()
     assert "vsearch" in missing
+
+
+def test_read_stdin_command_returns_command(tmp_path):
+    """_read_stdin_command returns stripped lowercase line when stdin is ready."""
+    config = _make_config(tmp_path)
+
+    from specimux_suite.pipeline import Pipeline
+    pipeline = Pipeline(config)
+
+    with patch("specimux_suite.pipeline.sys") as mock_sys, \
+         patch("specimux_suite.pipeline.select") as mock_select:
+        mock_sys.stdin.isatty.return_value = True
+        mock_sys.stdin.readline.return_value = "  Finalize \n"
+        mock_select.select.return_value = ([mock_sys.stdin], [], [])
+
+        result = pipeline._read_stdin_command()
+
+    assert result == "finalize"
+    pipeline._executor.shutdown(wait=False)
+
+
+def test_read_stdin_command_returns_none_when_not_tty(tmp_path):
+    """_read_stdin_command returns None when stdin is not a terminal."""
+    config = _make_config(tmp_path)
+
+    from specimux_suite.pipeline import Pipeline
+    pipeline = Pipeline(config)
+
+    with patch("specimux_suite.pipeline.sys") as mock_sys:
+        mock_sys.stdin.isatty.return_value = False
+
+        result = pipeline._read_stdin_command()
+
+    assert result is None
+    pipeline._executor.shutdown(wait=False)
+
+
+def test_read_stdin_command_returns_none_when_no_input(tmp_path):
+    """_read_stdin_command returns None when select says stdin not ready."""
+    config = _make_config(tmp_path)
+
+    from specimux_suite.pipeline import Pipeline
+    pipeline = Pipeline(config)
+
+    with patch("specimux_suite.pipeline.sys") as mock_sys, \
+         patch("specimux_suite.pipeline.select") as mock_select:
+        mock_sys.stdin.isatty.return_value = True
+        mock_select.select.return_value = ([], [], [])
+
+        result = pipeline._read_stdin_command()
+
+    assert result is None
+    pipeline._executor.shutdown(wait=False)
+
+
+def test_finalization_calls_get_all_eligible_jobs(tmp_path):
+    """_run_finalization uses get_all_eligible_jobs, not get_ready_jobs."""
+    config = _make_config(tmp_path)
+
+    with patch("specimux_suite.pipeline.SpecimuxRunner"), \
+         patch("specimux_suite.pipeline.SpeconsenseRunner"), \
+         patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+
+        # Mock scheduler to track which method is called
+        pipeline.scheduler.get_all_eligible_jobs = MagicMock(return_value=[])
+        pipeline.scheduler.get_ready_jobs = MagicMock(return_value=[])
+
+        pipeline._run_finalization()
+
+        pipeline.scheduler.get_all_eligible_jobs.assert_called_once_with(max_jobs=None)
+        pipeline.scheduler.get_ready_jobs.assert_not_called()
+
+        pipeline._executor.shutdown(wait=False)

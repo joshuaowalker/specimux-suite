@@ -1,6 +1,8 @@
 """Pipeline orchestrator: wires components together for batch and live modes."""
 
 import logging
+import select
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
 from pathlib import Path
@@ -161,6 +163,17 @@ class Pipeline:
             while not self._shutdown.is_set():
                 self._shutdown.wait(timeout=2.0)
                 self._check_completed_futures()
+
+                cmd = self._read_stdin_command()
+                if cmd in ("f", "finalize"):
+                    self._run_finalization()
+                    self._rebuild_state()
+                    self._schedule_consensus()
+                elif cmd in ("q", "quit"):
+                    logger.info("Quit command received, shutting down")
+                    break
+                elif cmd is not None and cmd != "":
+                    print("Commands: f/finalize — reprocess all eligible specimens; q/quit — shut down", file=sys.stderr)
         except KeyboardInterrupt:
             logger.info("Shutting down live pipeline")
         finally:
@@ -200,6 +213,65 @@ class Pipeline:
                 self._submit_identification(sid, deferred=True)
 
         self._schedule_consensus()
+
+    def _read_stdin_command(self) -> str | None:
+        """Non-blocking check for a command on stdin. Returns stripped lowercase line or None."""
+        if not sys.stdin.isatty():
+            return None
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        if ready:
+            line = sys.stdin.readline()
+            if line:
+                return line.strip().lower()
+        return None
+
+    def _run_finalization(self) -> None:
+        """Reprocess all eligible specimens, ignoring reprocess_ratio.
+
+        Each specimen goes through consensus → identification sequentially,
+        so progress is visible in the UI specimen-by-specimen.
+        """
+        self._rebuild_state()
+        jobs = self.scheduler.get_all_eligible_jobs(max_jobs=None)
+
+        # Filter out specimens already in-flight
+        jobs = [j for j in jobs if j.specimen_id not in self._futures]
+
+        if not jobs:
+            logger.info("Finalize: no eligible specimens to process")
+            return
+
+        logger.info(f"Finalize: scheduling consensus for {len(jobs)} specimens")
+        self.event_log.emit("finalization.started", {
+            "specimen_count": len(jobs),
+        })
+
+        # Submit in batches respecting concurrency, running identification
+        # on each specimen as its consensus completes (like live mode)
+        pending = list(jobs)
+        while pending or self._futures:
+            # Fill available slots
+            while pending:
+                slots = self.config.workers - len(self._futures)
+                if slots <= 0:
+                    break
+                job = pending.pop(0)
+                self._submit_consensus(job.specimen_id)
+
+            # Wait for at least one to finish
+            if self._futures:
+                self._wait_for_any_future()
+                self._rebuild_state()
+
+                # Identify any specimens that just completed
+                # (_wait_for_any_future removes done futures, so check state)
+                if self.identify:
+                    for sid, spec in self.state.specimens.items():
+                        if spec.clusters and not spec.identification:
+                            self._submit_identification(sid)
+
+        self.event_log.emit("finalization.completed", {})
+        logger.info("Finalize: complete")
 
     def _run_consensus_round(self) -> None:
         """Run consensus on all ready specimens, respecting concurrency."""

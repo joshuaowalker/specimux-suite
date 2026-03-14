@@ -161,6 +161,7 @@ class PipelineState:
         spec.active_job_id = None
         spec.reads_at_last_consensus = spec.total_reads
         spec.consensus_version += 1
+        spec.identification = []  # Clear stale identification for re-identification
         clusters = []
         for c in data.get("clusters", []):
             clusters.append(ClusterInfo(
