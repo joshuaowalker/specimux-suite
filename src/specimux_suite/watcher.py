@@ -65,6 +65,12 @@ class ProcessedFilesTracker:
         with self._lock:
             self._processed.add(str(path))
 
+    def seed(self, paths) -> None:
+        """Bulk-add paths already known to be processed (e.g. from event replay)."""
+        with self._lock:
+            for p in paths:
+                self._processed.add(str(p))
+
 
 class _FastqHandler(FileSystemEventHandler):
     """Watchdog handler that detects new FASTQ files."""

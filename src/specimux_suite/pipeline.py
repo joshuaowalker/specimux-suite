@@ -142,6 +142,14 @@ class Pipeline:
             event_log=self.event_log,
         )
 
+        # Seed tracker with files already processed in previous runs
+        already_processed = [
+            f.path for f in self.state.files.values() if f.stable
+        ]
+        if already_processed:
+            watcher._tracker.seed(already_processed)
+            logger.info(f"Restored {len(already_processed)} previously processed files from event log")
+
         watcher.start()
         logger.info(f"Watching {self.config.watch_dir} for new FASTQ files")
 
