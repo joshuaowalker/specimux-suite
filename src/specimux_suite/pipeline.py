@@ -185,10 +185,7 @@ class Pipeline:
         # 5. Trigger identification for consensus jobs that completed during drain
         if self.identify and drained_sids:
             for sid in drained_sids:
-                consensus_fasta = self.speconsense.get_consensus_fasta(sid)
-                if consensus_fasta:
-                    logger.info(f"Identifying {sid} (deferred from drain)")
-                    self._executor.submit(self.identify.run, sid, consensus_fasta)
+                self._submit_identification(sid, deferred=True)
 
         self._schedule_consensus()
 
@@ -256,16 +253,25 @@ class Pipeline:
         """Run consensus for a single specimen (executed in thread pool)."""
         return self.speconsense.run(specimen_id, specimen_fastq)
 
+    def _submit_identification(self, specimen_id: str, deferred: bool = False) -> None:
+        """Submit identification for a specimen if it has clusters."""
+        spec = self.state.get_specimen(specimen_id)
+        if not spec or not spec.clusters:
+            return
+        consensus_fasta = self.speconsense.get_consensus_fasta(specimen_id)
+        if not consensus_fasta:
+            return
+        label = f" (deferred from drain)" if deferred else ""
+        logger.info(f"Identifying {specimen_id}{label}")
+        self._executor.submit(self.identify.run, specimen_id, consensus_fasta)
+
     def _run_identification(self) -> None:
         """Run identification on all specimens with completed consensus."""
         self._rebuild_state()
 
         for sid, spec in self.state.specimens.items():
             if spec.clusters and not spec.identification:
-                consensus_fasta = self.speconsense.get_consensus_fasta(sid)
-                if consensus_fasta:
-                    logger.info(f"Identifying {sid}")
-                    self.identify.run(sid, consensus_fasta)
+                self._submit_identification(sid)
 
     def _find_specimen_fastq(self, specimen_id: str, pool: str) -> Path | None:
         """Find the accumulated FASTQ for a specimen in specimux output."""
@@ -359,12 +365,9 @@ class Pipeline:
             del self._futures[sid]
 
         for sid in completed:
-            # Trigger identification if available
             if self.identify:
                 self._rebuild_state()
-                consensus_fasta = self.speconsense.get_consensus_fasta(sid)
-                if consensus_fasta:
-                    self._executor.submit(self.identify.run, sid, consensus_fasta)
+                self._submit_identification(sid)
 
         # Check for new consensus work
         if completed or errored:

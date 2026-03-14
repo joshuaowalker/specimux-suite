@@ -166,11 +166,7 @@ class IdentifyRunner:
 
         ref_seqs = self._extract_reference_seqs(ref_ids_needed)
 
-        params = AdjustmentParams(
-            normalize_homopolymers=True,
-            handle_iupac_overlap=False,
-            normalize_indels=False,
-        )
+        params = AdjustmentParams()
 
         matches = []
         for cluster_name, hits in vsearch_hits.items():

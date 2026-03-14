@@ -19,6 +19,7 @@
   --done: #4e9a06;
   --identified: #2e7d32;
   --no-match: #8b6914;
+  --no-clusters: #6a5acd;
   --error: #cc0000;
 }
 
@@ -132,6 +133,7 @@ tr:hover { background: rgba(255,255,255,0.03); }
 .status-consensus_done { background: var(--done); color: #fff; }
 .status-identified { background: var(--identified); color: #fff; }
 .status-no_match { background: var(--no-match); color: #fff; }
+.status-no_clusters { background: var(--no-clusters); color: #fff; }
 .status-error { background: var(--error); color: #fff; }
 
 .identity-bar {
@@ -377,6 +379,9 @@ function getDisplayStatus(s) {
   if (s.status === 'waiting') {
     return s.total_reads >= minReads ? 'queued' : 'waiting';
   }
+  if (s.status === 'consensus_done' && (s.clusters || []).length === 0) {
+    return 'no_clusters';
+  }
   return s.status;
 }
 
@@ -469,9 +474,9 @@ function render() {
     const identity = topHit ? (topHit.adjusted_identity || topHit.identity || 0) : 0;
     const pct = (identity * 100).toFixed(1);
     const barWidth = Math.max(0, Math.min(100, identity * 100));
-    const barColor = identity >= 0.97 ? 'var(--identified)' : identity >= 0.90 ? 'var(--done)' : 'var(--processing)';
+    const barColor = identity >= 0.99 ? 'var(--identified)' : identity >= 0.98 ? 'var(--done)' : identity >= 0.90 ? 'var(--processing)' : 'var(--text-dim)';
     const displayStatus = getDisplayStatus(s);
-    const statusLabels = { queued: 'queued', no_match: 'no match', consensus_running: 'processing', consensus_done: 'consensus done', updating: 'updating' };
+    const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'consensus done', updating: 'updating' };
     const statusLabel = statusLabels[displayStatus] || displayStatus.replace('_', ' ');
     const clusterBadge = buildClusterBadge(s);
     const isExpanded = expandedSpecimens.has(s.specimen_id);
