@@ -72,14 +72,25 @@ class EventLog:
                         yield _dict_to_event(json.loads(line))
 
     def tail(self, after_version: int = 0, timeout: float = 30.0) -> Generator[Event, None, None]:
-        """Yield events with version > after_version, blocking up to timeout for new ones."""
+        """Yield events with version > after_version, blocking up to timeout for new ones.
+
+        Returns immediately after yielding any buffered events. Only blocks
+        (up to timeout) when no new events are available yet.
+        """
         # First yield any already-written events
+        yielded = False
         for event in self.replay():
             if event.version > after_version:
                 yield event
                 after_version = event.version
+                yielded = True
 
-        # Then wait for new events
+        # If we yielded buffered events, return immediately so the SSE
+        # endpoint can flush them to the client without waiting.
+        if yielded:
+            return
+
+        # No buffered events — wait for new ones
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -92,11 +103,12 @@ class EventLog:
                     if self._version <= after_version:
                         continue
 
-            # New events available — read them from file
+            # New events available — read and yield them, then return
             for event in self.replay():
                 if event.version > after_version:
                     yield event
                     after_version = event.version
+            return
 
     @property
     def version(self) -> int:

@@ -56,15 +56,18 @@ header h1 { font-size: 1.25rem; font-weight: 600; }
 .controls {
   padding: 0.75rem 1.5rem;
   display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.controls-row {
+  display: flex;
   gap: 1rem;
   align-items: center;
-  flex-wrap: wrap;
 }
 
 #search {
-  flex: 1;
-  min-width: 200px;
-  max-width: 400px;
+  width: 300px;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -78,6 +81,7 @@ header h1 { font-size: 1.25rem; font-weight: 600; }
   gap: 1rem;
   font-size: 0.85rem;
   color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
 .stats-group span { font-weight: 600; color: var(--text); }
 .stats-sep {
@@ -94,6 +98,7 @@ header h1 { font-size: 1.25rem; font-weight: 600; }
 
 table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 0.85rem;
 }
@@ -136,17 +141,27 @@ tr:hover { background: rgba(255,255,255,0.03); }
 .status-no_clusters { background: var(--no-clusters); color: #fff; }
 .status-error { background: var(--error); color: #fff; }
 
-.identity-bar {
+.identity-dot {
   display: inline-block;
-  height: 6px;
-  border-radius: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
   margin-right: 0.4rem;
   vertical-align: middle;
 }
 
+/* Column widths: Specimen | Pool | Reads | Status | Clusters | Top ID Match | Identity */
+col.col-specimen { width: 28%; }
+col.col-pool { width: 8%; }
+col.col-reads { width: 8%; }
+col.col-status { width: 9%; }
+col.col-clusters { width: 7%; }
+col.col-topmatch { width: 30%; }
+col.col-identity { width: 10%; }
+
 .top-hit { white-space: nowrap; }
 .hit-name { font-style: italic; }
-.hit-pct { color: var(--text-dim); margin-left: 0.25rem; }
+.hit-pct { color: var(--text-dim); margin-left: 0.25rem; font-variant-numeric: tabular-nums; }
 
 .inat-link {
   font-size: 0.7rem;
@@ -217,25 +232,38 @@ tr:hover { background: rgba(255,255,255,0.03); }
 </header>
 
 <div class="controls">
-  <input type="text" id="search" placeholder="Search specimens...">
-  <div class="stats-group">
+  <div class="controls-row">
+    <input type="text" id="search" placeholder="Search specimens...">
     <span id="stat-demuxing" class="demux-indicator" style="display:none">Demuxing</span>
-    Reads: <span id="stat-reads">0</span>
-    &nbsp;Matched: <span id="stat-matched">0</span>
-    &nbsp;Specimens: <span id="stat-total">0</span>
-    <div class="stats-sep"></div>
-    Identified: <span id="stat-identified">0</span>
-    &nbsp;No match: <span id="stat-nomatch">0</span>
-    &nbsp;Low reads: <span id="stat-lowreads">0</span>
-    <div class="stats-sep"></div>
-    Processing: <span id="stat-processing">0</span>
-    &nbsp;Queued: <span id="stat-queued-new">0</span>
-    &nbsp;Reprocess: <span id="stat-queued-reprocess">0</span>
+  </div>
+  <div class="controls-row">
+    <div class="stats-group">
+      Reads: <span id="stat-reads">0</span>
+      &nbsp;Matched: <span id="stat-matched">0</span>
+      &nbsp;Specimens: <span id="stat-total">0</span>
+      <div class="stats-sep"></div>
+      Identified: <span id="stat-identified">0</span>
+      &nbsp;No match: <span id="stat-nomatch">0</span>
+      &nbsp;Low reads: <span id="stat-lowreads">0</span>
+      <div class="stats-sep"></div>
+      Processing: <span id="stat-processing">0</span>
+      &nbsp;Queued: <span id="stat-queued-new">0</span>
+      &nbsp;Reprocess: <span id="stat-queued-reprocess">0</span>
+    </div>
   </div>
 </div>
 
 <div class="table-wrap">
 <table>
+  <colgroup>
+    <col class="col-specimen">
+    <col class="col-pool">
+    <col class="col-reads">
+    <col class="col-status">
+    <col class="col-clusters">
+    <col class="col-topmatch">
+    <col class="col-identity">
+  </colgroup>
   <thead>
     <tr>
       <th data-sort="specimen_id">Specimen</th>
@@ -259,6 +287,15 @@ let searchTerm = '';
 let minReads = 30;
 let reprocessRatio = 0.5;
 const expandedSpecimens = new Set();
+let renderTimer = null;
+
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = requestAnimationFrame(() => {
+    renderTimer = null;
+    render();
+  });
+}
 
 // SSE connection
 function connect() {
@@ -281,7 +318,7 @@ function connect() {
     const event = JSON.parse(e.data);
     state.version = event.version;
     applyEvent(event);
-    render();
+    scheduleRender();
   };
 
   // Listen for specific event types too
@@ -294,7 +331,7 @@ function connect() {
       const event = JSON.parse(e.data);
       state.version = Math.max(state.version, event.version);
       applyEvent(event);
-      render();
+      scheduleRender();
     });
   }
 }
@@ -473,10 +510,9 @@ function render() {
     const topHit = getTopHit(s);
     const identity = topHit ? (topHit.adjusted_identity || topHit.identity || 0) : 0;
     const pct = (identity * 100).toFixed(1);
-    const barWidth = Math.max(0, Math.min(100, identity * 100));
-    const barColor = identity >= 0.99 ? 'var(--identified)' : identity >= 0.98 ? 'var(--done)' : identity >= 0.90 ? 'var(--processing)' : 'var(--text-dim)';
+    const dotColor = identity >= 0.99 ? 'var(--identified)' : identity >= 0.98 ? 'var(--done)' : identity >= 0.90 ? 'var(--processing)' : 'var(--text-dim)';
     const displayStatus = getDisplayStatus(s);
-    const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'consensus done', updating: 'updating' };
+    const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'ready', updating: 'updating' };
     const statusLabel = statusLabels[displayStatus] || displayStatus.replace('_', ' ');
     const clusterBadge = buildClusterBadge(s);
     const isExpanded = expandedSpecimens.has(s.specimen_id);
@@ -488,7 +524,7 @@ function render() {
       <td><span class="status-pill status-${displayStatus}">${statusLabel}</span></td>
       <td class="hide-mobile">${(s.clusters || []).length}</td>
       <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>${clusterBadge}` : `${clusterBadge || '—'}`}</td>
-      <td>${topHit ? `<span class="identity-bar" style="width:${barWidth}px;background:${barColor}"></span><span class="hit-pct">${pct}%</span>` : ''}</td>
+      <td>${topHit ? `<span class="identity-dot" style="background:${dotColor}"></span><span class="hit-pct">${pct}%</span>` : ''}</td>
     </tr>`);
 
     // Expanded cluster detail rows
