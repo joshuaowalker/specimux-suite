@@ -29,9 +29,9 @@ class Scheduler:
         """Return prioritized list of specimens ready for consensus.
 
         Prioritization:
-        - Never-processed specimens with >= min_reads: highest priority (by read count desc)
-        - Previously-processed: scored by new_reads / reads_at_last_consensus
-        - Only reprocess if ratio > reprocess_ratio
+        - Specimens with no clusters: highest priority (by read count desc)
+        - Specimens with clusters: reprocess if new_reads / reads_at_last_consensus > reprocess_ratio
+        - Never-processed specimens are always eligible if >= min_reads
         """
         if max_jobs is None:
             max_jobs = self.config.workers
@@ -39,15 +39,17 @@ class Scheduler:
         jobs = []
 
         for sid, spec in self.state.specimens.items():
-            # Skip if already running or errored
+            # Skip if already running
             if spec.status == SpecimenStatus.CONSENSUS_RUNNING:
                 continue
 
             if spec.total_reads < self.config.min_reads:
                 continue
 
+            has_clusters = len(spec.clusters) > 0
+
             if spec.consensus_version == 0:
-                # Never processed — highest priority
+                # Never processed — highest priority tier
                 jobs.append(ConsensusJob(
                     specimen_id=sid,
                     read_count=spec.total_reads,
@@ -62,10 +64,16 @@ class Scheduler:
                     ratio = float("inf")
 
                 if ratio > self.config.reprocess_ratio:
+                    if has_clusters:
+                        # Has results — lower priority tier
+                        priority = ratio
+                    else:
+                        # No clusters yet — same tier as never-processed
+                        priority = 1_000_000 + spec.total_reads
                     jobs.append(ConsensusJob(
                         specimen_id=sid,
                         read_count=spec.total_reads,
-                        priority=ratio,
+                        priority=priority,
                     ))
 
         # Sort by priority descending
