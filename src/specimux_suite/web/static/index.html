@@ -119,10 +119,13 @@ td {
   padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 tr:hover { background: rgba(255,255,255,0.03); }
 
+.status-cell { white-space: nowrap; }
 .status-pill {
   display: inline-block;
   padding: 0.15rem 0.5rem;
@@ -150,14 +153,12 @@ tr:hover { background: rgba(255,255,255,0.03); }
   vertical-align: middle;
 }
 
-/* Column widths: Specimen | Pool | Reads | Status | Clusters | Top ID Match | Identity */
-col.col-specimen { width: 28%; }
-col.col-pool { width: 8%; }
-col.col-reads { width: 8%; }
-col.col-status { width: 9%; }
-col.col-clusters { width: 7%; }
-col.col-topmatch { width: 30%; }
+/* Column widths: Specimen | Status | Identity | Top ID Match | Reads */
+col.col-specimen { width: 26%; }
+col.col-status { width: 12%; }
 col.col-identity { width: 10%; }
+col.col-topmatch { width: 42%; }
+col.col-reads { width: 10%; }
 
 .top-hit { white-space: nowrap; }
 .hit-name { font-style: italic; }
@@ -194,7 +195,8 @@ col.col-identity { width: 10%; }
 }
 
 .cluster-detail { background: rgba(255,255,255,0.02); }
-.cluster-detail td { padding: 0.3rem 0.75rem 0.3rem 2rem; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8rem; }
+.cluster-detail td { padding: 0.3rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8rem; }
+.cluster-detail td:first-child { padding-left: 2rem; }
 .cluster-detail .hit-name { color: var(--text-dim); }
 .alt-hit { color: var(--text-dim); font-size: 0.75rem; }
 
@@ -215,11 +217,14 @@ col.col-identity { width: 10%; }
   50% { opacity: 0.5; }
 }
 
-@media (max-width: 768px) {
-  header { padding: 0.75rem 1rem; }
-  .controls { padding: 0.5rem 1rem; }
-  table { font-size: 0.8rem; }
-  th, td { padding: 0.4rem 0.5rem; }
+@media (max-width: 932px) {
+  header { padding: 0.5rem 0.75rem; }
+  .controls { padding: 0.5rem 0.75rem; }
+  table { font-size: 0.75rem; }
+  th, td { padding: 0.3rem 0.4rem; }
+  .status-pill { font-size: 0.65rem; padding: 0.1rem 0.35rem; }
+  .stats-group { font-size: 0.75rem; flex-wrap: wrap; }
+  #search { width: 200px; font-size: 0.8rem; }
   .hide-mobile { display: none; }
 }
 </style>
@@ -265,22 +270,18 @@ col.col-identity { width: 10%; }
 <table>
   <colgroup>
     <col class="col-specimen">
-    <col class="col-pool">
-    <col class="col-reads">
     <col class="col-status">
-    <col class="col-clusters">
-    <col class="col-topmatch">
     <col class="col-identity">
+    <col class="col-topmatch">
+    <col class="col-reads">
   </colgroup>
   <thead>
     <tr>
       <th data-sort="specimen_id">Specimen</th>
-      <th data-sort="pool" class="hide-mobile">Pool</th>
-      <th data-sort="total_reads">Reads</th>
       <th data-sort="status">Status</th>
-      <th data-sort="clusters" class="hide-mobile">Clusters</th>
-      <th>Top ID Match</th>
       <th data-sort="top_identity">Identity</th>
+      <th>Top ID Match</th>
+      <th data-sort="total_reads">Reads</th>
     </tr>
   </thead>
   <tbody id="specimen-table"></tbody>
@@ -467,7 +468,6 @@ function render() {
     const q = searchTerm.toLowerCase();
     specs = specs.filter(s =>
       s.specimen_id.toLowerCase().includes(q) ||
-      (s.pool || '').toLowerCase().includes(q) ||
       getTopHitName(s).toLowerCase().includes(q)
     );
   }
@@ -527,12 +527,10 @@ function render() {
 
     rows.push(`<tr>
       <td><strong>${esc(s.specimen_id)}</strong>${inatLink(s.specimen_id)}</td>
-      <td class="hide-mobile">${esc(s.pool || '')}</td>
-      <td>${s.total_reads.toLocaleString()}</td>
-      <td><span class="status-pill status-${displayStatus}">${statusLabel}</span></td>
-      <td class="hide-mobile">${(s.clusters || []).length}</td>
-      <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>${clusterBadge}` : `${clusterBadge || '—'}`}</td>
+      <td class="status-cell"><span class="status-pill status-${displayStatus}">${statusLabel}</span></td>
       <td>${topHit ? `<span class="identity-dot" style="background:${dotColor}"></span><span class="hit-pct">${pct}%</span>` : ''}</td>
+      <td class="top-hit">${topHit ? `<span class="hit-name">${esc(topHit.name || topHit.ref_id || '')}</span>${clusterBadge}` : `${clusterBadge || '—'}`}</td>
+      <td>${s.total_reads.toLocaleString()}</td>
     </tr>`);
 
     // Expanded cluster detail rows
@@ -556,11 +554,11 @@ function render() {
           }).join('<br>');
         }
         rows.push(`<tr class="cluster-detail">
-          <td colspan="2">${esc(clusterName)}</td>
-          <td>${cluster.size != null ? cluster.size : ''}</td>
-          <td colspan="2"></td>
-          <td class="top-hit">${top ? `<span class="hit-name">${esc(top.name || top.ref_id || '')}</span>${altHits}` : '<span class="alt-hit">—</span>'}</td>
+          <td>${esc(clusterName)}</td>
+          <td></td>
           <td>${cPct ? `<span class="hit-pct">${cPct}%</span>` : ''}</td>
+          <td class="top-hit">${top ? `<span class="hit-name">${esc(top.name || top.ref_id || '')}</span>${altHits}` : '<span class="alt-hit">—</span>'}</td>
+          <td>${cluster.size != null ? cluster.size : ''}</td>
         </tr>`);
       }
     }
@@ -612,7 +610,6 @@ function getSortValue(s, key) {
     const h = getTopHit(s);
     return h ? (h.adjusted_identity || h.identity || 0) : 0;
   }
-  if (key === 'clusters') return (s.clusters || []).length;
   if (key === 'status') return getDisplayStatus(s);
   return s[key] || '';
 }
