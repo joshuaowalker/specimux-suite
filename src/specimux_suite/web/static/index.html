@@ -456,12 +456,13 @@ function buildClusterBadge(s) {
   }
   const topName = getTopHitName(s);
   let variants = 0;
-  let organisms = 0;
+  const otherNames = new Set();
   for (const m of matches) {
     const name = m.top_hits[0].name || m.top_hits[0].ref_id || '';
     if (name === topName) variants++;
-    else organisms++;
+    else otherNames.add(name);
   }
+  const organisms = otherNames.size;
   const parts = [];
   if (variants > 1) parts.push(`<span class="cluster-badge badge-variants" data-sid="${esc(s.specimen_id)}">${variants} seqs</span>`);
   else parts.push(`<span class="cluster-badge badge-variants" data-sid="${esc(s.specimen_id)}">${clusters.length} seq${clusters.length > 1 ? 's' : ''}</span>`);
