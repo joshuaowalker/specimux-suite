@@ -1,0 +1,10 @@
+# Settings optimized for herbarium specimens with degraded DNA
+specimux-suite-version: "0.1.*"
+description: "Herbarium specimens with relaxed consensus thresholds"
+
+suite:
+  min-reads: 20
+  reprocess-ratio: 0.3
+
+speconsense:
+  profile: herbarium

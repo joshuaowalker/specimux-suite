@@ -33,6 +33,12 @@ class PipelineConfig:
     # Watcher tuning (live mode)
     settle_time: float = 30.0
 
+    # Profile-based tool configuration
+    specimux_profile: Optional[str] = None
+    speconsense_profile: Optional[str] = None
+    specimux_overrides: dict = field(default_factory=dict)
+    speconsense_overrides: dict = field(default_factory=dict)
+
     # Specimux passthrough args
     specimux_args: list[str] = field(default_factory=list)
 

@@ -218,6 +218,28 @@ a.hit-name:hover { text-decoration: underline; }
   50% { opacity: 0.5; }
 }
 
+.demux-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.progress-bar-wrap {
+  width: 120px;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: var(--processing);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
 @media (max-width: 932px) {
   header { padding: 0.5rem 0.75rem; }
   .controls { padding: 0.5rem 0.75rem; }
@@ -248,6 +270,7 @@ a.hit-name:hover { text-decoration: underline; }
   <div class="controls-row">
     <input type="text" id="search" placeholder="Search specimens...">
     <span id="stat-demuxing" class="demux-indicator" style="display:none">Demuxing</span>
+    <span id="stat-demux-progress" class="demux-progress" style="display:none"></span>
     <span id="stat-finalizing" class="demux-indicator" style="display:none">Finalizing</span>
   </div>
   <div class="controls-row">
@@ -291,7 +314,7 @@ a.hit-name:hover { text-decoration: underline; }
 </div>
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, finalizing: false, mode: null };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, mode: null };
 let sortKey = 'specimen_id';
 let sortAsc = true;
 let searchTerm = '';
@@ -334,7 +357,7 @@ function connect() {
 
   // Listen for specific event types too
   for (const type of [
-    'pipeline.started', 'specimens.loaded', 'specimux.started', 'specimux.completed', 'specimen.updated',
+    'pipeline.started', 'specimens.loaded', 'specimux.started', 'specimux.progress', 'specimux.completed', 'specimen.updated',
     'consensus.started', 'consensus.completed',
     'identification.completed', 'pipeline.error',
     'finalization.started', 'finalization.completed'
@@ -369,8 +392,17 @@ function applyEvent(event) {
     case 'specimux.started':
       state.demuxing = true;
       break;
+    case 'specimux.progress':
+      state.demuxProgress = {
+        processed: d.processed || 0,
+        matched: d.matched || 0,
+        total_est: d.total_est || 0,
+        rate: d.rate || 0,
+      };
+      break;
     case 'specimux.completed':
       state.demuxing = false;
+      state.demuxProgress = null;
       for (const [name, reads] of Object.entries(d.specimens || {})) {
         if (!state.specimens[name]) state.specimens[name] = { specimen_id: name, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
         state.specimens[name].total_reads = reads;
@@ -503,6 +535,18 @@ function render() {
   // Demuxing indicator
   document.getElementById('stat-demuxing').style.display = state.demuxing ? '' : 'none';
   document.getElementById('stat-finalizing').style.display = state.finalizing ? '' : 'none';
+
+  // Demux progress bar
+  const progressEl = document.getElementById('stat-demux-progress');
+  if (state.demuxing && state.demuxProgress) {
+    const p = state.demuxProgress;
+    const pct = p.total_est > 0 ? Math.min(100, (p.processed / p.total_est) * 100) : 0;
+    const ratePct = (p.rate * 100).toFixed(1);
+    progressEl.innerHTML = `<span class="progress-bar-wrap"><span class="progress-bar-fill" style="width:${pct.toFixed(1)}%"></span></span> ${p.processed.toLocaleString()} / ${p.total_est.toLocaleString()} (${ratePct}% match)`;
+    progressEl.style.display = '';
+  } else {
+    progressEl.style.display = 'none';
+  }
 
   // Stats — two orthogonal groups
   const all = Object.values(state.specimens);

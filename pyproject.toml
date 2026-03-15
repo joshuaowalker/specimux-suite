@@ -8,12 +8,15 @@ version = "0.1.0"
 description = "Orchestration and UX layer for the Mycomap fungal DNA barcoding pipeline"
 requires-python = ">=3.11"
 dependencies = [
+    "specimux>=0.7.2",          # Profiles + progress protocol
+    "speconsense>=0.7.0",       # Profiles
     "watchdog>=3.0",
     "fastapi>=0.104",
     "uvicorn>=0.24",
     "sse-starlette>=1.8",
     "adjusted-identity>=0.2.4",
     "biopython>=1.82",
+    "pyyaml>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +31,9 @@ specimux-replay = "specimux_suite.cli:replay_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"specimux_suite.profiles" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

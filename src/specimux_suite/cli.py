@@ -36,6 +36,12 @@ def main():
     live_parser.add_argument("--presample", type=int, default=100,
                              help="Subsample reads for incremental consensus; 0 = no limit (default: 100)")
 
+    # Handle --list-profiles early (before subparser dispatch)
+    if '--list-profiles' in sys.argv:
+        from .profiles import print_profiles_list
+        print_profiles_list()
+        sys.exit(0)
+
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -43,6 +49,49 @@ def main():
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    # Load suite profile if specified
+    profile = None
+    specimux_profile = None
+    speconsense_profile = None
+    specimux_overrides = {}
+    speconsense_overrides = {}
+    if args.profile:
+        from .profiles import SuiteProfile
+        profile = SuiteProfile.load(args.profile)
+
+        # Apply suite section defaults (CLI args override)
+        _suite_key_map = {
+            "min-reads": "min_reads",
+            "reprocess-ratio": "reprocess_ratio",
+            "workers": "workers",
+            "live-presample": "presample",
+        }
+        for yaml_key, attr_name in _suite_key_map.items():
+            if yaml_key in profile.suite:
+                # Only apply if user didn't explicitly pass the CLI flag
+                if not _arg_was_explicit(args, attr_name):
+                    setattr(args, attr_name, profile.suite[yaml_key])
+
+        # Extract specimux profile and overrides
+        specimux_section = dict(profile.specimux)
+        specimux_profile = specimux_section.pop("profile", None)
+        specimux_overrides = specimux_section
+
+        # Extract speconsense profile and overrides
+        speconsense_section = dict(profile.speconsense)
+        speconsense_profile = speconsense_section.pop("profile", None)
+        speconsense_overrides = speconsense_section
+
+        # Apply identify section
+        _identify_key_map = {
+            "vsearch-min-identity": "vsearch_min_identity",
+            "vsearch-max-accepts": "vsearch_max_accepts",
+        }
+        for yaml_key, attr_name in _identify_key_map.items():
+            if yaml_key in profile.identify:
+                if not _arg_was_explicit(args, attr_name):
+                    setattr(args, attr_name, profile.identify[yaml_key])
 
     # Handle --share: bind to all interfaces and detect LAN IP
     web_host = args.web_host
@@ -68,6 +117,10 @@ def main():
         min_reads=args.min_reads,
         reprocess_ratio=args.reprocess_ratio,
         workers=args.workers,
+        specimux_profile=specimux_profile,
+        speconsense_profile=speconsense_profile,
+        specimux_overrides=specimux_overrides,
+        speconsense_overrides=speconsense_overrides,
         specimux_args=args.specimux_args if args.specimux_args else [],
         speconsense_args=args.speconsense_args if args.speconsense_args else [],
         web_host=web_host,
@@ -113,6 +166,10 @@ def main():
 
 def _add_common_args(parser: argparse.ArgumentParser):
     """Add arguments common to batch and live modes."""
+    parser.add_argument("-p", "--profile", type=str, default=None,
+                        help="Load a suite profile preset")
+    parser.add_argument("--list-profiles", action="store_true",
+                        help="List available suite profiles and exit")
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("specimux-suite-output"),
                         help="Output directory (default: specimux-suite-output)")
     parser.add_argument("--reference-db", type=Path, default=None,
@@ -137,6 +194,28 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Disable the web dashboard")
     parser.add_argument("--no-open", action="store_true",
                         help="Don't auto-open the dashboard in a browser")
+
+
+def _arg_was_explicit(args: argparse.Namespace, attr_name: str) -> bool:
+    """Check if a CLI argument was explicitly provided by the user.
+
+    Uses argparse's internal tracking: if an attribute has its default value
+    and wasn't in the original argv, it wasn't explicit. We rely on checking
+    sys.argv for the flag form.
+    """
+    # Map attribute names to CLI flag forms
+    flag = f"--{attr_name.replace('_', '-')}"
+    short_flags = {
+        "profile": "-p",
+        "output_dir": "-o",
+    }
+    short = short_flags.get(attr_name)
+    for arg in sys.argv:
+        if arg == flag or (short and arg == short):
+            return True
+        if arg.startswith(f"{flag}="):
+            return True
+    return False
 
 
 def _detect_lan_ip() -> str | None:

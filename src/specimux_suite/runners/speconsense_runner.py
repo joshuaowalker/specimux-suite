@@ -111,6 +111,17 @@ class SpeconsenseRunner:
         ]
         if presample > 0:
             cmd.extend(["--presample", str(presample)])
+        # Profile
+        if self.config.speconsense_profile:
+            cmd.extend(["-p", self.config.speconsense_profile])
+        # Overrides from suite profile
+        for key, value in self.config.speconsense_overrides.items():
+            if isinstance(value, bool):
+                if value:
+                    cmd.append(f"--{key}")
+            else:
+                cmd.extend([f"--{key}", str(value)])
+        # Escape hatch (highest precedence)
         cmd.extend(self.config.speconsense_args)
         return cmd
 
