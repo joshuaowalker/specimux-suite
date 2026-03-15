@@ -146,7 +146,6 @@ class Pipeline:
 
         watcher = FileWatcher(
             watch_dir=self.config.watch_dir,
-            pattern=self.config.watch_pattern,
             settle_time=self.config.settle_time,
             on_file_stable=self._on_file_stable,
             event_log=self.event_log,

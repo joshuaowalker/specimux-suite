@@ -1,6 +1,5 @@
 """File detection for live mode: watchdog + stability check."""
 
-import fnmatch
 import logging
 import os
 import threading
@@ -14,6 +13,16 @@ from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifi
 from .events import EventLog
 
 logger = logging.getLogger(__name__)
+
+FASTQ_EXTENSIONS = {".fastq", ".fq", ".fastq.gz", ".fq.gz"}
+
+
+def _has_fastq_extension(name: str) -> bool:
+    """Check if a filename has a recognized FASTQ extension."""
+    for ext in FASTQ_EXTENSIONS:
+        if name.endswith(ext):
+            return True
+    return False
 
 
 class FileStabilityChecker:
@@ -75,16 +84,15 @@ class ProcessedFilesTracker:
 class _FastqHandler(FileSystemEventHandler):
     """Watchdog handler that detects new FASTQ files."""
 
-    def __init__(self, pattern: str, on_new_file: Callable[[Path], None]):
-        self.pattern = pattern
+    def __init__(self, on_new_file: Callable[[Path], None]):
         self.on_new_file = on_new_file
 
     def on_created(self, event):
-        if not event.is_directory and fnmatch.fnmatch(Path(event.src_path).name, self.pattern):
+        if not event.is_directory and _has_fastq_extension(Path(event.src_path).name):
             self.on_new_file(Path(event.src_path))
 
     def on_modified(self, event):
-        if not event.is_directory and fnmatch.fnmatch(Path(event.src_path).name, self.pattern):
+        if not event.is_directory and _has_fastq_extension(Path(event.src_path).name):
             self.on_new_file(Path(event.src_path))
 
 
@@ -94,13 +102,11 @@ class FileWatcher:
     def __init__(
         self,
         watch_dir: Path,
-        pattern: str,
         settle_time: float,
         on_file_stable: Callable[[Path], None],
         event_log: EventLog,
     ):
         self.watch_dir = Path(watch_dir)
-        self.pattern = pattern
         self.settle_time = settle_time
         self.on_file_stable = on_file_stable
         self.event_log = event_log
@@ -121,7 +127,6 @@ class FileWatcher:
         self._scan_existing()
 
         handler = _FastqHandler(
-            pattern=self.pattern,
             on_new_file=self._handle_file,
         )
         self._observer.schedule(handler, str(self.watch_dir), recursive=False)
@@ -133,9 +138,9 @@ class FileWatcher:
         self._poll_thread.start()
 
     def _scan_existing(self) -> None:
-        """Scan for existing files matching the pattern."""
-        for path in sorted(self.watch_dir.glob(self.pattern)):
-            if not self._tracker.is_processed(path):
+        """Scan for existing FASTQ files."""
+        for path in sorted(self.watch_dir.iterdir()):
+            if path.is_file() and _has_fastq_extension(path.name) and not self._tracker.is_processed(path):
                 self._handle_file(path)
 
     def _poll_loop(self) -> None:

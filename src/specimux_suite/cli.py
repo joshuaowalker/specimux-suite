@@ -33,8 +33,6 @@ def main():
     _add_common_args(live_parser)
     live_parser.add_argument("--settle-time", type=float, default=30.0,
                              help="Seconds to wait for file to stabilize (default: 30)")
-    live_parser.add_argument("--watch-pattern", default="*.fastq",
-                             help="Glob pattern for FASTQ files (default: *.fastq)")
     live_parser.add_argument("--presample", type=int, default=100,
                              help="Subsample reads for incremental consensus; 0 = no limit (default: 100)")
 
@@ -77,7 +75,6 @@ def main():
         share_url=share_url,
         share_max_clients=share_max_clients,
         settle_time=getattr(args, "settle_time", 30.0),
-        watch_pattern=getattr(args, "watch_pattern", "*.fastq"),
         live_presample=getattr(args, "presample", 100),
     )
 

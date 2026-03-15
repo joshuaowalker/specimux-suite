@@ -32,7 +32,6 @@ class PipelineConfig:
 
     # Watcher tuning (live mode)
     settle_time: float = 30.0
-    watch_pattern: str = "*.fastq"
 
     # Specimux passthrough args
     specimux_args: list[str] = field(default_factory=list)
