@@ -101,59 +101,6 @@ def test_validate_tools_includes_vsearch_when_ref_db(tmp_path):
     assert "vsearch" in missing
 
 
-def test_read_stdin_command_returns_command(tmp_path):
-    """_read_stdin_command returns stripped lowercase line when stdin is ready."""
-    config = _make_config(tmp_path)
-
-    from specimux_suite.pipeline import Pipeline
-    pipeline = Pipeline(config)
-
-    with patch("specimux_suite.pipeline.sys") as mock_sys, \
-         patch("specimux_suite.pipeline.select") as mock_select:
-        mock_sys.stdin.isatty.return_value = True
-        mock_sys.stdin.readline.return_value = "  Finalize \n"
-        mock_select.select.return_value = ([mock_sys.stdin], [], [])
-
-        result = pipeline._read_stdin_command()
-
-    assert result == "finalize"
-    pipeline._executor.shutdown(wait=False)
-
-
-def test_read_stdin_command_returns_none_when_not_tty(tmp_path):
-    """_read_stdin_command returns None when stdin is not a terminal."""
-    config = _make_config(tmp_path)
-
-    from specimux_suite.pipeline import Pipeline
-    pipeline = Pipeline(config)
-
-    with patch("specimux_suite.pipeline.sys") as mock_sys:
-        mock_sys.stdin.isatty.return_value = False
-
-        result = pipeline._read_stdin_command()
-
-    assert result is None
-    pipeline._executor.shutdown(wait=False)
-
-
-def test_read_stdin_command_returns_none_when_no_input(tmp_path):
-    """_read_stdin_command returns None when select says stdin not ready."""
-    config = _make_config(tmp_path)
-
-    from specimux_suite.pipeline import Pipeline
-    pipeline = Pipeline(config)
-
-    with patch("specimux_suite.pipeline.sys") as mock_sys, \
-         patch("specimux_suite.pipeline.select") as mock_select:
-        mock_sys.stdin.isatty.return_value = True
-        mock_select.select.return_value = ([], [], [])
-
-        result = pipeline._read_stdin_command()
-
-    assert result is None
-    pipeline._executor.shutdown(wait=False)
-
-
 def test_finalization_calls_get_all_eligible_jobs(tmp_path):
     """_run_finalization uses get_all_eligible_jobs, not get_ready_jobs."""
     config = _make_config(tmp_path)

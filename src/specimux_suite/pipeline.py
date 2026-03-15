@@ -1,13 +1,14 @@
 """Pipeline orchestrator: wires components together for batch and live modes."""
 
 import logging
-import select
+import queue
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
 from pathlib import Path
 
 from .config import PipelineConfig
+from .console import ConsoleUI
 from .events import EventLog
 from .state import PipelineState
 from .scheduler import Scheduler
@@ -42,6 +43,8 @@ class Pipeline:
         self._futures: dict[str, Future] = {}
         self._shutdown = threading.Event()
         self._draining = False  # True while waiting for specimux to run
+        self.cmd_queue: queue.Queue = queue.Queue()
+        self._console: ConsoleUI | None = None
 
     def _rebuild_state(self) -> None:
         """Rebuild state from event log and update scheduler reference."""
@@ -90,23 +93,32 @@ class Pipeline:
         if self.identify:
             self.identify.ensure_db()
 
-        # Step 1: Run specimux
-        logger.info(f"Running specimux on {self.config.reads_file}")
-        specimens = self.specimux.run(self.config.reads_file)
+        with ConsoleUI("batch", self.state, self.cmd_queue) as console:
+            self._console = console
 
-        if not specimens:
-            logger.warning("No specimens found after specimux")
-            return
+            # Step 1: Run specimux
+            logger.info(f"Running specimux on {self.config.reads_file}")
+            specimens = self.specimux.run(self.config.reads_file)
 
-        # Rebuild state after specimux events
-        self._rebuild_state()
+            if not specimens:
+                logger.warning("No specimens found after specimux")
+                self._console = None
+                return
 
-        # Step 2: Run consensus → identification, interleaved per-specimen
-        logger.info(f"Found {len(specimens)} specimens, scheduling consensus")
-        self._run_consensus_round(min_reads=0)
+            # Rebuild state after specimux events
+            self._rebuild_state()
+            console.state = self.state
+            console.redraw()
 
-        self._executor.shutdown(wait=True)
-        logger.info("Batch pipeline complete")
+            # Step 2: Run consensus → identification, interleaved per-specimen
+            logger.info(f"Found {len(specimens)} specimens, scheduling consensus")
+            self._run_consensus_round(min_reads=0)
+
+            self._executor.shutdown(wait=True)
+            self._console = None
+
+        if not self._shutdown.is_set():
+            logger.info("Batch pipeline complete")
 
     def run_live(self) -> None:
         """Run the live pipeline with file watching."""
@@ -156,20 +168,29 @@ class Pipeline:
         self._schedule_consensus()
 
         try:
-            while not self._shutdown.is_set():
-                self._shutdown.wait(timeout=2.0)
-                self._check_completed_futures()
+            with ConsoleUI("live", self.state, self.cmd_queue) as console:
+                self._console = console
+                while not self._shutdown.is_set():
+                    self._shutdown.wait(timeout=2.0)
+                    self._check_completed_futures()
 
-                cmd = self._read_stdin_command()
-                if cmd in ("f", "finalize"):
-                    self._run_finalization()
-                    self._rebuild_state()
-                    self._schedule_consensus()
-                elif cmd in ("q", "quit"):
-                    logger.info("Quit command received, shutting down")
-                    break
-                elif cmd is not None and cmd != "":
-                    print("Commands: f/finalize — reprocess all eligible specimens; q/quit — shut down", file=sys.stderr)
+                    # Drain command queue
+                    while True:
+                        try:
+                            cmd = self.cmd_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if cmd == "finalize":
+                            self._run_finalization()
+                            self._rebuild_state()
+                            self._schedule_consensus()
+                        elif cmd == "quit":
+                            logger.info("Quit command received, shutting down")
+                            self._shutdown.set()
+                            break
+
+                    console.state = self.state
+                    console.redraw()
         except KeyboardInterrupt:
             logger.info("Shutting down live pipeline")
         finally:
@@ -179,6 +200,23 @@ class Pipeline:
     def shutdown(self) -> None:
         """Signal the pipeline to shut down."""
         self._shutdown.set()
+
+    def _drain_cmd_queue(self) -> None:
+        """Process pending commands from the console UI."""
+        while True:
+            try:
+                cmd = self.cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+            if cmd == "quit":
+                logger.info("Quit command received, shutting down")
+                self._shutdown.set()
+            elif cmd == "finalize":
+                # Finalize is handled in the live mode main loop, not here
+                pass
+        if self._console:
+            self._console.state = self.state
+            self._console.redraw()
 
     def _on_file_stable(self, file_path: Path) -> None:
         """Called by watcher when a new stable FASTQ is detected.
@@ -210,17 +248,6 @@ class Pipeline:
 
         self._schedule_consensus()
 
-    def _read_stdin_command(self) -> str | None:
-        """Non-blocking check for a command on stdin. Returns stripped lowercase line or None."""
-        if not sys.stdin.isatty():
-            return None
-        ready, _, _ = select.select([sys.stdin], [], [], 0)
-        if ready:
-            line = sys.stdin.readline()
-            if line:
-                return line.strip().lower()
-        return None
-
     def _run_finalization(self) -> None:
         """Reprocess all eligible specimens, ignoring reprocess_ratio.
 
@@ -245,7 +272,7 @@ class Pipeline:
         # Submit in batches respecting concurrency, running identification
         # on each specimen as its consensus completes (like live mode)
         pending = list(jobs)
-        while pending or self._futures:
+        while (pending or self._futures) and not self._shutdown.is_set():
             # Fill available slots
             while pending:
                 slots = self.config.workers - len(self._futures)
@@ -258,6 +285,7 @@ class Pipeline:
             if self._futures:
                 self._wait_for_any_future()
                 self._rebuild_state()
+                self._drain_cmd_queue()
 
                 # Identify any specimens that just completed
                 # (_wait_for_any_future removes done futures, so check state)
@@ -283,7 +311,7 @@ class Pipeline:
         logger.info(f"Running consensus for {len(jobs)} specimens")
 
         pending = list(jobs)
-        while pending or self._futures:
+        while (pending or self._futures) and not self._shutdown.is_set():
             # Fill available slots
             while pending:
                 slots = self.config.workers - len(self._futures)
@@ -296,6 +324,7 @@ class Pipeline:
             if self._futures:
                 self._wait_for_any_future()
                 self._rebuild_state()
+                self._drain_cmd_queue()
 
                 # Identify specimens that just completed
                 if self.identify:

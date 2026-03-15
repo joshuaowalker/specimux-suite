@@ -95,12 +95,21 @@ def main():
 
     if args.command == "batch":
         pipeline.run_batch()
-        if not args.no_web:
-            print("Pipeline complete. Dashboard still running — press Enter to exit.", file=sys.stderr)
-            try:
-                input()
-            except (KeyboardInterrupt, EOFError):
-                pass
+        if sys.stdin.isatty() and sys.stderr.isatty():
+            import queue
+            from .console import ConsoleUI
+            cmd_queue = queue.Queue()
+            with ConsoleUI("batch_complete", pipeline.state, cmd_queue) as console:
+                try:
+                    while True:
+                        try:
+                            cmd = cmd_queue.get(timeout=1.0)
+                            if cmd == "enter":
+                                break
+                        except queue.Empty:
+                            console.redraw()
+                except (KeyboardInterrupt, EOFError):
+                    pass
     elif args.command == "live":
         pipeline.run_live()
 
