@@ -3,7 +3,7 @@
 import gzip
 from pathlib import Path
 
-from specimux_suite.simulator import simulate
+from specimux_suite.replay import simulate
 from specimux_suite.util import count_fastq_reads_fast
 
 

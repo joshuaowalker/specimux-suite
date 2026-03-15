@@ -175,5 +175,5 @@ def replay_main():
         datefmt="%H:%M:%S",
     )
 
-    from .simulator import simulate
+    from .replay import simulate
     simulate(args.source, args.output_dir, args.reads_per_file, args.delay, compress=args.gzip)
