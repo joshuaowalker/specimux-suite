@@ -290,7 +290,7 @@ col.col-reads { width: 10%; }
 </div>
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, finalizing: false };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, finalizing: false, mode: null };
 let sortKey = 'specimen_id';
 let sortAsc = true;
 let searchTerm = '';
@@ -351,6 +351,7 @@ function applyEvent(event) {
   const d = event.data;
   switch (event.type) {
     case 'pipeline.started':
+      state.mode = d.mode || null;
       if (d.config_summary) {
         if (d.config_summary.min_reads) minReads = d.config_summary.min_reads;
         if (d.config_summary.reprocess_ratio != null) reprocessRatio = d.config_summary.reprocess_ratio;
@@ -432,7 +433,7 @@ function getDisplayStatus(s) {
     return hasIdentification(s) ? 'updating' : 'consensus_running';
   }
   if (s.status === 'waiting') {
-    return s.total_reads >= minReads ? 'queued' : 'waiting';
+    return (state.mode === 'batch' || s.total_reads >= minReads) ? 'queued' : 'waiting';
   }
   if (s.status === 'consensus_done' && (s.clusters || []).length === 0) {
     return 'no_clusters';
@@ -506,12 +507,13 @@ function render() {
   // ID results: identified / no match / low reads (not enough data to process)
   document.getElementById('stat-identified').textContent = all.filter(s => getIdResult(s) === 'identified').length;
   document.getElementById('stat-nomatch').textContent = all.filter(s => getIdResult(s) === 'no_match').length;
-  document.getElementById('stat-lowreads').textContent = all.filter(s => s.total_reads < minReads).length;
+  const effectiveMinReads = state.mode === 'batch' ? 0 : minReads;
+  document.getElementById('stat-lowreads').textContent = all.filter(s => s.total_reads < effectiveMinReads).length;
 
   // Pipeline activity: processing / queued (new) / queued (reprocess)
   document.getElementById('stat-processing').textContent = all.filter(s => s.status === 'consensus_running').length;
   document.getElementById('stat-queued-new').textContent = all.filter(s =>
-    (s.consensus_version || 0) === 0 && s.total_reads >= minReads && s.status !== 'consensus_running'
+    (s.consensus_version || 0) === 0 && s.total_reads >= effectiveMinReads && s.status !== 'consensus_running'
   ).length;
   document.getElementById('stat-queued-reprocess').textContent = all.filter(s => {
     if ((s.consensus_version || 0) === 0) return false;

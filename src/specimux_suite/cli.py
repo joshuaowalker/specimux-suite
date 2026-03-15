@@ -35,6 +35,8 @@ def main():
                              help="Seconds to wait for file to stabilize (default: 30)")
     live_parser.add_argument("--watch-pattern", default="*.fastq",
                              help="Glob pattern for FASTQ files (default: *.fastq)")
+    live_parser.add_argument("--presample", type=int, default=100,
+                             help="Subsample reads for incremental consensus; 0 = no limit (default: 100)")
 
     args = parser.parse_args()
 
@@ -76,22 +78,30 @@ def main():
         share_max_clients=share_max_clients,
         settle_time=getattr(args, "settle_time", 30.0),
         watch_pattern=getattr(args, "watch_pattern", "*.fastq"),
+        live_presample=getattr(args, "presample", 100),
     )
 
     from .pipeline import Pipeline
     pipeline = Pipeline(config)
 
+    # Start web server in background (both modes)
+    if not args.no_web:
+        from .web.server import start_web_server
+        start_web_server(pipeline.event_log, pipeline.state, config)
+        if not args.no_open:
+            import webbrowser
+            url = f"http://localhost:{config.web_port}"
+            webbrowser.open(url)
+
     if args.command == "batch":
         pipeline.run_batch()
-    elif args.command == "live":
-        # Start web server in background
         if not args.no_web:
-            from .web.server import start_web_server
-            start_web_server(pipeline.event_log, pipeline.state, config)
-            if not args.no_open:
-                import webbrowser
-                url = f"http://localhost:{config.web_port}"
-                webbrowser.open(url)
+            print("Pipeline complete. Dashboard still running — press Enter to exit.", file=sys.stderr)
+            try:
+                input()
+            except (KeyboardInterrupt, EOFError):
+                pass
+    elif args.command == "live":
         pipeline.run_live()
 
 

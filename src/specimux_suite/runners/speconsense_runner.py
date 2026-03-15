@@ -27,8 +27,11 @@ class SpeconsenseRunner:
         self.config = config
         self.event_log = event_log
 
-    def run(self, specimen_id: str, specimen_fastq: Path) -> list[dict]:
+    def run(self, specimen_id: str, specimen_fastq: Path, presample: int = 0) -> list[dict]:
         """Run speconsense on a specimen FASTQ.
+
+        Args:
+            presample: If > 0, pass --presample N to limit reads considered.
 
         Returns list of cluster dicts: [{name, size, ric, rid}, ...]
         """
@@ -44,7 +47,7 @@ class SpeconsenseRunner:
             "read_count": read_count,
         })
 
-        cmd = self._build_command(specimen_fastq, output_dir)
+        cmd = self._build_command(specimen_fastq, output_dir, presample=presample)
         logger.info(f"Running speconsense for {specimen_id}: {' '.join(str(c) for c in cmd)}")
 
         try:
@@ -99,13 +102,15 @@ class SpeconsenseRunner:
             })
             return []
 
-    def _build_command(self, specimen_fastq: Path, output_dir: Path) -> list[str]:
+    def _build_command(self, specimen_fastq: Path, output_dir: Path, presample: int = 0) -> list[str]:
         """Build the speconsense command line."""
         cmd = [
             "speconsense",
             str(specimen_fastq),
             "-O", str(output_dir),
         ]
+        if presample > 0:
+            cmd.extend(["--presample", str(presample)])
         cmd.extend(self.config.speconsense_args)
         return cmd
 

@@ -25,16 +25,18 @@ class Scheduler:
         self.config = config
         self.state = state
 
-    def get_ready_jobs(self, max_jobs: Optional[int] = None) -> list[ConsensusJob]:
+    def get_ready_jobs(self, max_jobs: Optional[int] = None, min_reads: Optional[int] = None) -> list[ConsensusJob]:
         """Return prioritized list of specimens ready for consensus.
 
         Prioritization:
         - Specimens with no clusters: highest priority (by read count desc)
         - Specimens with clusters: reprocess if new_reads / reads_at_last_consensus > reprocess_ratio
         - Never-processed specimens are always eligible if >= min_reads
+
+        Args:
+            min_reads: Override config.min_reads threshold. Use 0 to process all.
         """
-        if max_jobs is None:
-            max_jobs = self.config.workers
+        threshold = min_reads if min_reads is not None else self.config.min_reads
 
         jobs = []
 
@@ -43,7 +45,7 @@ class Scheduler:
             if spec.status == SpecimenStatus.CONSENSUS_RUNNING:
                 continue
 
-            if spec.total_reads < self.config.min_reads:
+            if spec.total_reads < threshold:
                 continue
 
             has_clusters = len(spec.clusters) > 0
@@ -81,20 +83,24 @@ class Scheduler:
 
         return jobs[:max_jobs]
 
-    def get_all_eligible_jobs(self, max_jobs: Optional[int] = None) -> list[ConsensusJob]:
+    def get_all_eligible_jobs(self, max_jobs: Optional[int] = None, min_reads: Optional[int] = None) -> list[ConsensusJob]:
         """Return ALL specimens eligible for consensus, ignoring reprocess_ratio.
 
         Like get_ready_jobs() but skips the reprocess_ratio check — any specimen
         with total_reads >= min_reads that isn't currently running is returned.
         Used for finalization when the operator knows no more data is coming.
+
+        Args:
+            min_reads: Override config.min_reads threshold. Use 0 to process all.
         """
+        threshold = min_reads if min_reads is not None else self.config.min_reads
         jobs = []
 
         for sid, spec in self.state.specimens.items():
             if spec.status == SpecimenStatus.CONSENSUS_RUNNING:
                 continue
 
-            if spec.total_reads < self.config.min_reads:
+            if spec.total_reads < threshold:
                 continue
 
             if spec.consensus_version == 0:

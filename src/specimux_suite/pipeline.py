@@ -101,13 +101,9 @@ class Pipeline:
         # Rebuild state after specimux events
         self._rebuild_state()
 
-        # Step 2: Schedule and run consensus jobs
+        # Step 2: Run consensus → identification, interleaved per-specimen
         logger.info(f"Found {len(specimens)} specimens, scheduling consensus")
-        self._run_consensus_round()
-
-        # Step 3: Run identification on completed specimens
-        if self.identify:
-            self._run_identification()
+        self._run_consensus_round(min_reads=0)
 
         self._executor.shutdown(wait=True)
         logger.info("Batch pipeline complete")
@@ -232,7 +228,7 @@ class Pipeline:
         so progress is visible in the UI specimen-by-specimen.
         """
         self._rebuild_state()
-        jobs = self.scheduler.get_all_eligible_jobs(max_jobs=None)
+        jobs = self.scheduler.get_all_eligible_jobs(max_jobs=None, min_reads=0)
 
         # Filter out specimens already in-flight
         jobs = [j for j in jobs if j.specimen_id not in self._futures]
@@ -273,33 +269,39 @@ class Pipeline:
         self.event_log.emit("finalization.completed", {})
         logger.info("Finalize: complete")
 
-    def _run_consensus_round(self) -> None:
-        """Run consensus on all ready specimens, respecting concurrency."""
-        jobs = self.scheduler.get_ready_jobs(max_jobs=None)  # get all ready
+    def _run_consensus_round(self, min_reads: int | None = None) -> None:
+        """Run consensus on all ready specimens, interleaving identification.
+
+        Args:
+            min_reads: Override config.min_reads threshold. Use 0 to process all.
+        """
+        jobs = self.scheduler.get_ready_jobs(max_jobs=None, min_reads=min_reads)
         if not jobs:
             logger.info("No specimens ready for consensus")
             return
 
         logger.info(f"Running consensus for {len(jobs)} specimens")
 
-        # Submit in batches respecting concurrency
         pending = list(jobs)
-        while pending:
-            slots = self.scheduler.available_slots()
-            if slots <= 0:
-                # Wait for a future to complete
-                self._wait_for_any_future()
-                self._rebuild_state()
-                continue
-
-            batch = pending[:slots]
-            pending = pending[slots:]
-
-            for job in batch:
+        while pending or self._futures:
+            # Fill available slots
+            while pending:
+                slots = self.config.workers - len(self._futures)
+                if slots <= 0:
+                    break
+                job = pending.pop(0)
                 self._submit_consensus(job.specimen_id)
 
-        # Wait for all remaining
-        self._wait_all_futures()
+            # Wait for at least one to finish
+            if self._futures:
+                self._wait_for_any_future()
+                self._rebuild_state()
+
+                # Identify specimens that just completed
+                if self.identify:
+                    for sid, spec in self.state.specimens.items():
+                        if spec.clusters and not spec.identification:
+                            self._submit_identification(sid)
 
     def _schedule_consensus(self) -> None:
         """Check scheduler and submit consensus jobs for available slots."""
@@ -313,9 +315,9 @@ class Pipeline:
         jobs = self.scheduler.get_ready_jobs(max_jobs=slots)
         logger.info(f"Scheduler: {len(jobs)} specimens ready for consensus ({slots} slots available)")
         for job in jobs:
-            self._submit_consensus(job.specimen_id)
+            self._submit_consensus(job.specimen_id, presample=self.config.live_presample)
 
-    def _submit_consensus(self, specimen_id: str) -> None:
+    def _submit_consensus(self, specimen_id: str, presample: int = 0) -> None:
         """Submit a consensus job to the thread pool."""
         # Guard: don't submit if already in-flight (race between submit and
         # consensus.started event being written to the log)
@@ -330,12 +332,12 @@ class Pipeline:
             return
 
         logger.info(f"Submitting consensus job for {specimen_id} ({spec.total_reads} reads)")
-        future = self._executor.submit(self._run_consensus_job, specimen_id, specimen_fastq)
+        future = self._executor.submit(self._run_consensus_job, specimen_id, specimen_fastq, presample)
         self._futures[specimen_id] = future
 
-    def _run_consensus_job(self, specimen_id: str, specimen_fastq: Path) -> list[dict]:
+    def _run_consensus_job(self, specimen_id: str, specimen_fastq: Path, presample: int = 0) -> list[dict]:
         """Run consensus for a single specimen (executed in thread pool)."""
-        return self.speconsense.run(specimen_id, specimen_fastq)
+        return self.speconsense.run(specimen_id, specimen_fastq, presample=presample)
 
     def _submit_identification(self, specimen_id: str, deferred: bool = False) -> None:
         """Submit identification for a specimen if it has clusters."""
@@ -348,14 +350,6 @@ class Pipeline:
         label = f" (deferred from drain)" if deferred else ""
         logger.info(f"Identifying {specimen_id}{label}")
         self._executor.submit(self.identify.run, specimen_id, consensus_fasta)
-
-    def _run_identification(self) -> None:
-        """Run identification on all specimens with completed consensus."""
-        self._rebuild_state()
-
-        for sid, spec in self.state.specimens.items():
-            if spec.clusters and not spec.identification:
-                self._submit_identification(sid)
 
     def _find_specimen_fastq(self, specimen_id: str, pool: str) -> Path | None:
         """Find the accumulated FASTQ for a specimen in specimux output."""

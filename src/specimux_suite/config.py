@@ -40,6 +40,9 @@ class PipelineConfig:
     # Speconsense passthrough args
     speconsense_args: list[str] = field(default_factory=list)
 
+    # Live mode: subsample reads for incremental consensus (0 = no limit)
+    live_presample: int = 100
+
     # vsearch settings
     vsearch_min_identity: float = 0.85
     vsearch_max_accepts: int = 10

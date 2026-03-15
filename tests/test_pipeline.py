@@ -170,7 +170,7 @@ def test_finalization_calls_get_all_eligible_jobs(tmp_path):
 
         pipeline._run_finalization()
 
-        pipeline.scheduler.get_all_eligible_jobs.assert_called_once_with(max_jobs=None)
+        pipeline.scheduler.get_all_eligible_jobs.assert_called_once_with(max_jobs=None, min_reads=0)
         pipeline.scheduler.get_ready_jobs.assert_not_called()
 
         pipeline._executor.shutdown(wait=False)
