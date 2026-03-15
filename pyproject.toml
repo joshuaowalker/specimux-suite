@@ -24,7 +24,7 @@ dev = [
 
 [project.scripts]
 specimux-suite = "specimux_suite.cli:main"
-specimux-simulate = "specimux_suite.cli:simulate_main"
+specimux-replay = "specimux_suite.cli:replay_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,5 +1,6 @@
-"""MinION output simulator — splits a FASTQ into chunks with configurable delays."""
+"""FASTQ replay — splits a FASTQ into timed chunks to simulate MinKNOW output."""
 
+import gzip
 import logging
 import os
 import time
@@ -15,10 +16,11 @@ def simulate(
     output_dir: Path,
     reads_per_file: int = 4000,
     delay: float = 30.0,
+    compress: bool = False,
 ) -> None:
     """Split source FASTQ into chunks, writing to output_dir with delays.
 
-    Files are named in MinKNOW style: FAX00000_pass_00000000_0.fastq
+    Files are named in MinKNOW style: FAX00000_pass_00000000_0.fastq[.gz]
     Written atomically (temp + rename) to avoid partial-file processing.
     """
     output_dir = Path(output_dir)
@@ -28,8 +30,8 @@ def simulate(
     read_buf = []
     lines_in_read = 0
 
-    logger.info(f"Simulating MinION output from {source_fastq}")
-    logger.info(f"  reads_per_file={reads_per_file}, delay={delay}s, output={output_dir}")
+    logger.info(f"Replaying {source_fastq} as incremental chunks")
+    logger.info(f"  reads_per_file={reads_per_file}, delay={delay}s, gzip={compress}, output={output_dir}")
 
     with open(source_fastq) as f:
         for line in f:
@@ -40,7 +42,7 @@ def simulate(
                 lines_in_read = 0
 
                 if len(read_buf) // 4 >= reads_per_file:
-                    _write_chunk(output_dir, file_num, read_buf)
+                    _write_chunk(output_dir, file_num, read_buf, compress)
                     file_num += 1
                     read_buf = []
 
@@ -50,14 +52,17 @@ def simulate(
 
     # Write remaining reads
     if read_buf:
-        _write_chunk(output_dir, file_num, read_buf)
+        _write_chunk(output_dir, file_num, read_buf, compress)
 
 
-def _write_chunk(output_dir: Path, file_num: int, lines: list[str]) -> None:
+def _write_chunk(output_dir: Path, file_num: int, lines: list[str], compress: bool = False) -> None:
     """Write a chunk of FASTQ lines atomically."""
-    filename = f"FAX00000_pass_{file_num:08d}_0.fastq"
+    ext = ".fastq.gz" if compress else ".fastq"
+    filename = f"FAX00000_pass_{file_num:08d}_0{ext}"
     path = output_dir / filename
     content = "".join(lines).encode()
+    if compress:
+        content = gzip.compress(content)
     atomic_write(path, content)
     read_count = len(lines) // 4
     logger.info(f"  Wrote {filename} ({read_count} reads)")

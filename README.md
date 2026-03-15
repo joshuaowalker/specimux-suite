@@ -96,22 +96,22 @@ Features:
 - Pipeline statistics (total reads, matched reads, specimen counts by status)
 - QR code for sharing the dashboard URL on your local network (with `--share`)
 
-## Simulator
+## Replay
 
-For testing or demos, `specimux-simulate` splits a source FASTQ into timed chunks that mimic MinION output:
+For testing or demos, `specimux-replay` splits a source FASTQ into timed chunks that mimic MinKNOW output:
 
 ```bash
-specimux-simulate source.fastq simulated_output/ --reads-per-file 4000 --delay 30
+specimux-replay source.fastq simulated_output/ --reads-per-file 4000 --delay 30
 ```
 
-Files are written atomically with MinKNOW-style filenames. Pair with live mode to simulate a sequencing run:
+Files are written atomically with MinKNOW-style filenames. Pair with live mode to replay a sequencing run:
 
 ```bash
 # Terminal 1: start the pipeline
 specimux-suite live primers.fasta specimens.tsv simulated_output/ --reference-db refs.fasta
 
-# Terminal 2: simulate sequencer output
-specimux-simulate source.fastq simulated_output/
+# Terminal 2: replay sequencer output
+specimux-replay source.fastq simulated_output/
 ```
 
 ## Output

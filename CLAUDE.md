@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Single test**: `pytest tests/test_state.py::test_read_totals -v`
 - **Run batch**: `specimux-suite batch <primers> <specimens> <reads.fastq> [--reference-db <refs.fasta>]`
 - **Run live**: `specimux-suite live <primers> <specimens> <watch_dir> [--reference-db <refs.fasta>]`
-- **Simulate**: `specimux-simulate <source.fastq> <output_dir> [--reads-per-file 4000] [--delay 30]`
+- **Replay**: `specimux-replay <source.fastq> <output_dir> [--reads-per-file 4000] [--delay 30]`
 
 ## Architecture
 

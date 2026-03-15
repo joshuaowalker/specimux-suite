@@ -1,4 +1,4 @@
-"""CLI entry points: specimux-suite and specimux-simulate."""
+"""CLI entry points: specimux-suite and specimux-replay."""
 
 import argparse
 import logging
@@ -154,10 +154,10 @@ def _detect_lan_ip() -> str | None:
         return None
 
 
-def simulate_main():
+def replay_main():
     parser = argparse.ArgumentParser(
-        prog="specimux-simulate",
-        description="Simulate MinION FASTQ output for testing",
+        prog="specimux-replay",
+        description="Replay a FASTQ file as incremental MinKNOW-style chunks",
     )
     parser.add_argument("source", type=Path, help="Source FASTQ file to split")
     parser.add_argument("output_dir", type=Path, help="Output directory for chunks")
@@ -165,6 +165,8 @@ def simulate_main():
                         help="Reads per output file (default: 4000)")
     parser.add_argument("--delay", type=float, default=30.0,
                         help="Delay in seconds between files (default: 30)")
+    parser.add_argument("--gzip", action="store_true",
+                        help="Compress output files (.fastq.gz)")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
@@ -177,4 +179,4 @@ def simulate_main():
     )
 
     from .simulator import simulate
-    simulate(args.source, args.output_dir, args.reads_per_file, args.delay)
+    simulate(args.source, args.output_dir, args.reads_per_file, args.delay, compress=args.gzip)
