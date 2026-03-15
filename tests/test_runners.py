@@ -145,6 +145,12 @@ def test_name_lookup_from_fasta(tmp_path):
         "ACGTACGT\n"
         ">iNaturalist_99999_Russula_emetica size=1\n"
         "TGCATGCA\n"
+        '>iNaturalist_189757404_Gymnopilus_sp_IN03 name="= Gymnopilus "sp-IN03""\n'
+        "GGGGAAAA\n"
+        '>iNaturalist_30000660_thompsonii_IN01 name=""thompsonii-IN01""\n'
+        "CCCCTTTT\n"
+        '>MycoMap_106681_Agaricus_sp_IN02 name="Agaricus \\"sp-IN02\\""\n'
+        "AAAACCCC\n"
     )
 
     config = _make_config(tmp_path, reference_db=ref)
@@ -154,6 +160,11 @@ def test_name_lookup_from_fasta(tmp_path):
 
     assert runner._name_lookup["iNaturalist_28125417_Coprinellus_sp"] == "Coprinellus sp. 'radians IN02'"
     assert "iNaturalist_99999_Russula_emetica" not in runner._name_lookup
+    # Embedded double quotes: greedy match captures from first " to last " on line
+    assert runner._name_lookup["iNaturalist_189757404_Gymnopilus_sp_IN03"] == '= Gymnopilus "sp-IN03"'
+    assert runner._name_lookup["iNaturalist_30000660_thompsonii_IN01"] == '"thompsonii-IN01"'
+    # Backslash-escaped quotes are unescaped
+    assert runner._name_lookup["MycoMap_106681_Agaricus_sp_IN02"] == 'Agaricus "sp-IN02"'
 
 
 def test_parse_clusters_from_fasta(tmp_path):

@@ -32,12 +32,14 @@ class IdentifyRunner:
             logger.error(f"Reference database not found: {ref}")
             return False
 
-        # Check if UDB already exists alongside the FASTA
+        # Check if UDB already exists and is up-to-date
         udb = ref.with_suffix(".udb")
-        if udb.exists():
+        if udb.exists() and udb.stat().st_mtime >= ref.stat().st_mtime:
             self._udb_path = udb
             self._load_name_lookup()
             return True
+        if udb.exists():
+            logger.info(f"Reference FASTA is newer than UDB, rebuilding")
 
         # Build UDB
         logger.info(f"Building vsearch UDB from {ref}")
@@ -63,14 +65,14 @@ class IdentifyRunner:
         ref = self.config.reference_db
         if not ref or not ref.exists():
             return
-        name_re = re.compile(r'name="([^"]+)"')
+        name_re = re.compile(r'name="(.+)"')
         with open(ref) as f:
             for line in f:
                 if line.startswith(">"):
                     seq_id = line[1:].strip().split()[0]
                     m = name_re.search(line)
                     if m:
-                        self._name_lookup[seq_id] = m.group(1)
+                        self._name_lookup[seq_id] = m.group(1).replace('\\"', '"')
 
     def run(self, specimen_id: str, consensus_fasta: Path) -> list[dict]:
         """Identify consensus clusters against reference DB.
