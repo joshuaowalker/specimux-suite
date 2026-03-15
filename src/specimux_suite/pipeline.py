@@ -272,6 +272,7 @@ class Pipeline:
         # Submit in batches respecting concurrency, running identification
         # on each specimen as its consensus completes (like live mode)
         pending = list(jobs)
+        identified = set()
         while (pending or self._futures) and not self._shutdown.is_set():
             # Fill available slots
             while pending:
@@ -287,12 +288,12 @@ class Pipeline:
                 self._rebuild_state()
                 self._drain_cmd_queue()
 
-                # Identify any specimens that just completed
-                # (_wait_for_any_future removes done futures, so check state)
+                # Identify specimens that just completed consensus
                 if self.identify:
                     for sid, spec in self.state.specimens.items():
-                        if spec.clusters and not spec.identification:
+                        if spec.clusters and sid not in identified:
                             self._submit_identification(sid)
+                            identified.add(sid)
 
         self.event_log.emit("finalization.completed", {})
         logger.info("Finalize: complete")
@@ -311,6 +312,7 @@ class Pipeline:
         logger.info(f"Running consensus for {len(jobs)} specimens")
 
         pending = list(jobs)
+        identified = set()
         while (pending or self._futures) and not self._shutdown.is_set():
             # Fill available slots
             while pending:
@@ -326,11 +328,12 @@ class Pipeline:
                 self._rebuild_state()
                 self._drain_cmd_queue()
 
-                # Identify specimens that just completed
+                # Identify specimens that just completed consensus
                 if self.identify:
                     for sid, spec in self.state.specimens.items():
-                        if spec.clusters and not spec.identification:
+                        if spec.clusters and sid not in identified:
                             self._submit_identification(sid)
+                            identified.add(sid)
 
     def _schedule_consensus(self) -> None:
         """Check scheduler and submit consensus jobs for available slots."""
