@@ -36,6 +36,7 @@ class IdentificationMatch:
 class SpecimenState:
     specimen_id: str
     pool: str = ""
+    community_taxon: str = ""
     total_reads: int = 0
     reads_at_last_consensus: int = 0
     consensus_version: int = 0
@@ -112,6 +113,11 @@ class PipelineState:
             spec = self.get_specimen(s["specimen_id"])
             if s.get("pool"):
                 spec.pool = s["pool"]
+
+    def _on_specimens_taxa(self, data: dict):
+        for specimen_id, taxon in data.get("taxa", {}).items():
+            spec = self.get_specimen(specimen_id)
+            spec.community_taxon = taxon
 
     def _on_file_detected(self, data: dict):
         path = data["path"]
@@ -195,6 +201,7 @@ class PipelineState:
     _handlers = {
         "pipeline.started": _on_pipeline_started,
         "specimens.loaded": _on_specimens_loaded,
+        "specimens.taxa": _on_specimens_taxa,
         "file.detected": _on_file_detected,
         "file.stable": _on_file_stable,
         "specimux.started": _on_specimux_started,
@@ -211,6 +218,7 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
     result = {
         "specimen_id": s.specimen_id,
         "pool": s.pool,
+        "community_taxon": s.community_taxon,
         "total_reads": s.total_reads,
         "reads_at_last_consensus": s.reads_at_last_consensus,
         "consensus_version": s.consensus_version,

@@ -12,6 +12,7 @@ from .console import ConsoleUI
 from .events import EventLog
 from .state import PipelineState
 from .scheduler import Scheduler
+from .inat import extract_inat_ids, fetch_community_taxa
 from .util import parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
 from .runners.speconsense_runner import SpeconsenseRunner
@@ -60,6 +61,21 @@ class Pipeline:
                 "specimens": specimens,
             })
             logger.info(f"Loaded {len(specimens)} specimens from index file")
+
+            # Fetch community taxon from iNaturalist asynchronously
+            inat_ids = extract_inat_ids(specimens)
+            if inat_ids:
+                self._executor.submit(self._fetch_inat_taxa, inat_ids)
+
+    def _fetch_inat_taxa(self, inat_ids: dict[str, str]) -> None:
+        """Fetch community taxon from iNaturalist and emit event (runs in thread pool)."""
+        try:
+            taxa = fetch_community_taxa(inat_ids, cache_dir=self.config.output_dir)
+            if taxa:
+                self.event_log.emit("specimens.taxa", {"taxa": taxa})
+                logger.info(f"Fetched community taxon for {len(taxa)} specimens")
+        except Exception as e:
+            logger.warning(f"Failed to fetch iNaturalist taxa: {e}")
 
     def validate_tools(self) -> list[str]:
         """Check that required external tools are on PATH. Returns list of missing tools."""

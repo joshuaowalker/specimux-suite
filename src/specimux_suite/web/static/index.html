@@ -177,6 +177,12 @@ a.hit-name:hover { text-decoration: underline; }
 }
 .inat-link:hover { background: #4e9a06; color: #fff; }
 
+.community-taxon {
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--text-dim);
+}
+
 .cluster-badge {
   display: inline-block;
   font-size: 0.7rem;
@@ -357,7 +363,7 @@ function connect() {
 
   // Listen for specific event types too
   for (const type of [
-    'pipeline.started', 'specimens.loaded', 'specimux.started', 'specimux.progress', 'specimux.completed', 'specimen.updated',
+    'pipeline.started', 'specimens.loaded', 'specimens.taxa', 'specimux.started', 'specimux.progress', 'specimux.completed', 'specimen.updated',
     'consensus.started', 'consensus.completed',
     'identification.completed', 'pipeline.error',
     'finalization.started', 'finalization.completed'
@@ -387,6 +393,11 @@ function applyEvent(event) {
           state.specimens[s.specimen_id] = { specimen_id: s.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
         }
         if (s.pool) state.specimens[s.specimen_id].pool = s.pool;
+      }
+      break;
+    case 'specimens.taxa':
+      for (const [sid, taxon] of Object.entries(d.taxa || {})) {
+        if (state.specimens[sid]) state.specimens[sid].community_taxon = taxon;
       }
       break;
     case 'specimux.started':
@@ -591,7 +602,7 @@ function render() {
     const isExpanded = expandedSpecimens.has(s.specimen_id);
 
     rows.push(`<tr>
-      <td><strong>${esc(s.specimen_id)}</strong>${inatLink(s.specimen_id)}</td>
+      <td><strong>${esc(s.specimen_id)}</strong>${inatLink(s.specimen_id)}${s.community_taxon ? `<br><span class="community-taxon">${esc(s.community_taxon)}</span>` : ''}</td>
       <td class="status-cell"><span class="status-pill status-${displayStatus}">${statusLabel}</span></td>
       <td>${topHit ? `<span class="identity-dot" style="background:${dotColor}"></span><span class="hit-pct">${pct}%</span>` : ''}</td>
       <td class="top-hit">${topHit ? `${linkedName(topHit.name || topHit.ref_id || '')}${clusterBadge}` : `${clusterBadge || '—'}`}</td>
