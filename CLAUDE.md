@@ -35,7 +35,7 @@ watcher (live) or CLI (batch)
 
 ## Event types
 
-All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `file.detected`, `file.stable`, `specimux.started`, `specimux.completed`, `specimen.updated`, `consensus.started`, `consensus.completed`, `identification.completed`, `pipeline.error`.
+All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `specimens.taxa`, `file.detected`, `file.stable`, `specimux.started`, `specimux.completed`, `specimen.updated`, `consensus.started`, `consensus.completed`, `identification.completed`, `pipeline.error`.
 
 Specimen status transitions: `WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE → IDENTIFIED | NO_MATCH | ERROR`
 
@@ -45,6 +45,15 @@ Specimen status transitions: `WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE �
 - Integration: `~/mm/data/ont98/scale-test/all25k.fastq`
 - Config: `~/mm/data/ont98/data/primers.fasta`, `~/mm/data/ont98/data/Index.txt`
 - Reference DB: `~/mm/data/general/iNaturalist20250902.fasta`
+
+## Adding a new event type
+
+When adding a new event type, there are **four places** that must be updated:
+
+1. **Emit the event** — call `event_log.emit("new.event", {...})` from the appropriate place (pipeline, runner, etc.)
+2. **State handler** — add `_on_new_event` method to `PipelineState` in `state.py` and register it in the `_handlers` dict
+3. **Dashboard `applyEvent()`** — add a `case` in the `switch` in `index.html` to apply the event to client-side state
+4. **Dashboard SSE listener list** — add the event type string to the `for (const type of [...])` array in `connect()` (`index.html`). The `EventSource` only delivers named SSE events to explicitly registered listeners — missing this step silently drops the event.
 
 ## Key design decisions
 
