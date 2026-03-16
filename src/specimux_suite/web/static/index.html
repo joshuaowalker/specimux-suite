@@ -233,6 +233,7 @@ a.hit-name:hover { text-decoration: underline; }
   font-variant-numeric: tabular-nums;
 }
 .progress-bar-wrap {
+  display: inline-block;
   width: 120px;
   height: 6px;
   background: var(--border);
@@ -240,6 +241,7 @@ a.hit-name:hover { text-decoration: underline; }
   overflow: hidden;
 }
 .progress-bar-fill {
+  display: block;
   height: 100%;
   background: var(--processing);
   border-radius: 3px;
@@ -285,7 +287,7 @@ a.hit-name:hover { text-decoration: underline; }
       &nbsp;Matched: <span id="stat-matched">0</span>
       &nbsp;Specimens: <span id="stat-total">0</span>
       <div class="stats-sep"></div>
-      Identified: <span id="stat-identified">0</span>
+      ID Ready: <span id="stat-identified">0</span>
       &nbsp;No match: <span id="stat-nomatch">0</span>
       &nbsp;Low reads: <span id="stat-lowreads">0</span>
       <div class="stats-sep"></div>
@@ -344,7 +346,7 @@ function connect() {
 
   es.onopen = () => {
     badge.className = 'connected';
-    badge.textContent = 'live';
+    badge.textContent = 'connected';
   };
 
   es.onerror = () => {
@@ -596,7 +598,7 @@ function render() {
     const pct = (identity * 100).toFixed(1);
     const dotColor = identity >= 0.99 ? 'var(--identified)' : identity >= 0.98 ? 'var(--done)' : identity >= 0.90 ? 'var(--processing)' : 'var(--text-dim)';
     const displayStatus = getDisplayStatus(s);
-    const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'ready', updating: 'updating' };
+    const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'ready', updating: 'updating', identified: 'ID ready' };
     const statusLabel = statusLabels[displayStatus] || displayStatus.replace('_', ' ');
     const clusterBadge = buildClusterBadge(s);
     const isExpanded = expandedSpecimens.has(s.specimen_id);
