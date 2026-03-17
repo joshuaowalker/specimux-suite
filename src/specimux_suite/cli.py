@@ -54,8 +54,10 @@ def main():
     profile = None
     specimux_profile = None
     speconsense_profile = None
+    summarize_profile = None
     specimux_overrides = {}
     speconsense_overrides = {}
+    summarize_overrides = {}
     if args.profile:
         from .profiles import SuiteProfile
         profile = SuiteProfile.load(args.profile)
@@ -82,6 +84,11 @@ def main():
         speconsense_section = dict(profile.speconsense)
         speconsense_profile = speconsense_section.pop("profile", None)
         speconsense_overrides = speconsense_section
+
+        # Extract summarize profile and overrides
+        summarize_section = dict(profile.summarize)
+        summarize_profile = summarize_section.pop("profile", None)
+        summarize_overrides = summarize_section
 
         # Apply identify section
         _identify_key_map = {
@@ -123,6 +130,9 @@ def main():
         speconsense_overrides=speconsense_overrides,
         specimux_args=args.specimux_args if args.specimux_args else [],
         speconsense_args=args.speconsense_args if args.speconsense_args else [],
+        summarize_profile=summarize_profile,
+        summarize_overrides=summarize_overrides,
+        summarize_args=args.summarize_args if args.summarize_args else [],
         web_host=web_host,
         web_port=args.web_port,
         share_url=share_url,
@@ -184,6 +194,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Extra arguments passed through to specimux")
     parser.add_argument("--speconsense-args", nargs=argparse.REMAINDER, default=[],
                         help="Extra arguments passed through to speconsense")
+    parser.add_argument("--summarize-args", nargs=argparse.REMAINDER, default=[],
+                        help="Extra arguments passed through to speconsense-summarize")
     parser.add_argument("--web-host", default="127.0.0.1",
                         help="Web server host (default: 127.0.0.1)")
     parser.add_argument("--web-port", type=int, default=8077,

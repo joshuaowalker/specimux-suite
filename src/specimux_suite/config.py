@@ -45,6 +45,11 @@ class PipelineConfig:
     # Speconsense passthrough args
     speconsense_args: list[str] = field(default_factory=list)
 
+    # Summarize settings
+    summarize_profile: Optional[str] = None
+    summarize_overrides: dict = field(default_factory=dict)
+    summarize_args: list[str] = field(default_factory=list)
+
     # Live mode: subsample reads for incremental consensus (0 = no limit)
     live_presample: int = 100
 
@@ -87,6 +92,10 @@ class PipelineConfig:
     @property
     def identification_output_dir(self) -> Path:
         return self.output_dir / "identification"
+
+    @property
+    def summarize_output_dir(self) -> Path:
+        return self.output_dir / "summary"
 
     def summary(self) -> dict:
         """Return a JSON-serializable config summary for events."""

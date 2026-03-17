@@ -20,6 +20,7 @@
   --identified: #2e7d32;
   --no-match: #8b6914;
   --no-clusters: #6a5acd;
+  --summarized: #1b5e20;
   --error: #cc0000;
 }
 
@@ -142,6 +143,7 @@ tr:hover { background: rgba(255,255,255,0.03); }
 .status-identified { background: var(--identified); color: #fff; }
 .status-no_match { background: var(--no-match); color: #fff; }
 .status-no_clusters { background: var(--no-clusters); color: #fff; }
+.status-summarized { background: var(--summarized); color: #fff; }
 .status-error { background: var(--error); color: #fff; }
 
 .identity-dot {
@@ -367,7 +369,9 @@ function connect() {
   for (const type of [
     'pipeline.started', 'specimens.loaded', 'specimens.taxa', 'specimux.started', 'specimux.progress', 'specimux.completed', 'specimen.updated',
     'consensus.started', 'consensus.completed',
-    'identification.completed', 'pipeline.error',
+    'identification.completed',
+    'summarize.started', 'summarize.completed',
+    'pipeline.error',
     'finalization.started', 'finalization.completed'
   ]) {
     es.addEventListener(type, (e) => {
@@ -453,6 +457,15 @@ function applyEvent(event) {
         state.specimens[d.specimen_id].identification = matches;
       }
       break;
+    case 'summarize.started':
+      break;
+    case 'summarize.completed':
+      if (state.specimens[d.specimen_id]) {
+        state.specimens[d.specimen_id].status = 'summarized';
+        state.specimens[d.specimen_id].variants = d.variants || [];
+        state.specimens[d.specimen_id].summarize_version = (state.specimens[d.specimen_id].summarize_version || 0) + 1;
+      }
+      break;
     case 'pipeline.error':
       if (d.specimen_id && state.specimens[d.specimen_id]) {
         state.specimens[d.specimen_id].status = 'error';
@@ -469,7 +482,7 @@ function hasIdentification(s) {
 // ID result category: independent of current pipeline activity
 function getIdResult(s) {
   if (hasIdentification(s)) return 'identified';
-  if (s.status === 'no_match') return 'no_match';
+  if (s.status === 'no_match' || s.status === 'summarized') return s.status === 'summarized' ? 'identified' : 'no_match';
   return 'pending';
 }
 
@@ -598,7 +611,7 @@ function render() {
     const pct = (identity * 100).toFixed(1);
     const dotColor = identity >= 0.99 ? 'var(--identified)' : identity >= 0.98 ? 'var(--done)' : identity >= 0.90 ? 'var(--processing)' : 'var(--text-dim)';
     const displayStatus = getDisplayStatus(s);
-    const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'ready', updating: 'updating', identified: 'ID ready' };
+    const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'ready', updating: 'updating', identified: 'ID ready', summarized: 'summarized' };
     const statusLabel = statusLabels[displayStatus] || displayStatus.replace('_', ' ');
     const clusterBadge = buildClusterBadge(s);
     const isExpanded = expandedSpecimens.has(s.specimen_id);

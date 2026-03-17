@@ -80,6 +80,7 @@ class SuiteProfile:
     suite: dict[str, Any] = field(default_factory=dict)
     specimux: dict[str, Any] = field(default_factory=dict)
     speconsense: dict[str, Any] = field(default_factory=dict)
+    summarize: dict[str, Any] = field(default_factory=dict)
     identify: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -146,6 +147,7 @@ class SuiteProfile:
         suite = data.get('suite', {}) or {}
         specimux = data.get('specimux', {}) or {}
         speconsense = data.get('speconsense', {}) or {}
+        summarize = data.get('summarize', {}) or {}
         identify = data.get('identify', {}) or {}
 
         # Validate version compatibility
@@ -167,6 +169,7 @@ class SuiteProfile:
             suite=suite,
             specimux=specimux,
             speconsense=speconsense,
+            summarize=summarize,
             identify=identify,
         )
 

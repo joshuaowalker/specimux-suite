@@ -17,6 +17,7 @@ from .util import parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
 from .runners.speconsense_runner import SpeconsenseRunner
 from .runners.identify_runner import IdentifyRunner
+from .runners.summarize_runner import SummarizeRunner
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class Pipeline:
         self.specimux = SpecimuxRunner(config, self.event_log)
         self.speconsense = SpeconsenseRunner(config, self.event_log)
         self.identify = IdentifyRunner(config, self.event_log) if config.reference_db else None
+        self.summarize = SummarizeRunner(config, self.event_log)
 
         self._executor = ThreadPoolExecutor(max_workers=config.workers)
         self._futures: dict[str, Future] = {}
@@ -79,7 +81,7 @@ class Pipeline:
 
     def validate_tools(self) -> list[str]:
         """Check that required external tools are on PATH. Returns list of missing tools."""
-        required = ["specimux", "speconsense"]
+        required = ["specimux", "speconsense", "speconsense-summarize"]
         if self.config.reference_db:
             required.append("vsearch")
         return [t for t in required if not _check_tool_on_path(t)]
@@ -104,6 +106,7 @@ class Pipeline:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self.config.specimux_output_dir.mkdir(parents=True, exist_ok=True)
         self.config.consensus_output_dir.mkdir(parents=True, exist_ok=True)
+        self.config.summarize_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Build identification DB if needed
         if self.identify:
@@ -129,6 +132,9 @@ class Pipeline:
             # Step 2: Run consensus → identification, interleaved per-specimen
             logger.info(f"Found {len(specimens)} specimens, scheduling consensus")
             self._run_consensus_round(min_reads=0)
+
+            # Step 3: Run summarize for all identified/no_match specimens
+            self._run_summarize_round()
 
             self._executor.shutdown(wait=True)
             self._console = None
@@ -156,6 +162,7 @@ class Pipeline:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self.config.specimux_output_dir.mkdir(parents=True, exist_ok=True)
         self.config.consensus_output_dir.mkdir(parents=True, exist_ok=True)
+        self.config.summarize_output_dir.mkdir(parents=True, exist_ok=True)
 
         if self.identify:
             self.identify.ensure_db()
@@ -310,6 +317,9 @@ class Pipeline:
                             self._submit_identification(sid)
                             identified.add(sid)
 
+        # Summarize all identified/no_match specimens, then aggregate
+        self._run_summarize_round()
+
         self.event_log.emit("finalization.completed", {})
         logger.info("Finalize: complete")
 
@@ -397,6 +407,50 @@ class Pipeline:
         label = f" (deferred from drain)" if deferred else ""
         logger.info(f"Identifying {specimen_id}{label}")
         self._executor.submit(self.identify.run, specimen_id, consensus_fasta)
+
+    def _submit_summarize(self, specimen_id: str) -> None:
+        """Submit a summarize job to the thread pool."""
+        if specimen_id in self._futures:
+            logger.debug(f"Skipping summarize for {specimen_id}: already in-flight")
+            return
+        logger.info(f"Submitting summarize job for {specimen_id}")
+        future = self._executor.submit(self.summarize.run, specimen_id)
+        self._futures[specimen_id] = future
+
+    def _run_summarize_round(self) -> None:
+        """Run summarize for all identified/no_match specimens, then aggregate."""
+        from .state import SpecimenStatus
+        self._rebuild_state()
+
+        eligible = [
+            sid for sid, spec in self.state.specimens.items()
+            if spec.status in (SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH)
+            and spec.clusters  # must have consensus output
+        ]
+
+        if not eligible:
+            logger.info("No specimens eligible for summarization")
+            return
+
+        logger.info(f"Running summarize for {len(eligible)} specimens")
+
+        pending = list(eligible)
+        while (pending or self._futures) and not self._shutdown.is_set():
+            while pending:
+                slots = self.config.workers - len(self._futures)
+                if slots <= 0:
+                    break
+                sid = pending.pop(0)
+                self._submit_summarize(sid)
+
+            if self._futures:
+                self._wait_for_any_future()
+                self._rebuild_state()
+                self._drain_cmd_queue()
+
+        # Run aggregate to generate summary.fasta etc.
+        logger.info("Running summarize aggregate")
+        self.summarize.run_aggregate()
 
     def _find_specimen_fastq(self, specimen_id: str, pool: str) -> Path | None:
         """Find the accumulated FASTQ for a specimen in specimux output."""

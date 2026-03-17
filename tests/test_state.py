@@ -150,6 +150,51 @@ def test_no_match_status(tmp_output):
     assert state.specimens["s1"].status == SpecimenStatus.NO_MATCH
 
 
+def test_summarize_state(tmp_output):
+    """summarize events should update specimen status and variants."""
+    log = EventLog(tmp_output / "events.jsonl")
+
+    log.emit("specimen.updated", {"specimen_id": "s1", "pool": "p1", "total_reads": 100})
+    log.emit("consensus.started", {"specimen_id": "s1", "job_id": "j1", "read_count": 100})
+    log.emit("consensus.completed", {
+        "specimen_id": "s1", "job_id": "j1",
+        "clusters": [{"name": "s1-c0", "size": 80, "ric": 60}],
+    })
+    log.emit("identification.completed", {
+        "specimen_id": "s1",
+        "matches": [{"cluster": "s1-c0", "top_hits": [
+            {"ref_id": "Sp_x", "name": "Species x", "identity": 0.99},
+        ]}],
+    })
+    log.emit("summarize.started", {
+        "specimen_id": "s1",
+        "job_id": "sum1",
+    })
+    log.emit("summarize.completed", {
+        "specimen_id": "s1",
+        "job_id": "sum1",
+        "variant_count": 2,
+        "variants": [
+            {"name": "s1-1.v1", "ric": 50, "size": 60, "length": 700},
+            {"name": "s1-1.v2", "ric": 10, "size": 20, "length": 695},
+        ],
+    })
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    spec = state.specimens["s1"]
+    assert spec.status == SpecimenStatus.SUMMARIZED
+    assert spec.summarize_version == 1
+    assert len(spec.variants) == 2
+    assert spec.variants[0]["name"] == "s1-1.v1"
+
+    # Check serialization
+    d = state.to_dict()
+    assert d["specimens"]["s1"]["summarize_version"] == 1
+    assert len(d["specimens"]["s1"]["variants"]) == 2
+
+
 def test_to_dict(tmp_output):
     log = EventLog(tmp_output / "events.jsonl")
     log.emit("pipeline.started", {"mode": "batch"})

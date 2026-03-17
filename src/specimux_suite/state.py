@@ -14,6 +14,7 @@ class SpecimenStatus(str, Enum):
     CONSENSUS_DONE = "consensus_done"
     IDENTIFIED = "identified"
     NO_MATCH = "no_match"
+    SUMMARIZED = "summarized"
     ERROR = "error"
 
 
@@ -43,6 +44,8 @@ class SpecimenState:
     status: SpecimenStatus = SpecimenStatus.WAITING
     clusters: list[ClusterInfo] = field(default_factory=list)
     identification: list[IdentificationMatch] = field(default_factory=list)
+    summarize_version: int = 0
+    variants: list[dict] = field(default_factory=list)
     active_job_id: Optional[str] = None
 
 
@@ -190,6 +193,17 @@ class PipelineState:
         has_hits = any(m.top_hits for m in matches)
         spec.status = SpecimenStatus.IDENTIFIED if has_hits else SpecimenStatus.NO_MATCH
 
+    def _on_summarize_started(self, data: dict):
+        spec = self.get_specimen(data["specimen_id"])
+        spec.active_job_id = data.get("job_id")
+
+    def _on_summarize_completed(self, data: dict):
+        spec = self.get_specimen(data["specimen_id"])
+        spec.status = SpecimenStatus.SUMMARIZED
+        spec.active_job_id = None
+        spec.summarize_version += 1
+        spec.variants = data.get("variants", [])
+
     def _on_pipeline_error(self, data: dict):
         self.errors.append(data)
         # If it's a specimen-level error, mark it
@@ -210,6 +224,8 @@ class PipelineState:
         "consensus.started": _on_consensus_started,
         "consensus.completed": _on_consensus_completed,
         "identification.completed": _on_identification_completed,
+        "summarize.started": _on_summarize_started,
+        "summarize.completed": _on_summarize_completed,
         "pipeline.error": _on_pipeline_error,
     }
 
@@ -231,5 +247,7 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
             {"cluster": m.cluster, "top_hits": m.top_hits}
             for m in s.identification
         ],
+        "summarize_version": s.summarize_version,
+        "variants": s.variants,
     }
     return result
