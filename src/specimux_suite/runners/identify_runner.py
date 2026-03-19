@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from adjusted_identity import AdjustmentParams, align_and_score
+
 from ..config import PipelineConfig
 from ..events import EventLog
 
@@ -149,26 +151,17 @@ class IdentifyRunner:
         return hits
 
     def _score_hits(self, consensus_fasta: Path, vsearch_hits: dict) -> list[dict]:
-        """Re-score top vsearch hits with adjusted-identity."""
-        try:
-            from adjusted_identity import align_and_score, AdjustmentParams
-        except ImportError:
-            logger.warning("adjusted-identity not installed, using vsearch identity only")
-            return self._format_matches_without_adjustment(vsearch_hits)
-
-        # Read consensus sequences
+        """Re-score top vsearch hits with adjusted-identity and filter by coverage."""
         query_seqs = _read_fasta(consensus_fasta)
 
-        # Read reference sequences for candidates (need to extract from DB)
-        # For efficiency, only score top hits per cluster
         ref_ids_needed = set()
         for hits in vsearch_hits.values():
             for hit in hits[:5]:  # top 5 per cluster
                 ref_ids_needed.add(hit["ref_id"])
 
         ref_seqs = self._extract_reference_seqs(ref_ids_needed)
-
         params = AdjustmentParams()
+        min_cov = self.config.identify_min_coverage
 
         matches = []
         for cluster_name, hits in vsearch_hits.items():
@@ -179,38 +172,39 @@ class IdentifyRunner:
                 if query_seq and ref_seq:
                     try:
                         ar = align_and_score(query_seq, ref_seq, adjustment_params=params)
-                        hit["adjusted_identity"] = ar.identity
+                        coverage = max(ar.seq1_coverage, ar.seq2_coverage)
+                        if coverage < min_cov:
+                            logger.debug(
+                                f"Filtered {cluster_name} vs {hit['ref_id']}: "
+                                f"coverage {coverage:.2f} < {min_cov}"
+                            )
+                            continue
+                        scored_hits.append({
+                            "ref_id": hit["ref_id"],
+                            "name": hit["name"],
+                            "identity": hit["identity"],
+                            "adjusted_identity": ar.identity,
+                            "coverage": coverage,
+                        })
                     except Exception as e:
                         logger.debug(f"adjusted-identity failed for {cluster_name} vs {hit['ref_id']}: {e}")
-                        hit["adjusted_identity"] = hit["identity"]
+                        scored_hits.append({
+                            "ref_id": hit["ref_id"],
+                            "name": hit["name"],
+                            "identity": hit["identity"],
+                            "adjusted_identity": hit["identity"],
+                        })
                 else:
-                    hit["adjusted_identity"] = hit["identity"]
-                scored_hits.append({
-                    "ref_id": hit["ref_id"],
-                    "name": hit["name"],
-                    "identity": hit["identity"],
-                    "adjusted_identity": hit["adjusted_identity"],
-                })
+                    scored_hits.append({
+                        "ref_id": hit["ref_id"],
+                        "name": hit["name"],
+                        "identity": hit["identity"],
+                        "adjusted_identity": hit["identity"],
+                    })
 
-            # Sort by adjusted identity descending
             scored_hits.sort(key=lambda h: h["adjusted_identity"], reverse=True)
             matches.append({"cluster": cluster_name, "top_hits": scored_hits})
 
-        return matches
-
-    def _format_matches_without_adjustment(self, vsearch_hits: dict) -> list[dict]:
-        """Format matches when adjusted-identity is not available."""
-        matches = []
-        for cluster_name, hits in vsearch_hits.items():
-            top_hits = [
-                {
-                    "ref_id": h["ref_id"],
-                    "name": h["name"],
-                    "identity": h["identity"],
-                }
-                for h in hits[:5]
-            ]
-            matches.append({"cluster": cluster_name, "top_hits": top_hits})
         return matches
 
     def _extract_reference_seqs(self, ref_ids: set[str]) -> dict[str, str]:

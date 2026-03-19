@@ -94,6 +94,7 @@ def main():
         _identify_key_map = {
             "vsearch-min-identity": "vsearch_min_identity",
             "vsearch-max-accepts": "vsearch_max_accepts",
+            "identify-min-coverage": "identify_min_coverage",
         }
         for yaml_key, attr_name in _identify_key_map.items():
             if yaml_key in profile.identify:
@@ -133,6 +134,7 @@ def main():
         summarize_profile=summarize_profile,
         summarize_overrides=summarize_overrides,
         summarize_args=args.summarize_args if args.summarize_args else [],
+        identify_min_coverage=args.identify_min_coverage,
         web_host=web_host,
         web_port=args.web_port,
         share_url=share_url,
@@ -204,6 +206,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Share dashboard on LAN with QR code (default max: 20 clients)")
     parser.add_argument("--no-web", action="store_true",
                         help="Disable the web dashboard")
+    parser.add_argument("--identify-min-coverage", type=float, default=0.5,
+                        help="Minimum coverage (max of query/target) for identification hits (default: 0.5)")
     parser.add_argument("--no-open", action="store_true",
                         help="Don't auto-open the dashboard in a browser")
 

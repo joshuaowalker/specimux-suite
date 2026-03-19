@@ -56,6 +56,7 @@ class PipelineConfig:
     # vsearch settings
     vsearch_min_identity: float = 0.85
     vsearch_max_accepts: int = 10
+    identify_min_coverage: float = 0.5
 
     # Job timeout (seconds) — kill subprocess if it exceeds this
     job_timeout: float = 3600.0  # 1 hour default

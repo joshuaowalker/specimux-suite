@@ -53,6 +53,7 @@ VALID_SUITE_KEYS = {
 VALID_IDENTIFY_KEYS = {
     "vsearch-min-identity",
     "vsearch-max-accepts",
+    "identify-min-coverage",
 }
 
 
