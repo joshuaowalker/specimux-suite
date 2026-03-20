@@ -260,6 +260,51 @@ a.hit-name:hover { text-decoration: underline; }
   transition: width 0.3s ease;
 }
 
+.tab-bar {
+  display: flex;
+  gap: 0;
+  padding: 0 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  padding: 0.6rem 1.25rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--text); border-bottom-color: var(--done); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+col.col-sum-specimen { width: 26%; }
+col.col-sum-variants { width: 10%; }
+col.col-sum-topmatch { width: 24%; }
+col.col-sum-identity { width: 12%; }
+col.col-sum-reads { width: 8%; }
+col.col-sum-community { width: 20%; }
+
+.variant-detail { background: rgba(255,255,255,0.02); }
+.variant-detail td { padding: 0.3rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8rem; }
+.variant-detail td:first-child { padding-left: 2rem; }
+.variant-metric { color: var(--text-dim); font-size: 0.75rem; }
+
+#search-summary {
+  width: 300px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
 @media (max-width: 932px) {
   header { padding: 0.5rem 0.75rem; }
   .controls { padding: 0.5rem 0.75rem; }
@@ -267,8 +312,10 @@ a.hit-name:hover { text-decoration: underline; }
   th, td { padding: 0.3rem 0.4rem; }
   .status-pill { font-size: 0.65rem; padding: 0.1rem 0.35rem; }
   .stats-group { font-size: 0.75rem; flex-wrap: wrap; }
-  #search { width: 200px; font-size: 0.8rem; }
+  #search, #search-summary { width: 200px; font-size: 0.8rem; }
   .hide-mobile { display: none; }
+  .tab-bar { padding: 0 0.75rem; }
+  .tab-btn { padding: 0.4rem 0.75rem; font-size: 0.8rem; }
 }
 </style>
 </head>
@@ -286,6 +333,14 @@ a.hit-name:hover { text-decoration: underline; }
   </div>
 </header>
 
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="processing">Processing</button>
+  <button class="tab-btn" data-tab="summary">Summary</button>
+</div>
+
+<script src="/static/vendor/qrcode.min.js"></script>
+
+<div id="tab-processing" class="tab-content active">
 <div class="controls">
   <div class="controls-row">
     <input type="text" id="search" placeholder="Search specimens...">
@@ -310,7 +365,6 @@ a.hit-name:hover { text-decoration: underline; }
   </div>
 </div>
 
-<script src="/static/vendor/qrcode.min.js"></script>
 <div class="table-wrap">
 <table>
   <colgroup>
@@ -332,15 +386,53 @@ a.hit-name:hover { text-decoration: underline; }
   <tbody id="specimen-table"></tbody>
 </table>
 </div>
+</div><!-- end tab-processing -->
+
+<div id="tab-summary" class="tab-content">
+<div class="controls">
+  <div class="controls-row">
+    <input type="text" id="search-summary" placeholder="Search specimens...">
+  </div>
+  <div class="controls-row">
+    <div class="stats-group">
+      Summarized: <span id="stat-summarized">0</span> / <span id="stat-sum-total">0</span>
+    </div>
+  </div>
+</div>
+<div class="table-wrap">
+<table>
+  <colgroup>
+    <col class="col-sum-specimen">
+    <col class="col-sum-variants">
+    <col class="col-sum-topmatch">
+    <col class="col-sum-identity">
+    <col class="col-sum-reads">
+    <col class="col-sum-community">
+  </colgroup>
+  <thead>
+    <tr>
+      <th data-sort-sum="specimen_id">Specimen</th>
+      <th data-sort-sum="variant_count">Variants</th>
+      <th>Top Match</th>
+      <th data-sort-sum="top_identity">Identity</th>
+      <th data-sort-sum="total_reads">Reads</th>
+      <th>Community Taxon</th>
+    </tr>
+  </thead>
+  <tbody id="summary-table"></tbody>
+</table>
+</div>
+</div><!-- end tab-summary -->
 
 <script>
 const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, mode: null };
-let sortKey = 'specimen_id';
-let sortAsc = true;
-let searchTerm = '';
+let activeTab = 'processing';
+const tabState = {
+  processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set() },
+  summary:    { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set() },
+};
 let minReads = 30;
 let reprocessRatio = 0.5;
-const expandedSpecimens = new Set();
 let renderTimer = null;
 
 function scheduleRender() {
@@ -579,11 +671,17 @@ function buildClusterBadge(s) {
 }
 
 function render() {
+  if (activeTab === 'processing') renderProcessing();
+  else renderSummary();
+}
+
+function renderProcessing() {
+  const ts = tabState.processing;
   let specs = Object.values(state.specimens);
 
   // Filter
-  if (searchTerm) {
-    const q = searchTerm.toLowerCase();
+  if (ts.searchTerm) {
+    const q = ts.searchTerm.toLowerCase();
     specs = specs.filter(s =>
       s.specimen_id.toLowerCase().includes(q) ||
       getTopHitName(s).toLowerCase().includes(q)
@@ -592,10 +690,10 @@ function render() {
 
   // Sort
   specs.sort((a, b) => {
-    let va = getSortValue(a, sortKey);
-    let vb = getSortValue(b, sortKey);
-    if (va < vb) return sortAsc ? -1 : 1;
-    if (va > vb) return sortAsc ? 1 : -1;
+    let va = getSortValue(a, ts.sortKey);
+    let vb = getSortValue(b, ts.sortKey);
+    if (va < vb) return ts.sortAsc ? -1 : 1;
+    if (va > vb) return ts.sortAsc ? 1 : -1;
     return 0;
   });
 
@@ -655,7 +753,7 @@ function render() {
     const statusLabel = statusLabels[displayStatus] || displayStatus.replace('_', ' ');
     const clusterBadge = buildClusterBadge(s);
     const organismsBadge = getOrganismsBadge(s);
-    const isExpanded = expandedSpecimens.has(s.specimen_id);
+    const isExpanded = ts.expanded.has(s.specimen_id);
     const hasClusters = (s.clusters || []).length > 0;
 
     // Target indicator
@@ -745,11 +843,153 @@ function render() {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
       const sid = el.dataset.sid;
-      if (expandedSpecimens.has(sid)) expandedSpecimens.delete(sid);
-      else expandedSpecimens.add(sid);
+      if (ts.expanded.has(sid)) ts.expanded.delete(sid);
+      else ts.expanded.add(sid);
       render();
     });
   });
+}
+
+function renderSummary() {
+  const ts = tabState.summary;
+  const all = Object.values(state.specimens);
+
+  // Stats
+  const summarizedCount = all.filter(s => s.status === 'summarized').length;
+  document.getElementById('stat-summarized').textContent = summarizedCount;
+  document.getElementById('stat-sum-total').textContent = all.length;
+
+  // Only show summarized specimens
+  let specs = all.filter(s => s.status === 'summarized');
+
+  // Filter by search
+  if (ts.searchTerm) {
+    const q = ts.searchTerm.toLowerCase();
+    specs = specs.filter(s =>
+      s.specimen_id.toLowerCase().includes(q) ||
+      getTopHitName(s).toLowerCase().includes(q) ||
+      (s.community_taxon || '').toLowerCase().includes(q)
+    );
+  }
+
+  // Sort
+  specs.sort((a, b) => {
+    let va = getSummarySortValue(a, ts.sortKey);
+    let vb = getSummarySortValue(b, ts.sortKey);
+    if (va < vb) return ts.sortAsc ? -1 : 1;
+    if (va > vb) return ts.sortAsc ? 1 : -1;
+    return 0;
+  });
+
+  const tbody = document.getElementById('summary-table');
+  const rows = [];
+
+  for (const s of specs) {
+    const variants = s.variants || [];
+    const topHit = getTopHit(s);
+    const identity = topHit ? (topHit.adjusted_identity || topHit.identity || 0) : 0;
+    const pct = (identity * 100).toFixed(1);
+    const isExpanded = ts.expanded.has(s.specimen_id);
+
+    // Specimen cell
+    let specimenCell = `<strong>${esc(s.specimen_id)}</strong>`;
+    if (s.pool) specimenCell += `<br><span style="font-size:0.75rem;color:var(--text-dim)">${esc(s.pool)}</span>`;
+
+    // Variants cell with expand chevron
+    let chevron = '';
+    if (variants.length > 0) {
+      chevron = `<span class="expand-toggle" data-sid="${esc(s.specimen_id)}">${isExpanded ? '▼' : '▶'}</span>`;
+    }
+    const variantCell = `${chevron}${variants.length || '—'}`;
+
+    // Top match cell
+    const topMatchCell = topHit ? linkedName(topHit.name || topHit.ref_id || '') : '—';
+
+    // Identity cell
+    const targetStatus = getTargetStatus(s);
+    let targetHtml = '';
+    if (targetStatus === 'on-target') targetHtml = '<span class="target-indicator target-on">✓</span>';
+    else if (targetStatus === 'off-target') targetHtml = '<span class="target-indicator target-off">✗</span>';
+    let warningHtml = '';
+    if (topHit) {
+      if (identity < 0.90) warningHtml = `<span class="identity-warning" style="color:var(--error)">⚠</span>`;
+      else if (identity < 0.98) warningHtml = `<span class="identity-warning" style="color:var(--processing)">⚠</span>`;
+    }
+    const organismsBadge = getOrganismsBadge(s);
+    const identityCell = topHit ? `${targetHtml}<span class="hit-pct">${pct}%</span>${warningHtml}${organismsBadge ? ' ' + organismsBadge : ''}` : '';
+
+    // Community taxon cell
+    let communityCell = '';
+    if (s.community_taxon) {
+      const inatId = getInatId(s.specimen_id);
+      const notFungi = s.community_iconic_taxon && s.community_iconic_taxon !== 'Fungi';
+      const taxonWarning = notFungi ? ' <span title="Not a fungus — possible wrong observation ID" style="color:#b8860b;font-style:normal">?</span>' : '';
+      const taxonText = esc(s.community_taxon);
+      if (inatId) {
+        communityCell = `<a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank"><span class="community-taxon" style="font-size:inherit">${taxonText}</span></a>${taxonWarning}`;
+      } else {
+        communityCell = `<span class="community-taxon" style="font-size:inherit">${taxonText}</span>${taxonWarning}`;
+      }
+    }
+
+    rows.push(`<tr>
+      <td>${specimenCell}</td>
+      <td>${variantCell}</td>
+      <td class="top-hit">${topMatchCell}</td>
+      <td>${identityCell}</td>
+      <td>${s.total_reads.toLocaleString()}</td>
+      <td>${communityCell}</td>
+    </tr>`);
+
+    // Expanded variant detail rows
+    if (isExpanded && variants.length > 0) {
+      const idByCluster = {};
+      for (const match of (s.identification || [])) {
+        idByCluster[match.cluster] = match;
+      }
+      for (const v of variants) {
+        const vName = v.name || '?';
+        const match = idByCluster[vName];
+        const hits = match ? (match.top_hits || []) : [];
+        const top = hits[0];
+        const vId = top ? (top.adjusted_identity || top.identity || 0) : 0;
+        const vPct = top ? (vId * 100).toFixed(1) : '';
+        const vHitName = top ? linkedName(top.name || top.ref_id || '') : '<span class="alt-hit">—</span>';
+
+        rows.push(`<tr class="variant-detail">
+          <td>${esc(vName)}</td>
+          <td><span class="variant-metric">${v.size != null ? v.size + ' reads' : ''}</span></td>
+          <td class="top-hit">${vHitName}</td>
+          <td>${vPct ? `<span class="hit-pct">${vPct}%</span>` : ''}</td>
+          <td></td>
+          <td><span class="variant-metric">${v.length != null ? v.length + ' bp' : ''}</span></td>
+        </tr>`);
+      }
+    }
+  }
+  tbody.innerHTML = rows.join('');
+
+  // Attach expand/collapse handlers
+  tbody.querySelectorAll('.expand-toggle').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const sid = el.dataset.sid;
+      if (ts.expanded.has(sid)) ts.expanded.delete(sid);
+      else ts.expanded.add(sid);
+      renderSummary();
+    });
+  });
+
+  updateSortIndicators();
+}
+
+function getSummarySortValue(s, key) {
+  if (key === 'variant_count') return (s.variants || []).length;
+  if (key === 'top_identity') {
+    const h = getTopHit(s);
+    return h ? (h.adjusted_identity || h.identity || 0) : 0;
+  }
+  return s[key] || '';
 }
 
 function getClusterSize(s, clusterName) {
@@ -793,28 +1033,74 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s; re
 
 // Sort headers
 function updateSortIndicators() {
+  // Processing tab
+  const pts = tabState.processing;
   document.querySelectorAll('th[data-sort]').forEach(th => {
-    if (th.dataset.sort === sortKey) {
-      th.dataset.sortDir = sortAsc ? 'asc' : 'desc';
+    if (th.dataset.sort === pts.sortKey) {
+      th.dataset.sortDir = pts.sortAsc ? 'asc' : 'desc';
+    } else {
+      delete th.dataset.sortDir;
+    }
+  });
+  // Summary tab
+  const sts = tabState.summary;
+  document.querySelectorAll('th[data-sort-sum]').forEach(th => {
+    if (th.dataset.sortSum === sts.sortKey) {
+      th.dataset.sortDir = sts.sortAsc ? 'asc' : 'desc';
     } else {
       delete th.dataset.sortDir;
     }
   });
 }
+
+// Processing sort headers
 document.querySelectorAll('th[data-sort]').forEach(th => {
   th.addEventListener('click', () => {
     const key = th.dataset.sort;
-    if (sortKey === key) sortAsc = !sortAsc;
-    else { sortKey = key; sortAsc = true; }
+    const ts = tabState.processing;
+    if (ts.sortKey === key) ts.sortAsc = !ts.sortAsc;
+    else { ts.sortKey = key; ts.sortAsc = true; }
     updateSortIndicators();
     render();
   });
 });
+
+// Summary sort headers
+document.querySelectorAll('th[data-sort-sum]').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sortSum;
+    const ts = tabState.summary;
+    if (ts.sortKey === key) ts.sortAsc = !ts.sortAsc;
+    else { ts.sortKey = key; ts.sortAsc = true; }
+    updateSortIndicators();
+    render();
+  });
+});
+
 updateSortIndicators();
 
-// Search
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.tab === activeTab) return;
+    document.querySelector('.tab-btn.active').classList.remove('active');
+    btn.classList.add('active');
+    document.querySelector('.tab-content.active').classList.remove('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    activeTab = btn.dataset.tab;
+    render();
+  });
+});
+
+// Search — Processing
 document.getElementById('search').addEventListener('input', (e) => {
-  searchTerm = e.target.value;
+  tabState.processing.searchTerm = e.target.value;
+  render();
+});
+
+// Search — Summary
+document.getElementById('search-summary').addEventListener('input', (e) => {
+  tabState.summary.searchTerm = e.target.value;
   render();
 });
 
