@@ -38,6 +38,8 @@ class SpecimenState:
     specimen_id: str
     pool: str = ""
     community_taxon: str = ""
+    community_genus: str = ""
+    community_iconic_taxon: str = ""
     total_reads: int = 0
     reads_at_last_consensus: int = 0
     consensus_version: int = 0
@@ -120,7 +122,14 @@ class PipelineState:
     def _on_specimens_taxa(self, data: dict):
         for specimen_id, taxon in data.get("taxa", {}).items():
             spec = self.get_specimen(specimen_id)
-            spec.community_taxon = taxon
+            if isinstance(taxon, dict):
+                spec.community_taxon = taxon.get("name", "")
+                spec.community_genus = taxon.get("genus", "")
+                spec.community_iconic_taxon = taxon.get("iconic_taxon", "")
+            else:
+                # Legacy string format
+                spec.community_taxon = taxon
+                spec.community_genus = taxon.split()[0] if taxon else ""
 
     def _on_file_detected(self, data: dict):
         path = data["path"]
@@ -235,6 +244,8 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
         "specimen_id": s.specimen_id,
         "pool": s.pool,
         "community_taxon": s.community_taxon,
+        "community_genus": s.community_genus,
+        "community_iconic_taxon": s.community_iconic_taxon,
         "total_reads": s.total_reads,
         "reads_at_last_consensus": s.reads_at_last_consensus,
         "consensus_version": s.consensus_version,
