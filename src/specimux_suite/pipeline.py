@@ -115,14 +115,17 @@ class Pipeline:
         with ConsoleUI("batch", self.state, self.cmd_queue) as console:
             self._console = console
 
-            # Step 1: Run specimux
-            logger.info(f"Running specimux on {self.config.reads_file}")
-            specimens = self.specimux.run(self.config.reads_file)
+            # Step 1: Run specimux (skip if already completed in a prior run)
+            if self.state.specimux_runs > 0:
+                logger.info("Specimux already completed in prior run, skipping demux")
+            else:
+                logger.info(f"Running specimux on {self.config.reads_file}")
+                specimens = self.specimux.run(self.config.reads_file)
 
-            if not specimens:
-                logger.warning("No specimens found after specimux")
-                self._console = None
-                return
+                if not specimens:
+                    logger.warning("No specimens found after specimux")
+                    self._console = None
+                    return
 
             # Rebuild state after specimux events
             self._rebuild_state()
@@ -130,7 +133,7 @@ class Pipeline:
             console.redraw()
 
             # Step 2: Run consensus → identification, interleaved per-specimen
-            logger.info(f"Found {len(specimens)} specimens, scheduling consensus")
+            logger.info(f"Found {len(self.state.specimens)} specimens, scheduling consensus")
             self._run_consensus_round(min_reads=0)
 
             # Step 3: Run summarize for all identified/no_match specimens
@@ -408,6 +411,41 @@ class Pipeline:
         logger.info(f"Identifying {specimen_id}{label}")
         self._executor.submit(self.identify.run, specimen_id, consensus_fasta)
 
+    def _build_variant_fasta(self, specimen_id: str) -> Path | None:
+        """Combine all variant FASTA files for a specimen into one file for identification."""
+        self._rebuild_state()
+        spec = self.state.get_specimen(specimen_id)
+        if not spec or not spec.variants:
+            return None
+
+        summary_dir = self.config.summarize_output_dir
+        combined = summary_dir / f"{specimen_id}-variants-combined.fasta"
+        found_any = False
+
+        with open(combined, "w") as out:
+            for variant in spec.variants:
+                vname = variant.get("name")
+                if not vname:
+                    continue
+                matches = list(summary_dir.glob(f"{vname}-RiC*.fasta"))
+                for fasta_path in matches:
+                    out.write(fasta_path.read_text())
+                    found_any = True
+
+        if not found_any:
+            combined.unlink(missing_ok=True)
+            return None
+        return combined
+
+    def _submit_variant_identification(self, specimen_id: str) -> None:
+        """Submit identification for variant sequences of a specimen."""
+        combined_fasta = self._build_variant_fasta(specimen_id)
+        if not combined_fasta:
+            return
+        logger.info(f"Identifying variants for {specimen_id}")
+        future = self._executor.submit(self.identify.run, specimen_id, combined_fasta)
+        self._futures[specimen_id] = future
+
     def _submit_summarize(self, specimen_id: str) -> None:
         """Submit a summarize job to the thread pool."""
         if specimen_id in self._futures:
@@ -444,6 +482,16 @@ class Pipeline:
                 self._submit_summarize(sid)
 
             if self._futures:
+                self._wait_for_any_future()
+                self._rebuild_state()
+                self._drain_cmd_queue()
+
+        # Re-identify using variant sequences
+        if self.identify:
+            self._rebuild_state()
+            for sid in eligible:
+                self._submit_variant_identification(sid)
+            while self._futures and not self._shutdown.is_set():
                 self._wait_for_any_future()
                 self._rebuild_state()
                 self._drain_cmd_queue()

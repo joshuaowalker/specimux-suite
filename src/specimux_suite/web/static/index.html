@@ -295,6 +295,18 @@ col.col-sum-community { width: 20%; }
 .variant-detail td:first-child { padding-left: 2rem; }
 .variant-metric { color: var(--text-dim); font-size: 0.75rem; }
 
+.show-seq-btn { background: none; border: 1px solid var(--border); color: var(--text-dim);
+  font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 3px; cursor: pointer; margin-left: 0.5rem; }
+.show-seq-btn:hover { color: var(--text); border-color: var(--text-dim); }
+.seq-display { display: block; margin-top: 0.3rem; font-family: monospace; font-size: 0.7rem;
+  color: var(--text-dim); word-break: break-all; user-select: all; max-width: 60vw; }
+
+.filter-chips { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.filter-chip { background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+  font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 12px; cursor: pointer; }
+.filter-chip:hover { border-color: var(--text-dim); color: var(--text); }
+.filter-chip.active { background: var(--done); border-color: var(--done); color: var(--bg); }
+
 #search-summary {
   width: 300px;
   padding: 0.5rem 0.75rem;
@@ -349,6 +361,14 @@ col.col-sum-community { width: 20%; }
     <span id="stat-finalizing" class="demux-indicator" style="display:none">Finalizing</span>
   </div>
   <div class="controls-row">
+    <div class="filter-chips" id="filters-processing">
+      <span class="filter-chip" data-filter="novel">Novel (&lt;98%)</span>
+      <span class="filter-chip" data-filter="on-target">On-target</span>
+      <span class="filter-chip" data-filter="off-target">Off-target</span>
+      <span class="filter-chip" data-filter="no-match">No match</span>
+    </div>
+  </div>
+  <div class="controls-row">
     <div class="stats-group">
       Reads: <span id="stat-reads">0</span>
       &nbsp;Matched: <span id="stat-matched">0</span>
@@ -394,6 +414,13 @@ col.col-sum-community { width: 20%; }
     <input type="text" id="search-summary" placeholder="Search specimens...">
   </div>
   <div class="controls-row">
+    <div class="filter-chips" id="filters-summary">
+      <span class="filter-chip" data-filter="novel">Novel (&lt;98%)</span>
+      <span class="filter-chip" data-filter="on-target">On-target</span>
+      <span class="filter-chip" data-filter="off-target">Off-target</span>
+    </div>
+  </div>
+  <div class="controls-row">
     <div class="stats-group">
       Summarized: <span id="stat-summarized">0</span> / <span id="stat-sum-total">0</span>
     </div>
@@ -428,8 +455,8 @@ col.col-sum-community { width: 20%; }
 const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, mode: null };
 let activeTab = 'processing';
 const tabState = {
-  processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set() },
-  summary:    { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set() },
+  processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set() },
+  summary:    { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set() },
 };
 let minReads = 30;
 let reprocessRatio = 0.5;
@@ -564,7 +591,9 @@ function applyEvent(event) {
       if (state.specimens[d.specimen_id]) {
         const matches = d.matches || [];
         const hasHits = matches.some(m => m.top_hits && m.top_hits.length > 0);
-        state.specimens[d.specimen_id].status = hasHits ? 'identified' : 'no_match';
+        if (state.specimens[d.specimen_id].status !== 'summarized') {
+          state.specimens[d.specimen_id].status = hasHits ? 'identified' : 'no_match';
+        }
         state.specimens[d.specimen_id].identification = matches;
       }
       break;
@@ -595,6 +624,48 @@ function getIdResult(s) {
   if (hasIdentification(s)) return 'identified';
   if (s.status === 'no_match' || s.status === 'summarized') return s.status === 'summarized' ? 'identified' : 'no_match';
   return 'pending';
+}
+
+async function toggleSequence(specimenId, seqName, btn) {
+  const existing = btn.parentElement.querySelector('.seq-display');
+  if (existing) { existing.remove(); btn.textContent = 'seq'; return; }
+  try {
+    btn.textContent = '\u2026';
+    const resp = await fetch(`/api/sequence/${encodeURIComponent(specimenId)}/${encodeURIComponent(seqName)}`);
+    if (!resp.ok) { btn.textContent = '\u2717'; setTimeout(() => btn.textContent = 'seq', 2000); return; }
+    const data = await resp.json();
+    const span = document.createElement('span');
+    span.className = 'seq-display';
+    span.textContent = data.sequence;
+    btn.parentElement.appendChild(span);
+    btn.textContent = 'hide';
+  } catch(e) {
+    btn.textContent = '\u2717';
+    setTimeout(() => btn.textContent = 'seq', 2000);
+  }
+}
+
+function matchesFilters(s, filters) {
+  if (filters.size === 0) return true;
+  for (const f of filters) {
+    switch (f) {
+      case 'novel': {
+        const h = getTopHit(s);
+        if (!h || (h.adjusted_identity || h.identity || 1) >= 0.98) return false;
+        break;
+      }
+      case 'on-target':
+        if (!hasIdentification(s) || getTargetStatus(s) !== 'on-target') return false;
+        break;
+      case 'off-target':
+        if (!hasIdentification(s) || getTargetStatus(s) !== 'off-target') return false;
+        break;
+      case 'no-match':
+        if (getIdResult(s) !== 'no_match') return false;
+        break;
+    }
+  }
+  return true;
 }
 
 // Display status for the status pill in the table
@@ -684,9 +755,11 @@ function renderProcessing() {
     const q = ts.searchTerm.toLowerCase();
     specs = specs.filter(s =>
       s.specimen_id.toLowerCase().includes(q) ||
-      getTopHitName(s).toLowerCase().includes(q)
+      getTopHitName(s).toLowerCase().includes(q) ||
+      (s.community_taxon || '').toLowerCase().includes(q)
     );
   }
+  specs = specs.filter(s => matchesFilters(s, ts.filters));
 
   // Sort
   specs.sort((a, b) => {
@@ -826,8 +899,9 @@ function renderProcessing() {
             return `<span class="alt-hit">${linkedName(h.name || h.ref_id || '')} ${hPct}%</span>`;
           }).join('<br>');
         }
+        const seqBtn = `<button class="show-seq-btn" data-specimen="${esc(s.specimen_id)}" data-seq="${esc(clusterName)}">seq</button>`;
         rows.push(`<tr class="cluster-detail">
-          <td>${esc(clusterName)}</td>
+          <td>${esc(clusterName)}${seqBtn}</td>
           <td></td>
           <td>${cPct ? `<span class="hit-pct">${cPct}%</span>` : ''}</td>
           <td class="top-hit">${top ? `${linkedName(top.name || top.ref_id || '')}${altHits}` : '<span class="alt-hit">—</span>'}</td>
@@ -846,6 +920,13 @@ function renderProcessing() {
       if (ts.expanded.has(sid)) ts.expanded.delete(sid);
       else ts.expanded.add(sid);
       render();
+    });
+  });
+  // Attach show-sequence button handlers
+  tbody.querySelectorAll('.show-seq-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleSequence(btn.dataset.specimen, btn.dataset.seq, btn);
     });
   });
 }
@@ -871,6 +952,7 @@ function renderSummary() {
       (s.community_taxon || '').toLowerCase().includes(q)
     );
   }
+  specs = specs.filter(s => matchesFilters(s, ts.filters));
 
   // Sort
   specs.sort((a, b) => {
@@ -956,8 +1038,9 @@ function renderSummary() {
         const vPct = top ? (vId * 100).toFixed(1) : '';
         const vHitName = top ? linkedName(top.name || top.ref_id || '') : '<span class="alt-hit">—</span>';
 
+        const seqBtn = `<button class="show-seq-btn" data-specimen="${esc(s.specimen_id)}" data-seq="${esc(vName)}">seq</button>`;
         rows.push(`<tr class="variant-detail">
-          <td>${esc(vName)}</td>
+          <td>${esc(vName)}${seqBtn}</td>
           <td><span class="variant-metric">${v.size != null ? v.size + ' reads' : ''}</span></td>
           <td class="top-hit">${vHitName}</td>
           <td>${vPct ? `<span class="hit-pct">${vPct}%</span>` : ''}</td>
@@ -977,6 +1060,13 @@ function renderSummary() {
       if (ts.expanded.has(sid)) ts.expanded.delete(sid);
       else ts.expanded.add(sid);
       renderSummary();
+    });
+  });
+  // Attach show-sequence button handlers
+  tbody.querySelectorAll('.show-seq-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleSequence(btn.dataset.specimen, btn.dataset.seq, btn);
     });
   });
 
@@ -1102,6 +1192,28 @@ document.getElementById('search').addEventListener('input', (e) => {
 document.getElementById('search-summary').addEventListener('input', (e) => {
   tabState.summary.searchTerm = e.target.value;
   render();
+});
+
+// Filter chips — Processing
+document.querySelectorAll('#filters-processing .filter-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    const f = chip.dataset.filter;
+    const ts = tabState.processing;
+    if (ts.filters.has(f)) { ts.filters.delete(f); chip.classList.remove('active'); }
+    else { ts.filters.add(f); chip.classList.add('active'); }
+    render();
+  });
+});
+
+// Filter chips — Summary
+document.querySelectorAll('#filters-summary .filter-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    const f = chip.dataset.filter;
+    const ts = tabState.summary;
+    if (ts.filters.has(f)) { ts.filters.delete(f); chip.classList.remove('active'); }
+    else { ts.filters.add(f); chip.classList.add('active'); }
+    render();
+  });
 });
 
 // Initial load

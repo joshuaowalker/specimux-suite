@@ -71,6 +71,7 @@ class PipelineState:
         self.errors: list[dict] = []
         self.total_input_reads: int = 0
         self.total_matched_reads: int = 0
+        self.specimux_runs: int = 0
 
     def apply(self, event: Event) -> None:
         """Apply a single event to update state (thread-safe)."""
@@ -145,6 +146,7 @@ class PipelineState:
         pass  # tracked for logging, no state change needed
 
     def _on_specimux_completed(self, data: dict):
+        self.specimux_runs += 1
         specimens = data.get("specimens", {})
         for name, read_count in specimens.items():
             spec = self.get_specimen(name)
@@ -200,7 +202,8 @@ class PipelineState:
             ))
         spec.identification = matches
         has_hits = any(m.top_hits for m in matches)
-        spec.status = SpecimenStatus.IDENTIFIED if has_hits else SpecimenStatus.NO_MATCH
+        if spec.status != SpecimenStatus.SUMMARIZED:
+            spec.status = SpecimenStatus.IDENTIFIED if has_hits else SpecimenStatus.NO_MATCH
 
     def _on_summarize_started(self, data: dict):
         spec = self.get_specimen(data["specimen_id"])

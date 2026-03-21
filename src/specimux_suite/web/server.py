@@ -11,6 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
+import glob as globmod
+
 from ..config import PipelineConfig
 from ..events import EventLog, _event_to_dict
 from ..state import PipelineState
@@ -124,6 +126,67 @@ async def event_stream(request: Request, after_version: int = 0):
                 _sse_clients -= 1
 
     return EventSourceResponse(generate())
+
+
+def _parse_fasta_entry(path: Path, entry_name: str) -> str | None:
+    """Find a sequence by header ID in a FASTA file."""
+    try:
+        text = path.read_text()
+    except (OSError, IOError):
+        return None
+    current_id = None
+    seq_lines = []
+    for line in text.splitlines():
+        if line.startswith(">"):
+            if current_id == entry_name and seq_lines:
+                return "".join(seq_lines)
+            current_id = line[1:].split()[0]
+            seq_lines = []
+        else:
+            seq_lines.append(line.strip())
+    if current_id == entry_name and seq_lines:
+        return "".join(seq_lines)
+    return None
+
+
+def _read_single_fasta(path: Path) -> str | None:
+    """Read the first sequence from a single-sequence FASTA file."""
+    try:
+        text = path.read_text()
+    except (OSError, IOError):
+        return None
+    seq_lines = []
+    for line in text.splitlines():
+        if line.startswith(">"):
+            if seq_lines:
+                return "".join(seq_lines)
+            continue
+        seq_lines.append(line.strip())
+    return "".join(seq_lines) if seq_lines else None
+
+
+@app.get("/api/sequence/{specimen_id}/{sequence_name}")
+async def get_sequence(specimen_id: str, sequence_name: str):
+    """Return a nucleotide sequence from disk (summary or consensus FASTA)."""
+    if _config is None:
+        return JSONResponse(status_code=404, content={"error": "Config not initialized"})
+
+    # Try summary dir first: glob for {sequence_name}-RiC*.fasta
+    summary_dir = _config.summarize_output_dir
+    matches = list(summary_dir.glob(f"{sequence_name}-RiC*.fasta"))
+    if matches:
+        seq = _read_single_fasta(matches[0])
+        if seq:
+            return {"sequence": seq}
+
+    # Try consensus dir: parse {specimen_id}/{specimen_id}-all.fasta
+    consensus_fasta = _config.consensus_output_dir / specimen_id / f"{specimen_id}-all.fasta"
+    if consensus_fasta.exists():
+        seq = _parse_fasta_entry(consensus_fasta, sequence_name)
+        if seq:
+            return {"sequence": seq}
+
+    return JSONResponse(status_code=404, content={"error": "Sequence not found"})
 
 
 def start_web_server(event_log: EventLog, state: PipelineState, config: PipelineConfig):
