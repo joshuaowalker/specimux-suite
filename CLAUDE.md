@@ -22,22 +22,34 @@ watcher (live) or CLI (batch)
     → scheduler (prioritize specimens for consensus)
       → speconsense runner (generate consensus sequences per specimen)
         → identify runner (vsearch + adjusted-identity scoring)
-          → web dashboard (SSE-streamed events)
+          → summarize runner (speconsense-summarize for variant extraction)
+            → variant identification (re-identify using variant sequences)
+              → aggregate (generate summary.fasta)
+                → web dashboard (SSE-streamed events)
 ```
 
-**Batch vs live:** Batch runs specimux once on a single FASTQ, then consensus, then identification. Live mode watches a directory for new FASTQs; when one stabilizes, it *drains* all in-flight consensus jobs, runs specimux with all cores, then resumes scheduling. This drain-run-resume pattern is central to live mode correctness.
+**Batch vs live:** Batch runs specimux once on a single FASTQ, then consensus with interleaved identification, then summarization with interleaved variant identification. Live mode watches a directory for new FASTQs; when one stabilizes, it *drains* all in-flight consensus jobs, runs specimux with all cores, then resumes scheduling. This drain-run-resume pattern is central to live mode correctness. Ctrl+C triggers finalization: drain remaining files, process all eligible specimens (ignoring reprocess_ratio), run summarization, and exit.
 
-**Runners** are subprocess wrappers that follow a consistent pattern: emit `*.started` event → run external tool → parse output → emit `*.completed` event. All bioinformatics tools (specimux, speconsense, vsearch) are invoked as subprocesses.
+**Runners** are subprocess wrappers that follow a consistent pattern: emit `*.started` event → run external tool → parse output → emit `*.completed` event. All bioinformatics tools (specimux, speconsense, speconsense-summarize, vsearch) are invoked as subprocesses.
 
-**Scheduler** has two-tier prioritization: never-processed specimens (by read count descending) take priority over reprocessing candidates (which require `new_reads / previous_reads > reprocess_ratio`). Specimens below `min_reads` are skipped.
+**Scheduler** has two-tier prioritization: never-processed specimens (by read count descending) take priority over reprocessing candidates (which require `new_reads / previous_reads > reprocess_ratio`). Specimens below `min_reads` are skipped. Watched specimens (starred in the dashboard) receive a priority boost and are processed first.
 
-**Web server** runs FastAPI+uvicorn in a daemon thread. The `/events` SSE endpoint uses `EventLog.tail()` which blocks waiting for new events, enabling real-time dashboard updates. The single-page dashboard (`web/static/index.html`) computes display status client-side from event data.
+**Summarization** runs after all consensus and identification is complete. Each specimen's consensus output is passed to speconsense-summarize, which extracts variant sequences. Variant identification is interleaved with summarization — as each specimen's summarize completes, its variants are immediately submitted for identification rather than waiting for all specimens to finish. After all summarize+identification work drains, an aggregate pass generates `summary.fasta`.
+
+**Web server** runs FastAPI+uvicorn in a daemon thread. The `/events` SSE endpoint uses `EventLog.tail()` which blocks waiting for new events, enabling real-time dashboard updates. The single-page dashboard (`web/static/index.html`) has two tabs: Processing (raw cluster-level results) and Summary (variant-level results). Both compute display status client-side from event data.
+
+**Profiles** bundle pipeline settings and tool configurations into reusable YAML presets. Suite profiles can reference tool-level profiles and set tool parameters. See `INTEGRATION.md` for the full profile contract.
 
 ## Event types
 
-All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `specimens.taxa`, `file.detected`, `file.stable`, `specimux.started`, `specimux.completed`, `specimen.updated`, `consensus.started`, `consensus.completed`, `identification.completed`, `pipeline.error`.
+All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `specimens.taxa`, `file.detected`, `file.stable`, `specimux.started`, `specimux.progress`, `specimux.completed`, `specimen.updated`, `specimen.watched`, `consensus.started`, `consensus.completed`, `identification.completed`, `summarize.started`, `summarize.completed`, `summarize.aggregate_completed`, `finalization.started`, `finalization.completed`, `pipeline.error`.
 
-Specimen status transitions: `WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE → IDENTIFIED | NO_MATCH | ERROR`
+Specimen status transitions:
+```
+WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE → IDENTIFIED → SUMMARIZED
+                                              → NO_MATCH   → SUMMARIZED
+                                              → ERROR
+```
 
 ## Test data
 
@@ -61,3 +73,5 @@ When adding a new event type, there are **four places** that must be updated:
 - `_futures` dict (specimen_id → Future) is ground truth for in-flight work, since state may lag behind actual submissions.
 - The dashboard computes "queued" status client-side using the same logic as the scheduler (min_reads threshold, reprocess_ratio).
 - `adjusted-identity` library is used for homopolymer-aware scoring of vsearch hits.
+- The Summary tab strictly shows variant-level identification results — no fallback to raw cluster identifications.
+- iNaturalist community taxa are fetched asynchronously at startup and cached to `inat_taxon_cache.json`. On-target/off-target detection compares the top hit genus against the community taxon genus.

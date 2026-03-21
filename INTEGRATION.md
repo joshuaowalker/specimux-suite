@@ -11,7 +11,8 @@ These contracts define how the three repositories interact at runtime.
 |---|---|---|
 | **specimux** | Demultiplexes ONT reads by primer and specimen barcode | Yes |
 | **speconsense** | Generates consensus sequences from per-specimen FASTQs | Yes |
-| **specimux-suite** | Orchestration pipeline — runs specimux, speconsense, and vsearch as subprocesses; provides web dashboard and event log | Yes (requires specimux and speconsense on `$PATH`) |
+| **speconsense-summarize** | Extracts and summarizes variant sequences from consensus output | Yes (ships with speconsense) |
+| **specimux-suite** | Orchestration pipeline — runs specimux, speconsense, speconsense-summarize, and vsearch as subprocesses; provides web dashboard and event log | Yes (requires specimux and speconsense on `$PATH`) |
 
 Each tool is a standalone CLI. The suite never imports from specimux or speconsense — it invokes them as subprocesses and communicates through files, exit codes, and the progress protocol described below.
 
@@ -67,7 +68,10 @@ specimux-suite-version: "X.Y.*"
 
 suite:
   # suite-level settings (scheduler, web server, etc.)
-  key: value
+  min-reads: 30
+  reprocess-ratio: 0.5
+  workers: 4
+  live-presample: 100
 
 specimux:
   profile: "some-profile"   # passed as -p to specimux subprocess
@@ -77,14 +81,20 @@ speconsense:
   profile: "some-profile"   # passed as -p to speconsense subprocess
   key: value                 # passed as --key value to speconsense subprocess
 
+summarize:
+  profile: "some-profile"   # passed as -p to speconsense-summarize subprocess
+  key: value                 # passed as --key value to speconsense-summarize subprocess
+
 identify:
-  key: value                 # vsearch / identification settings
+  vsearch-min-identity: 0.85
+  vsearch-max-accepts: 10
+  identify-min-coverage: 0.5
 ```
 
 **How suite profiles translate to subprocess arguments:**
 
-- `specimux.profile` / `speconsense.profile` values become `-p <name>` on the subprocess command line.
-- Other keys in the `specimux` / `speconsense` sections become `--key value` arguments.
+- `specimux.profile` / `speconsense.profile` / `summarize.profile` values become `-p <name>` on the subprocess command line.
+- Other keys in those sections become `--key value` arguments.
 - This means a suite profile can fully configure a pipeline run without the user touching tool-level profiles directly.
 
 ### Two-pass CLI parsing
@@ -178,6 +188,31 @@ speconsense <specimen.fastq> \
 | `--key value` pairs | Suite profile `speconsense.*` keys or suite CLI flags | Higher |
 | `--speconsense-args` contents | User escape hatch, passed through verbatim | Highest |
 
+### speconsense-summarize
+
+```
+speconsense-summarize \
+  --source <consensus_dir> \
+  --summary-dir <summary_dir> \
+  [--specimen <specimen_id>] \
+  [--aggregate-only] \
+  [-p <profile>] \
+  [--key value ...] \
+  [<--summarize-args ...>]
+```
+
+The suite invokes speconsense-summarize in two modes:
+
+1. **Single-specimen mode** (`--specimen <id>`) — runs per specimen after consensus, extracts variants. Returns JSON on stdout with a `variants` array.
+2. **Aggregate-only mode** (`--aggregate-only`) — runs once after all specimens are summarized to generate `summary.fasta` and other aggregate files.
+
+| Segment | Source | Precedence |
+|---|---|---|
+| `--source`, `--summary-dir`, `--specimen` | Suite hardcoded / computed | Base (lowest) |
+| `-p <profile>` | Suite profile `summarize.profile` | Middle |
+| `--key value` pairs | Suite profile `summarize.*` keys | Higher |
+| `--summarize-args` contents | User escape hatch, passed through verbatim | Highest |
+
 ### vsearch (identification)
 
 ```
@@ -201,8 +236,8 @@ The suite records all state changes as JSONL events in `output_dir/events.jsonl`
 | Event | Key fields | When |
 |---|---|---|
 | `pipeline.started` | `mode`, `config_summary` | Pipeline begins (batch or live) |
-| `pipeline.error` | `component`, `message`, `details` | Unrecoverable error in any component |
-| `finalization.started` | | Post-processing begins |
+| `pipeline.error` | `component`, `message`, `details` | Error in any component |
+| `finalization.started` | `specimen_count`, `specimen_ids` | Finalization begins (may re-emit if new files arrive during finalization) |
 | `finalization.completed` | | Pipeline finished all work |
 
 ### Specimen tracking
@@ -210,7 +245,9 @@ The suite records all state changes as JSONL events in `output_dir/events.jsonl`
 | Event | Key fields | When |
 |---|---|---|
 | `specimens.loaded` | specimen list | Specimen index parsed at startup |
+| `specimens.taxa` | `taxa` (dict of specimen_id → taxon info) | iNaturalist community taxa fetched |
 | `specimen.updated` | `specimen_id`, `pool`, `total_reads` | Cumulative read count changes after demux |
+| `specimen.watched` | `specimen_id`, `watched` (bool) | User toggles watch/priority boost from dashboard |
 
 ### specimux (demultiplexing)
 
@@ -231,7 +268,15 @@ The suite records all state changes as JSONL events in `output_dir/events.jsonl`
 
 | Event | Key fields | When |
 |---|---|---|
-| `identification.completed` | `specimen_id`, `matches` | vsearch + scoring finished |
+| `identification.completed` | `specimen_id`, `matches` | vsearch + adjusted-identity scoring finished |
+
+### Summarization
+
+| Event | Key fields | When |
+|---|---|---|
+| `summarize.started` | `specimen_id`, `job_id` | Per-specimen summarize subprocess launched |
+| `summarize.completed` | `specimen_id`, `job_id`, `variant_count`, `variants` | Per-specimen summarize subprocess exited |
+| `summarize.aggregate_completed` | | Aggregate summary generation finished |
 
 ### Live mode (additional)
 
@@ -243,9 +288,17 @@ The suite records all state changes as JSONL events in `output_dir/events.jsonl`
 ### Specimen status transitions
 
 ```
-WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE → IDENTIFIED
-                                              → NO_MATCH
+WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE → IDENTIFIED → SUMMARIZED
+                                              → NO_MATCH   → SUMMARIZED
                                               → ERROR
 ```
 
-Status is derived from events, not stored directly. The web dashboard computes display status client-side from the event stream.
+- `WAITING`: specimen exists but has not been scheduled for consensus
+- `CONSENSUS_RUNNING`: consensus subprocess in flight
+- `CONSENSUS_DONE`: consensus finished, clusters available, awaiting identification
+- `IDENTIFIED`: at least one identification hit found
+- `NO_MATCH`: identification ran but no hits passed filters
+- `SUMMARIZED`: variant summarization complete (identification.completed does not change this status)
+- `ERROR`: unrecoverable failure
+
+Status is derived from events, not stored directly. The web dashboard computes display status client-side from the event stream, adding computed states like "queued" (meets min_reads threshold but not yet scheduled).
