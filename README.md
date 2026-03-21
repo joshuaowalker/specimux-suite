@@ -1,5 +1,7 @@
 # specimux-suite
 
+> **Early preview release.** This project is under active development — APIs, event formats, and CLI options may change between versions. Feedback and bug reports are welcome at [github.com/joshuaowalker/specimux-suite/issues](https://github.com/joshuaowalker/specimux-suite/issues).
+
 Orchestration and real-time dashboard for the [Mycomap](https://mycomap.org) fungal DNA barcoding pipeline. Manages the full workflow from raw nanopore reads through demultiplexing, consensus generation, variant summarization, and species identification.
 
 ## Installation
