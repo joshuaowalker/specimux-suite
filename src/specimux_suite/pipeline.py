@@ -10,7 +10,7 @@ from pathlib import Path
 from .config import PipelineConfig
 from .console import ConsoleUI
 from .events import EventLog
-from .state import PipelineState
+from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
 from .inat import extract_inat_ids, fetch_community_taxa
 from .util import parse_specimens_file
@@ -297,7 +297,7 @@ class Pipeline:
         # Submit in batches respecting concurrency, running identification
         # on each specimen as its consensus completes (like live mode)
         pending = list(jobs)
-        identified = set()
+        job_sids = {j.specimen_id for j in jobs}
         while (pending or self._futures) and not self._shutdown.is_set():
             # Fill available slots
             while pending:
@@ -314,11 +314,14 @@ class Pipeline:
                 self._drain_cmd_queue()
 
                 # Identify specimens that just completed consensus
+                # (consensus.completed sets CONSENSUS_DONE and clears identification)
                 if self.identify:
                     for sid, spec in self.state.specimens.items():
-                        if spec.clusters and sid not in identified:
+                        if (sid in job_sids
+                                and spec.status == SpecimenStatus.CONSENSUS_DONE
+                                and spec.clusters
+                                and not spec.identification):
                             self._submit_identification(sid)
-                            identified.add(sid)
 
         # Summarize all identified/no_match specimens, then aggregate
         self._run_summarize_round()
@@ -340,7 +343,7 @@ class Pipeline:
         logger.info(f"Running consensus for {len(jobs)} specimens")
 
         pending = list(jobs)
-        identified = set()
+        job_sids = {j.specimen_id for j in jobs}
         while (pending or self._futures) and not self._shutdown.is_set():
             # Fill available slots
             while pending:
@@ -357,11 +360,14 @@ class Pipeline:
                 self._drain_cmd_queue()
 
                 # Identify specimens that just completed consensus
+                # (consensus.completed sets CONSENSUS_DONE and clears identification)
                 if self.identify:
                     for sid, spec in self.state.specimens.items():
-                        if spec.clusters and sid not in identified:
+                        if (sid in job_sids
+                                and spec.status == SpecimenStatus.CONSENSUS_DONE
+                                and spec.clusters
+                                and not spec.identification):
                             self._submit_identification(sid)
-                            identified.add(sid)
 
     def _schedule_consensus(self) -> None:
         """Check scheduler and submit consensus jobs for available slots."""
@@ -457,7 +463,6 @@ class Pipeline:
 
     def _run_summarize_round(self) -> None:
         """Run summarize for all identified/no_match specimens, then aggregate."""
-        from .state import SpecimenStatus
         self._rebuild_state()
 
         eligible = [
