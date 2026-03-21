@@ -6,6 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "specimux-suite"
 version = "0.1.0"
 description = "Orchestration and UX layer for the Mycomap fungal DNA barcoding pipeline"
+readme = "README.md"
+license = "BSD-3-Clause"
+authors = [
+    { name = "Josh Walker", email = "joshowalker@yahoo.com" },
+]
 requires-python = ">=3.11"
 dependencies = [
     "specimux>=0.7.2",          # Profiles + progress protocol
@@ -18,6 +23,11 @@ dependencies = [
     "biopython>=1.82",
     "pyyaml>=5.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/joshuaowalker/specimux-suite"
+Repository = "https://github.com/joshuaowalker/specimux-suite"
+Issues = "https://github.com/joshuaowalker/specimux-suite/issues"
 
 [project.optional-dependencies]
 dev = [
