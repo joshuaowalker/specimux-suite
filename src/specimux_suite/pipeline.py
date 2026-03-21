@@ -582,6 +582,8 @@ class Pipeline:
         logger.info(f"Running summarize for {len(eligible)} specimens")
 
         pending = list(eligible)
+        eligible_set = set(eligible)
+        variant_id_submitted = set()
         while (pending or self._futures) and not self._shutdown.is_set():
             while pending:
                 slots = self.config.workers - len(self._futures)
@@ -595,15 +597,16 @@ class Pipeline:
                 self._rebuild_state()
                 self._drain_cmd_queue()
 
-        # Re-identify using variant sequences
-        if self.identify:
-            self._rebuild_state()
-            for sid in eligible:
-                self._submit_variant_identification(sid)
-            while self._futures and not self._shutdown.is_set():
-                self._wait_for_any_future()
-                self._rebuild_state()
-                self._drain_cmd_queue()
+                # Identify specimens that just completed summarization
+                if self.identify:
+                    for sid, spec in self.state.specimens.items():
+                        if (sid in eligible_set
+                                and sid not in variant_id_submitted
+                                and spec.status == SpecimenStatus.SUMMARIZED
+                                and spec.variants
+                                and sid not in self._futures):
+                            self._submit_variant_identification(sid)
+                            variant_id_submitted.add(sid)
 
         # Run aggregate to generate summary.fasta etc.
         logger.info("Running summarize aggregate")

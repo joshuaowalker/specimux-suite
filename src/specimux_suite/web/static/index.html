@@ -739,13 +739,7 @@ function getActiveMatches(s, context) {
     seqs = s.clusters || [];
   }
   const seqNames = new Set(seqs.map(seq => seq.name));
-  const matches = (s.identification || []).filter(m => m.top_hits && m.top_hits.length && (!seqs.length || seqNames.has(m.cluster)));
-  // In variant context, fall back to cluster IDs if no variant-level IDs exist yet
-  if (matches.length === 0 && ctx === 'variants' && s.clusters) {
-    const clusterNames = new Set(s.clusters.map(c => c.name));
-    return (s.identification || []).filter(m => m.top_hits && m.top_hits.length && clusterNames.has(m.cluster));
-  }
-  return matches;
+  return (s.identification || []).filter(m => m.top_hits && m.top_hits.length && (!seqs.length || seqNames.has(m.cluster)));
 }
 
 function getOrganismsBadge(s, context) {
@@ -1209,12 +1203,7 @@ function getTopMatch(s, context) {
   } else {
     seqs = s.clusters || [];
   }
-  let result = _findTopMatch(s, seqs, communityGenus);
-  // In variant context, fall back to cluster IDs if no variant-level IDs exist yet
-  if (!result && ctx === 'variants' && s.clusters) {
-    result = _findTopMatch(s, s.clusters, communityGenus);
-  }
-  return result;
+  return _findTopMatch(s, seqs, communityGenus);
 }
 
 function _findTopMatch(s, seqs, communityGenus) {
