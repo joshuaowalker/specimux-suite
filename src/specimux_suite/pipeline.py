@@ -47,6 +47,7 @@ class Pipeline:
         self._shutdown = threading.Event()
         self._draining = False  # True while waiting for specimux to run
         self.cmd_queue: queue.Queue = queue.Queue()
+        self._file_queue: queue.Queue[Path] = queue.Queue()
         self._console: ConsoleUI | None = None
 
     def _rebuild_state(self) -> None:
@@ -175,6 +176,7 @@ class Pipeline:
             settle_time=self.config.settle_time,
             on_file_stable=self._on_file_stable,
             event_log=self.event_log,
+            stable_queue=self._file_queue,
         )
 
         # Seed tracker with files already processed in previous runs
@@ -198,6 +200,9 @@ class Pipeline:
                 while not self._shutdown.is_set():
                     self._shutdown.wait(timeout=2.0)
                     self._check_completed_futures()
+
+                    # Process any stable files (drain once, run all back-to-back)
+                    self._process_stable_files()
 
                     # Drain command queue
                     while True:
@@ -244,23 +249,45 @@ class Pipeline:
             self._console.redraw()
 
     def _on_file_stable(self, file_path: Path) -> None:
-        """Called by watcher when a new stable FASTQ is detected.
+        """Legacy callback — only used if watcher has no queue."""
+        self._file_queue.put(file_path)
+        self._process_stable_files()
 
-        Drains all in-flight jobs, runs specimux with all cores, then resumes scheduling.
-        """
-        logger.info(f"Processing new file: {file_path}")
+    def _process_stable_files(self) -> None:
+        """Process all queued stable files back-to-back with a single drain cycle."""
+        # Collect all ready files
+        files: list[Path] = []
+        while True:
+            try:
+                files.append(self._file_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if not files:
+            return
+
+        logger.info(f"Processing {len(files)} stable file(s): {', '.join(f.name for f in files)}")
 
         # 1. Stop scheduling new consensus jobs
         self._draining = True
 
-        # 2. Wait for all in-flight futures to complete
+        # 2. Drain in-flight jobs once (not per-file)
         drained_sids = []
         if self._futures:
             logger.info(f"Draining {len(self._futures)} in-flight jobs before specimux")
             drained_sids = self._wait_all_futures()
 
-        # 3. Run specimux with all cores
-        specimens = self.specimux.run(file_path)
+        # 3. Run specimux on each file back-to-back
+        for file_path in files:
+            logger.info(f"Running specimux on {file_path.name}")
+            try:
+                self.specimux.run(file_path)
+            except Exception as e:
+                logger.error(f"Error running specimux on {file_path}: {e}")
+                self.event_log.emit("pipeline.error", {
+                    "component": "specimux",
+                    "message": f"Error processing {file_path}: {e}",
+                })
 
         # 4. Resume scheduling
         self._draining = False

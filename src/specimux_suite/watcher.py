@@ -2,6 +2,7 @@
 
 import logging
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -97,7 +98,7 @@ class _FastqHandler(FileSystemEventHandler):
 
 
 class FileWatcher:
-    """Watch a directory for new FASTQ files, check stability, then invoke callback."""
+    """Watch a directory for new FASTQ files, check stability, then queue for processing."""
 
     def __init__(
         self,
@@ -105,11 +106,13 @@ class FileWatcher:
         settle_time: float,
         on_file_stable: Callable[[Path], None],
         event_log: EventLog,
+        stable_queue: "queue.Queue[Path] | None" = None,
     ):
         self.watch_dir = Path(watch_dir)
         self.settle_time = settle_time
         self.on_file_stable = on_file_stable
         self.event_log = event_log
+        self._stable_queue = stable_queue
 
         self._checker = FileStabilityChecker(settle_time=settle_time)
         self._tracker = ProcessedFilesTracker()
@@ -187,7 +190,7 @@ class FileWatcher:
         self._threads.append(t)
 
     def _stability_check(self, path: Path) -> None:
-        """Wait for file stability, then invoke callback."""
+        """Wait for file stability, then queue for processing."""
         if not self._checker.wait_for_stable(path):
             logger.warning(f"File disappeared: {path}")
             return
@@ -198,18 +201,22 @@ class FileWatcher:
         self._tracker.mark_processed(path)
 
         size = path.stat().st_size
-        logger.info(f"File stable: {path.name} ({size} bytes), processing")
+        logger.info(f"File stable: {path.name} ({size} bytes)")
 
         self.event_log.emit("file.stable", {
             "path": str(path),
             "size_bytes": size,
         })
 
-        try:
-            self.on_file_stable(path)
-        except Exception as e:
-            logger.error(f"Error processing {path}: {e}")
-            self.event_log.emit("pipeline.error", {
-                "component": "watcher",
-                "message": f"Error processing {path}: {e}",
-            })
+        if self._stable_queue is not None:
+            self._stable_queue.put(path)
+        else:
+            # Fallback: direct callback (used when no queue provided)
+            try:
+                self.on_file_stable(path)
+            except Exception as e:
+                logger.error(f"Error processing {path}: {e}")
+                self.event_log.emit("pipeline.error", {
+                    "component": "watcher",
+                    "message": f"Error processing {path}: {e}",
+                })
