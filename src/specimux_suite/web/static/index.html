@@ -300,6 +300,11 @@ col.col-sum-reads { width: 12%; }
 .seq-display { display: block; margin-top: 0.3rem; font-family: monospace; font-size: 0.7rem;
   color: var(--text-dim); word-break: break-all; user-select: all; max-width: 60vw; }
 
+.watch-star { cursor: pointer; font-size: 1rem; color: var(--text-dim); margin-right: 0.3rem;
+  background: none; border: none; padding: 0; vertical-align: middle; }
+.watch-star:hover { color: var(--processing); }
+.watch-star.watched { color: var(--processing); }
+
 .filter-chips { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 .filter-chip { background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
   font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 12px; cursor: pointer; }
@@ -365,6 +370,7 @@ col.col-sum-reads { width: 12%; }
       <span class="filter-chip" data-filter="on-target">On-target</span>
       <span class="filter-chip" data-filter="off-target">Off-target</span>
       <span class="filter-chip" data-filter="no-match">No match</span>
+      <span class="filter-chip" data-filter="watched">Watched</span>
     </div>
   </div>
   <div class="controls-row">
@@ -417,6 +423,7 @@ col.col-sum-reads { width: 12%; }
       <span class="filter-chip" data-filter="novel">Novel (&lt;98%)</span>
       <span class="filter-chip" data-filter="on-target">On-target</span>
       <span class="filter-chip" data-filter="off-target">Off-target</span>
+      <span class="filter-chip" data-filter="watched">Watched</span>
     </div>
   </div>
   <div class="controls-row">
@@ -498,6 +505,7 @@ function connect() {
     'identification.completed',
     'summarize.started', 'summarize.completed',
     'pipeline.error',
+    'specimen.watched',
     'finalization.started', 'finalization.completed'
   ]) {
     es.addEventListener(type, (e) => {
@@ -522,7 +530,7 @@ function applyEvent(event) {
     case 'specimens.loaded':
       for (const s of (d.specimens || [])) {
         if (!state.specimens[s.specimen_id]) {
-          state.specimens[s.specimen_id] = { specimen_id: s.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
+          state.specimens[s.specimen_id] = { specimen_id: s.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0, watched: false };
         }
         if (s.pool) state.specimens[s.specimen_id].pool = s.pool;
       }
@@ -556,7 +564,7 @@ function applyEvent(event) {
       state.demuxing = false;
       state.demuxProgress = null;
       for (const [name, reads] of Object.entries(d.specimens || {})) {
-        if (!state.specimens[name]) state.specimens[name] = { specimen_id: name, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
+        if (!state.specimens[name]) state.specimens[name] = { specimen_id: name, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0, watched: false };
         state.specimens[name].total_reads = reads;
       }
       state.totalInputReads += d.input_reads || 0;
@@ -568,7 +576,7 @@ function applyEvent(event) {
       state.finalizing = false;
       break;
     case 'specimen.updated':
-      if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0 };
+      if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0, watched: false };
       Object.assign(state.specimens[d.specimen_id], { pool: d.pool, total_reads: d.total_reads });
       break;
     case 'consensus.started':
@@ -605,6 +613,11 @@ function applyEvent(event) {
         state.specimens[d.specimen_id].status = 'summarized';
         state.specimens[d.specimen_id].variants = d.variants || [];
         state.specimens[d.specimen_id].summarize_version = (state.specimens[d.specimen_id].summarize_version || 0) + 1;
+      }
+      break;
+    case 'specimen.watched':
+      if (state.specimens[d.specimen_id]) {
+        state.specimens[d.specimen_id].watched = d.watched;
       }
       break;
     case 'pipeline.error':
@@ -663,6 +676,9 @@ function matchesFilters(s, filters) {
         break;
       case 'no-match':
         if (getIdResult(s) !== 'no_match') return false;
+        break;
+      case 'watched':
+        if (!s.watched) return false;
         break;
     }
   }
@@ -854,7 +870,9 @@ function renderProcessing() {
     const inatId = getInatId(s.specimen_id);
     const notFungi = s.community_iconic_taxon && s.community_iconic_taxon !== 'Fungi';
     const taxonWarning = notFungi ? ' <span title="Not a fungus — possible wrong observation ID" style="color:#b8860b;font-style:normal">?</span>' : '';
-    let specimenCell = `<strong>${esc(s.specimen_id)}</strong>`;
+    const starClass = s.watched ? 'watch-star watched' : 'watch-star';
+    const starIcon = s.watched ? '★' : '☆';
+    let specimenCell = `<button class="${starClass}" data-sid="${esc(s.specimen_id)}">${starIcon}</button><strong>${esc(s.specimen_id)}</strong>`;
     if (s.community_taxon) {
       const taxonText = esc(s.community_taxon);
       if (inatId) {
@@ -945,6 +963,13 @@ function renderProcessing() {
       toggleSequence(btn.dataset.specimen, btn.dataset.seq, btn);
     });
   });
+  // Attach watch-star click handlers
+  tbody.querySelectorAll('.watch-star').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      fetch(`/api/watch/${encodeURIComponent(btn.dataset.sid)}`, { method: 'POST' });
+    });
+  });
 }
 
 function renderSummary() {
@@ -997,7 +1022,9 @@ function renderSummary() {
     const inatId = getInatId(s.specimen_id);
     const notFungi = s.community_iconic_taxon && s.community_iconic_taxon !== 'Fungi';
     const taxonWarning = notFungi ? ' <span title="Not a fungus — possible wrong observation ID" style="color:#b8860b;font-style:normal">?</span>' : '';
-    let specimenCell = `<strong>${esc(s.specimen_id)}</strong>`;
+    const starClass = s.watched ? 'watch-star watched' : 'watch-star';
+    const starIcon = s.watched ? '★' : '☆';
+    let specimenCell = `<button class="${starClass}" data-sid="${esc(s.specimen_id)}">${starIcon}</button><strong>${esc(s.specimen_id)}</strong>`;
     if (s.pool) specimenCell += `<br><span style="font-size:0.75rem;color:var(--text-dim)">${esc(s.pool)}</span>`;
     if (s.community_taxon) {
       const taxonText = esc(s.community_taxon);
@@ -1094,6 +1121,13 @@ function renderSummary() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleSequence(btn.dataset.specimen, btn.dataset.seq, btn);
+    });
+  });
+  // Attach watch-star click handlers
+  tbody.querySelectorAll('.watch-star').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      fetch(`/api/watch/${encodeURIComponent(btn.dataset.sid)}`, { method: 'POST' });
     });
   });
 

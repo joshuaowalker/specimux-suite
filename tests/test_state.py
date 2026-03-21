@@ -195,6 +195,30 @@ def test_summarize_state(tmp_output):
     assert len(d["specimens"]["s1"]["variants"]) == 2
 
 
+def test_specimen_watched(tmp_output):
+    """specimen.watched should toggle watched field on the specimen."""
+    log = EventLog(tmp_output / "events.jsonl")
+
+    log.emit("specimen.updated", {"specimen_id": "s1", "pool": "p1", "total_reads": 100})
+    log.emit("specimen.watched", {"specimen_id": "s1", "watched": True})
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    assert state.specimens["s1"].watched is True
+
+    # Toggle off
+    log.emit("specimen.watched", {"specimen_id": "s1", "watched": False})
+    state2 = PipelineState()
+    state2.rebuild(log)
+
+    assert state2.specimens["s1"].watched is False
+
+    # Check serialization
+    d = state2.to_dict()
+    assert d["specimens"]["s1"]["watched"] is False
+
+
 def test_to_dict(tmp_output):
     log = EventLog(tmp_output / "events.jsonl")
     log.emit("pipeline.started", {"mode": "batch"})

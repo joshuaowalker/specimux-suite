@@ -49,6 +49,7 @@ class SpecimenState:
     summarize_version: int = 0
     variants: list[dict] = field(default_factory=list)
     active_job_id: Optional[str] = None
+    watched: bool = False
 
 
 @dataclass
@@ -219,6 +220,10 @@ class PipelineState:
         spec.summarize_version += 1
         spec.variants = data.get("variants", [])
 
+    def _on_specimen_watched(self, data: dict):
+        spec = self.get_specimen(data["specimen_id"])
+        spec.watched = data.get("watched", True)
+
     def _on_pipeline_error(self, data: dict):
         self.errors.append(data)
         # If it's a specimen-level error, mark it
@@ -241,6 +246,7 @@ class PipelineState:
         "identification.completed": _on_identification_completed,
         "summarize.started": _on_summarize_started,
         "summarize.completed": _on_summarize_completed,
+        "specimen.watched": _on_specimen_watched,
         "pipeline.error": _on_pipeline_error,
     }
 
@@ -266,5 +272,6 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
         ],
         "summarize_version": s.summarize_version,
         "variants": s.variants,
+        "watched": s.watched,
     }
     return result

@@ -78,6 +78,12 @@ class Scheduler:
                         priority=priority,
                     ))
 
+        # Watched specimens get highest priority boost
+        for job in jobs:
+            spec = self.state.specimens[job.specimen_id]
+            if spec.watched:
+                job.priority += 10_000_000
+
         # Sort by priority descending
         jobs.sort(key=lambda j: j.priority, reverse=True)
 
@@ -118,6 +124,12 @@ class Scheduler:
                 read_count=spec.total_reads,
                 priority=priority,
             ))
+
+        # Watched specimens get highest priority boost
+        for job in jobs:
+            spec = self.state.specimens[job.specimen_id]
+            if spec.watched:
+                job.priority += 10_000_000
 
         jobs.sort(key=lambda j: j.priority, reverse=True)
 

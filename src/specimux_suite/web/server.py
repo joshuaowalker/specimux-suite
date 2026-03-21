@@ -189,6 +189,24 @@ async def get_sequence(specimen_id: str, sequence_name: str):
     return JSONResponse(status_code=404, content={"error": "Sequence not found"})
 
 
+@app.post("/api/watch/{specimen_id}")
+async def toggle_watch(specimen_id: str):
+    """Toggle watched state for a specimen."""
+    if _event_log is None:
+        return JSONResponse(status_code=500, content={"error": "Not initialized"})
+    fresh = PipelineState()
+    fresh.rebuild(_event_log)
+    spec = fresh.specimens.get(specimen_id)
+    if not spec:
+        return JSONResponse(status_code=404, content={"error": "Specimen not found"})
+    new_watched = not spec.watched
+    _event_log.emit("specimen.watched", {
+        "specimen_id": specimen_id,
+        "watched": new_watched,
+    })
+    return {"specimen_id": specimen_id, "watched": new_watched}
+
+
 def start_web_server(event_log: EventLog, state: PipelineState, config: PipelineConfig):
     """Start the web server in a background thread."""
     import uvicorn
