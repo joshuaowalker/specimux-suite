@@ -283,12 +283,11 @@ a.hit-name:hover { text-decoration: underline; }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
-col.col-sum-specimen { width: 26%; }
-col.col-sum-variants { width: 10%; }
-col.col-sum-topmatch { width: 24%; }
-col.col-sum-identity { width: 12%; }
-col.col-sum-reads { width: 8%; }
-col.col-sum-community { width: 20%; }
+col.col-sum-specimen { width: 30%; }
+col.col-sum-variants { width: 12%; }
+col.col-sum-topmatch { width: 30%; }
+col.col-sum-identity { width: 16%; }
+col.col-sum-reads { width: 12%; }
 
 .variant-detail { background: rgba(255,255,255,0.02); }
 .variant-detail td { padding: 0.3rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8rem; }
@@ -434,7 +433,6 @@ col.col-sum-community { width: 20%; }
     <col class="col-sum-topmatch">
     <col class="col-sum-identity">
     <col class="col-sum-reads">
-    <col class="col-sum-community">
   </colgroup>
   <thead>
     <tr>
@@ -443,7 +441,6 @@ col.col-sum-community { width: 20%; }
       <th>Top Match</th>
       <th data-sort-sum="top_identity">Identity</th>
       <th data-sort-sum="total_reads">Reads</th>
-      <th>Community Taxon</th>
     </tr>
   </thead>
   <tbody id="summary-table"></tbody>
@@ -594,7 +591,11 @@ function applyEvent(event) {
         if (state.specimens[d.specimen_id].status !== 'summarized') {
           state.specimens[d.specimen_id].status = hasHits ? 'identified' : 'no_match';
         }
-        state.specimens[d.specimen_id].identification = matches;
+        // Merge: keep existing identifications for clusters not in the new batch
+        const newClusters = new Set(matches.map(m => m.cluster));
+        const existing = state.specimens[d.specimen_id].identification || [];
+        const kept = existing.filter(m => !newClusters.has(m.cluster));
+        state.specimens[d.specimen_id].identification = [...kept, ...matches];
       }
       break;
     case 'summarize.started':
@@ -628,7 +629,7 @@ function getIdResult(s) {
 
 async function toggleSequence(specimenId, seqName, btn) {
   const existing = btn.parentElement.querySelector('.seq-display');
-  if (existing) { existing.remove(); btn.textContent = 'seq'; return; }
+  if (existing) { existing.remove(); btn.textContent = btn.dataset.label || 'seq'; return; }
   try {
     btn.textContent = '\u2026';
     const resp = await fetch(`/api/sequence/${encodeURIComponent(specimenId)}/${encodeURIComponent(seqName)}`);
@@ -702,6 +703,12 @@ function getTargetStatus(s) {
     }
   }
   return 'off-target';
+}
+
+function isHitOnTarget(hit, communityGenus) {
+  if (!communityGenus || !hit) return false;
+  const hitGenus = (hit.name || hit.ref_id || '').split(/\s+/)[0].toLowerCase();
+  return hitGenus === communityGenus;
 }
 
 function getOrganismsBadge(s) {
@@ -885,7 +892,16 @@ function renderProcessing() {
       for (const match of (s.identification || [])) {
         idByCluster[match.cluster] = match;
       }
-      for (const cluster of s.clusters) {
+      const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0]).toLowerCase();
+      const sortedClusters = [...s.clusters].sort((a, b) => {
+        const aTop = idByCluster[a.name]?.top_hits?.[0];
+        const bTop = idByCluster[b.name]?.top_hits?.[0];
+        const aOn = isHitOnTarget(aTop, communityGenus) ? 0 : 1;
+        const bOn = isHitOnTarget(bTop, communityGenus) ? 0 : 1;
+        if (aOn !== bOn) return aOn - bOn;
+        return (b.size || 0) - (a.size || 0);
+      });
+      for (const cluster of sortedClusters) {
         const clusterName = cluster.name || '?';
         const match = idByCluster[clusterName];
         const hits = match ? (match.top_hits || []) : [];
@@ -968,14 +984,31 @@ function renderSummary() {
 
   for (const s of specs) {
     const variants = s.variants || [];
-    const topHit = getTopHit(s);
+    const topMatch = getTopMatch(s);
+    const topHit = topMatch ? topMatch.top_hits[0] : null;
     const identity = topHit ? (topHit.adjusted_identity || topHit.identity || 0) : 0;
     const pct = (identity * 100).toFixed(1);
     const isExpanded = ts.expanded.has(s.specimen_id);
+    // Read count from the top-ranked variant
+    const topVariant = topMatch ? variants.find(v => v.name === topMatch.cluster) : null;
+    const topReads = topVariant ? topVariant.size : null;
 
-    // Specimen cell
+    // Specimen cell: name + community taxon (matching Processing tab layout)
+    const inatId = getInatId(s.specimen_id);
+    const notFungi = s.community_iconic_taxon && s.community_iconic_taxon !== 'Fungi';
+    const taxonWarning = notFungi ? ' <span title="Not a fungus — possible wrong observation ID" style="color:#b8860b;font-style:normal">?</span>' : '';
     let specimenCell = `<strong>${esc(s.specimen_id)}</strong>`;
     if (s.pool) specimenCell += `<br><span style="font-size:0.75rem;color:var(--text-dim)">${esc(s.pool)}</span>`;
+    if (s.community_taxon) {
+      const taxonText = esc(s.community_taxon);
+      if (inatId) {
+        specimenCell += `<br><a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank"><span class="community-taxon">${taxonText}</span></a>${taxonWarning}`;
+      } else {
+        specimenCell += `<br><span class="community-taxon">${taxonText}</span>${taxonWarning}`;
+      }
+    } else if (inatId) {
+      specimenCell += ` <a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank" style="font-size:0.7rem">iNat</a>`;
+    }
 
     // Variants cell with expand chevron
     let chevron = '';
@@ -1000,27 +1033,12 @@ function renderSummary() {
     const organismsBadge = getOrganismsBadge(s);
     const identityCell = topHit ? `${targetHtml}<span class="hit-pct">${pct}%</span>${warningHtml}${organismsBadge ? ' ' + organismsBadge : ''}` : '';
 
-    // Community taxon cell
-    let communityCell = '';
-    if (s.community_taxon) {
-      const inatId = getInatId(s.specimen_id);
-      const notFungi = s.community_iconic_taxon && s.community_iconic_taxon !== 'Fungi';
-      const taxonWarning = notFungi ? ' <span title="Not a fungus — possible wrong observation ID" style="color:#b8860b;font-style:normal">?</span>' : '';
-      const taxonText = esc(s.community_taxon);
-      if (inatId) {
-        communityCell = `<a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank"><span class="community-taxon" style="font-size:inherit">${taxonText}</span></a>${taxonWarning}`;
-      } else {
-        communityCell = `<span class="community-taxon" style="font-size:inherit">${taxonText}</span>${taxonWarning}`;
-      }
-    }
-
     rows.push(`<tr>
       <td>${specimenCell}</td>
       <td>${variantCell}</td>
       <td class="top-hit">${topMatchCell}</td>
       <td>${identityCell}</td>
-      <td>${s.total_reads.toLocaleString()}</td>
-      <td>${communityCell}</td>
+      <td>${topReads != null ? topReads.toLocaleString() : '—'}</td>
     </tr>`);
 
     // Expanded variant detail rows
@@ -1029,7 +1047,16 @@ function renderSummary() {
       for (const match of (s.identification || [])) {
         idByCluster[match.cluster] = match;
       }
-      for (const v of variants) {
+      const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0]).toLowerCase();
+      const sortedVariants = [...variants].sort((a, b) => {
+        const aTop = idByCluster[a.name]?.top_hits?.[0];
+        const bTop = idByCluster[b.name]?.top_hits?.[0];
+        const aOn = isHitOnTarget(aTop, communityGenus) ? 0 : 1;
+        const bOn = isHitOnTarget(bTop, communityGenus) ? 0 : 1;
+        if (aOn !== bOn) return aOn - bOn;
+        return (b.size || 0) - (a.size || 0);
+      });
+      for (const v of sortedVariants) {
         const vName = v.name || '?';
         const match = idByCluster[vName];
         const hits = match ? (match.top_hits || []) : [];
@@ -1038,14 +1065,14 @@ function renderSummary() {
         const vPct = top ? (vId * 100).toFixed(1) : '';
         const vHitName = top ? linkedName(top.name || top.ref_id || '') : '<span class="alt-hit">—</span>';
 
-        const seqBtn = `<button class="show-seq-btn" data-specimen="${esc(s.specimen_id)}" data-seq="${esc(vName)}">seq</button>`;
+        const seqLabel = v.length != null ? `${v.length} bp` : 'seq';
+        const seqBtn = `<button class="show-seq-btn" data-specimen="${esc(s.specimen_id)}" data-seq="${esc(vName)}" data-label="${esc(seqLabel)}">${seqLabel}</button>`;
         rows.push(`<tr class="variant-detail">
           <td>${esc(vName)}${seqBtn}</td>
           <td><span class="variant-metric">${v.size != null ? v.size + ' reads' : ''}</span></td>
           <td class="top-hit">${vHitName}</td>
           <td>${vPct ? `<span class="hit-pct">${vPct}%</span>` : ''}</td>
           <td></td>
-          <td><span class="variant-metric">${v.length != null ? v.length + ' bp' : ''}</span></td>
         </tr>`);
       }
     }
@@ -1079,6 +1106,14 @@ function getSummarySortValue(s, key) {
     const h = getTopHit(s);
     return h ? (h.adjusted_identity || h.identity || 0) : 0;
   }
+  if (key === 'total_reads') {
+    const m = getTopMatch(s);
+    if (m) {
+      const v = (s.variants || []).find(v => v.name === m.cluster);
+      if (v) return v.size || 0;
+    }
+    return 0;
+  }
   return s[key] || '';
 }
 
@@ -1088,21 +1123,39 @@ function getClusterSize(s, clusterName) {
   return c ? c.size : null;
 }
 
-function getTopHit(s) {
+function getTopMatch(s) {
   if (!s.identification || !s.identification.length) return null;
-  // Find the hit from the largest cluster (by size)
-  let bestHit = null;
+  const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0]).toLowerCase();
+  // Use variants for summarized specimens, clusters otherwise
+  const seqs = s.status === 'summarized' && s.variants ? s.variants : (s.clusters || []);
+  const seqSizeMap = {};
+  for (const seq of seqs) seqSizeMap[seq.name] = seq.size || 0;
+
+  // Rank: on-target first, then by sequence size
+  let bestMatch = null;
+  let bestOnTarget = false;
   let bestSize = -1;
   for (const match of s.identification) {
     if (!match.top_hits || !match.top_hits.length) continue;
-    const clusterSize = getClusterSize(s, match.cluster);
-    const size = clusterSize !== null ? clusterSize : 0;
-    if (bestHit === null || size > bestSize) {
-      bestHit = match.top_hits[0];
+    // Skip identifications that don't belong to the active sequence set
+    if (seqs.length && !(match.cluster in seqSizeMap)) continue;
+    const top = match.top_hits[0];
+    const onTarget = isHitOnTarget(top, communityGenus);
+    const size = seqSizeMap[match.cluster] || 0;
+    if (bestMatch === null
+        || (onTarget && !bestOnTarget)
+        || (onTarget === bestOnTarget && size > bestSize)) {
+      bestMatch = match;
+      bestOnTarget = onTarget;
       bestSize = size;
     }
   }
-  return bestHit;
+  return bestMatch;
+}
+
+function getTopHit(s) {
+  const m = getTopMatch(s);
+  return m ? m.top_hits[0] : null;
 }
 
 function getTopHitName(s) {

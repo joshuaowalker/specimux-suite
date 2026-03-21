@@ -200,7 +200,10 @@ class PipelineState:
                 cluster=m["cluster"],
                 top_hits=m.get("top_hits", []),
             ))
-        spec.identification = matches
+        # Merge: keep existing identifications for clusters not in the new batch
+        new_clusters = {m.cluster for m in matches}
+        kept = [m for m in spec.identification if m.cluster not in new_clusters]
+        spec.identification = kept + matches
         has_hits = any(m.top_hits for m in matches)
         if spec.status != SpecimenStatus.SUMMARIZED:
             spec.status = SpecimenStatus.IDENTIFIED if has_hits else SpecimenStatus.NO_MATCH
