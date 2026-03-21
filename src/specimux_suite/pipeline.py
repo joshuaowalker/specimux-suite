@@ -44,6 +44,7 @@ class Pipeline:
 
         self._executor = ThreadPoolExecutor(max_workers=config.workers)
         self._futures: dict[str, Future] = {}
+        self._identifying: set[str] = set()  # specimen IDs with in-flight identification
         self._shutdown = threading.Event()
         self._draining = False  # True while waiting for specimux to run
         self.cmd_queue: queue.Queue = queue.Queue()
@@ -253,6 +254,54 @@ class Pipeline:
         self._file_queue.put(file_path)
         self._process_stable_files()
 
+    def _has_unsettled_files(self) -> bool:
+        """Check if any detected files haven't stabilized yet."""
+        return any(not f.stable for f in self.state.files.values())
+
+    def _drain_file_queue(self) -> None:
+        """Process all queued stable files without scheduling consensus afterward."""
+        files: list[Path] = []
+        while True:
+            try:
+                files.append(self._file_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if not files:
+            return
+
+        logger.info(f"Draining {len(files)} stable file(s): {', '.join(f.name for f in files)}")
+
+        self._draining = True
+
+        if self._futures:
+            logger.info(f"Draining {len(self._futures)} in-flight jobs before specimux")
+            self._wait_all_futures()
+
+        for file_path in files:
+            logger.info(f"Running specimux on {file_path.name}")
+            try:
+                self.specimux.run(file_path)
+            except Exception as e:
+                logger.error(f"Error running specimux on {file_path}: {e}")
+                self.event_log.emit("pipeline.error", {
+                    "component": "specimux",
+                    "message": f"Error processing {file_path}: {e}",
+                })
+
+        self._draining = False
+        self._rebuild_state()
+
+    def _drain_all_files(self) -> None:
+        """Drain queued files and wait for any settling files to stabilize."""
+        self._drain_file_queue()
+        self._rebuild_state()
+        if self._has_unsettled_files():
+            wait = self.config.settle_time + 5
+            logger.info(f"Waiting up to {wait}s for {sum(1 for f in self.state.files.values() if not f.stable)} settling file(s)")
+            self._shutdown.wait(timeout=wait)
+            self._drain_file_queue()
+
     def _process_stable_files(self) -> None:
         """Process all queued stable files back-to-back with a single drain cycle."""
         # Collect all ready files
@@ -306,11 +355,15 @@ class Pipeline:
         Each specimen goes through consensus → identification sequentially,
         so progress is visible in the UI specimen-by-specimen.
         """
+        # Drain any pending files first — finalization means "process everything"
+        # Also wait for files that are detected but still settling
+        self._drain_all_files()
+
         self._rebuild_state()
         jobs = self.scheduler.get_all_eligible_jobs(max_jobs=None, min_reads=0)
 
-        # Filter out specimens already in-flight
-        jobs = [j for j in jobs if j.specimen_id not in self._futures]
+        # Filter out specimens already in-flight or with no reads (nothing to process)
+        jobs = [j for j in jobs if j.specimen_id not in self._futures and j.read_count > 0]
 
         if not jobs:
             logger.info("Finalize: no eligible specimens to process")
@@ -319,13 +372,33 @@ class Pipeline:
         logger.info(f"Finalize: scheduling consensus for {len(jobs)} specimens")
         self.event_log.emit("finalization.started", {
             "specimen_count": len(jobs),
+            "specimen_ids": [j.specimen_id for j in jobs],
         })
 
         # Submit in batches respecting concurrency, running identification
         # on each specimen as its consensus completes (like live mode)
         pending = list(jobs)
         job_sids = {j.specimen_id for j in jobs}
-        while (pending or self._futures) and not self._shutdown.is_set():
+        while not self._shutdown.is_set():
+            # Drain any files that arrived since finalization started
+            if not self._file_queue.empty() or self._has_unsettled_files():
+                self._drain_all_files()
+                # Check for newly-eligible specimens from the new reads
+                new_jobs = self.scheduler.get_all_eligible_jobs(max_jobs=None, min_reads=0)
+                for j in new_jobs:
+                    if j.read_count > 0 and j.specimen_id not in job_sids and j.specimen_id not in self._futures:
+                        pending.append(j)
+                        job_sids.add(j.specimen_id)
+                if new_jobs:
+                    # Update finalization set so dashboard tracks new specimens
+                    self.event_log.emit("finalization.started", {
+                        "specimen_count": len(job_sids),
+                        "specimen_ids": list(job_sids),
+                    })
+
+            if not pending and not self._futures:
+                break
+
             # Fill available slots
             while pending:
                 slots = self.config.workers - len(self._futures)
@@ -434,6 +507,8 @@ class Pipeline:
 
     def _submit_identification(self, specimen_id: str, deferred: bool = False) -> None:
         """Submit identification for a specimen if it has clusters."""
+        if specimen_id in self._identifying:
+            return
         spec = self.state.get_specimen(specimen_id)
         if not spec or not spec.clusters:
             return
@@ -442,7 +517,9 @@ class Pipeline:
             return
         label = f" (deferred from drain)" if deferred else ""
         logger.info(f"Identifying {specimen_id}{label}")
-        self._executor.submit(self.identify.run, specimen_id, consensus_fasta)
+        self._identifying.add(specimen_id)
+        future = self._executor.submit(self.identify.run, specimen_id, consensus_fasta)
+        future.add_done_callback(lambda _: self._identifying.discard(specimen_id))
 
     def _build_variant_fasta(self, specimen_id: str) -> Path | None:
         """Combine all variant FASTA files for a specimen into one file for identification."""

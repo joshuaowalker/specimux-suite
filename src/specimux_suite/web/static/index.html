@@ -383,9 +383,9 @@ col.col-sum-reads { width: 12%; }
       &nbsp;No match: <span id="stat-nomatch">0</span>
       &nbsp;Low reads: <span id="stat-lowreads">0</span>
       <div class="stats-sep"></div>
-      Processing: <span id="stat-processing">0</span>
-      &nbsp;Queued: <span id="stat-queued-new">0</span>
-      &nbsp;Reprocess: <span id="stat-queued-reprocess">0</span>
+      <span id="label-processing">Processing</span>: <span id="stat-processing">0</span>
+      &nbsp;<span id="label-queued-new">Queued</span>: <span id="stat-queued-new">0</span>
+      &nbsp;<span id="label-queued-reprocess">Reprocess</span>: <span id="stat-queued-reprocess">0</span>
     </div>
   </div>
 </div>
@@ -456,7 +456,7 @@ col.col-sum-reads { width: 12%; }
 </div><!-- end tab-summary -->
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, mode: null };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null };
 let activeTab = 'processing';
 const tabState = {
   processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set() },
@@ -571,9 +571,11 @@ function applyEvent(event) {
       break;
     case 'finalization.started':
       state.finalizing = true;
+      state.finalizationSet = new Set(d.specimen_ids || []);
       break;
     case 'finalization.completed':
       state.finalizing = false;
+      state.finalizationSet = null;
       break;
     case 'specimen.updated':
       if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0, watched: false };
@@ -659,20 +661,20 @@ async function toggleSequence(specimenId, seqName, btn) {
   }
 }
 
-function matchesFilters(s, filters) {
+function matchesFilters(s, filters, context) {
   if (filters.size === 0) return true;
   for (const f of filters) {
     switch (f) {
       case 'novel': {
-        const h = getTopHit(s);
+        const h = getTopHit(s, context);
         if (!h || (h.adjusted_identity || h.identity || 1) >= 0.98) return false;
         break;
       }
       case 'on-target':
-        if (!hasIdentification(s) || getTargetStatus(s) !== 'on-target') return false;
+        if (!hasIdentification(s) || getTargetStatus(s, context) !== 'on-target') return false;
         break;
       case 'off-target':
-        if (!hasIdentification(s) || getTargetStatus(s) !== 'off-target') return false;
+        if (!hasIdentification(s) || getTargetStatus(s, context) !== 'off-target') return false;
         break;
       case 'no-match':
         if (getIdResult(s) !== 'no_match') return false;
@@ -704,14 +706,13 @@ function getInatId(specimen_id) {
   return m ? m[1] : null;
 }
 
-function getTargetStatus(s) {
+function getTargetStatus(s, context) {
   if (!s.community_taxon) return null;
   // Use community_genus (resolved from iNat ancestors for infrageneric ranks)
   // or fall back to first word of community_taxon
   const communityGenus = (s.community_genus || s.community_taxon.split(/\s+/)[0]).toLowerCase();
-  const matches = s.identification || [];
+  const matches = getActiveMatches(s, context);
   for (const m of matches) {
-    if (!m.top_hits || !m.top_hits.length) continue;
     for (const hit of m.top_hits) {
       const name = hit.name || hit.ref_id || '';
       const hitGenus = name.split(/\s+/)[0].toLowerCase();
@@ -727,17 +728,30 @@ function isHitOnTarget(hit, communityGenus) {
   return hitGenus === communityGenus;
 }
 
-function getActiveMatches(s) {
-  // Filter identification entries to the active sequence set (variants for summarized, clusters otherwise)
-  const seqs = s.status === 'summarized' && s.variants ? s.variants : (s.clusters || []);
+function getActiveMatches(s, context) {
+  // context: 'clusters' = raw cluster IDs (Processing tab), 'variants' = variant IDs with cluster fallback (Summary tab)
+  // Default: 'clusters' for Processing tab behavior
+  const ctx = context || 'clusters';
+  let seqs;
+  if (ctx === 'variants' && s.variants && s.variants.length) {
+    seqs = s.variants;
+  } else {
+    seqs = s.clusters || [];
+  }
   const seqNames = new Set(seqs.map(seq => seq.name));
-  return (s.identification || []).filter(m => m.top_hits && m.top_hits.length && (!seqs.length || seqNames.has(m.cluster)));
+  const matches = (s.identification || []).filter(m => m.top_hits && m.top_hits.length && (!seqs.length || seqNames.has(m.cluster)));
+  // In variant context, fall back to cluster IDs if no variant-level IDs exist yet
+  if (matches.length === 0 && ctx === 'variants' && s.clusters) {
+    const clusterNames = new Set(s.clusters.map(c => c.name));
+    return (s.identification || []).filter(m => m.top_hits && m.top_hits.length && clusterNames.has(m.cluster));
+  }
+  return matches;
 }
 
-function getOrganismsBadge(s) {
-  const matches = getActiveMatches(s);
+function getOrganismsBadge(s, context) {
+  const matches = getActiveMatches(s, context);
   if (matches.length <= 1) return '';
-  const topName = getTopHitName(s);
+  const topName = getTopHitName(s, context);
   const otherNames = new Set();
   for (const m of matches) {
     const name = m.top_hits[0].name || m.top_hits[0].ref_id || '';
@@ -830,19 +844,40 @@ function renderProcessing() {
   const effectiveMinReads = state.mode === 'batch' ? 0 : minReads;
   document.getElementById('stat-lowreads').textContent = all.filter(s => s.total_reads < effectiveMinReads).length;
 
-  // Pipeline activity: processing / queued (new) / queued (reprocess)
-  document.getElementById('stat-processing').textContent = all.filter(s => s.status === 'consensus_running').length;
-  document.getElementById('stat-queued-new').textContent = all.filter(s =>
-    (s.consensus_version || 0) === 0 && s.total_reads >= effectiveMinReads && s.status !== 'consensus_running'
-  ).length;
-  document.getElementById('stat-queued-reprocess').textContent = all.filter(s => {
-    if ((s.consensus_version || 0) === 0) return false;
-    if (s.status === 'consensus_running') return false;
-    const newReads = s.total_reads - (s.reads_at_last_consensus || 0);
-    const base = s.reads_at_last_consensus || 0;
-    const ratio = base > 0 ? newReads / base : (newReads > 0 ? Infinity : 0);
-    return ratio > reprocessRatio;
-  }).length;
+  // Pipeline activity: processing / queued / reprocess (or finalization stats)
+  if (state.finalizing && state.finalizationSet) {
+    document.getElementById('label-processing').textContent = 'Processing';
+    document.getElementById('label-queued-new').textContent = 'Remaining';
+    document.getElementById('label-queued-reprocess').textContent = 'Completed';
+    const fSet = state.finalizationSet;
+    let processing = 0, remaining = 0, done = 0;
+    for (const s of all) {
+      if (!fSet.has(s.specimen_id)) continue;
+      if (s.status === 'consensus_running') processing++;
+      else if (s.status === 'consensus_done' || s.status === 'identified'
+               || s.status === 'no_match' || s.status === 'summarized') done++;
+      else remaining++;
+    }
+    document.getElementById('stat-processing').textContent = processing;
+    document.getElementById('stat-queued-new').textContent = remaining;
+    document.getElementById('stat-queued-reprocess').textContent = done;
+  } else {
+    document.getElementById('label-processing').textContent = 'Processing';
+    document.getElementById('label-queued-new').textContent = 'Queued';
+    document.getElementById('label-queued-reprocess').textContent = 'Reprocess';
+    document.getElementById('stat-processing').textContent = all.filter(s => s.status === 'consensus_running').length;
+    document.getElementById('stat-queued-new').textContent = all.filter(s =>
+      (s.consensus_version || 0) === 0 && s.total_reads >= effectiveMinReads && s.status !== 'consensus_running'
+    ).length;
+    document.getElementById('stat-queued-reprocess').textContent = all.filter(s => {
+      if ((s.consensus_version || 0) === 0) return false;
+      if (s.status === 'consensus_running') return false;
+      const newReads = s.total_reads - (s.reads_at_last_consensus || 0);
+      const base = s.reads_at_last_consensus || 0;
+      const ratio = base > 0 ? newReads / base : (newReads > 0 ? Infinity : 0);
+      return ratio > reprocessRatio;
+    }).length;
+  }
 
   // Table
   const tbody = document.getElementById('specimen-table');
@@ -996,11 +1031,11 @@ function renderSummary() {
     const q = ts.searchTerm.toLowerCase();
     specs = specs.filter(s =>
       s.specimen_id.toLowerCase().includes(q) ||
-      getTopHitName(s).toLowerCase().includes(q) ||
+      getTopHitName(s, 'variants').toLowerCase().includes(q) ||
       (s.community_taxon || '').toLowerCase().includes(q)
     );
   }
-  specs = specs.filter(s => matchesFilters(s, ts.filters));
+  specs = specs.filter(s => matchesFilters(s, ts.filters, 'variants'));
 
   // Sort
   specs.sort((a, b) => {
@@ -1016,7 +1051,7 @@ function renderSummary() {
 
   for (const s of specs) {
     const variants = s.variants || [];
-    const topMatch = getTopMatch(s);
+    const topMatch = getTopMatch(s, 'variants');
     const topHit = topMatch ? topMatch.top_hits[0] : null;
     const identity = topHit ? (topHit.adjusted_identity || topHit.identity || 0) : 0;
     const pct = (identity * 100).toFixed(1);
@@ -1055,7 +1090,7 @@ function renderSummary() {
     const topMatchCell = topHit ? linkedName(topHit.name || topHit.ref_id || '') : '—';
 
     // Identity cell
-    const targetStatus = getTargetStatus(s);
+    const targetStatus = getTargetStatus(s, 'variants');
     let targetHtml = '';
     if (targetStatus === 'on-target') targetHtml = '<span class="target-indicator target-on">✓</span>';
     else if (targetStatus === 'off-target') targetHtml = '<span class="target-indicator target-off">✗</span>';
@@ -1064,7 +1099,7 @@ function renderSummary() {
       if (identity < 0.90) warningHtml = `<span class="identity-warning" style="color:var(--error)">⚠</span>`;
       else if (identity < 0.98) warningHtml = `<span class="identity-warning" style="color:var(--processing)">⚠</span>`;
     }
-    const organismsBadge = getOrganismsBadge(s);
+    const organismsBadge = getOrganismsBadge(s, 'variants');
     const identityCell = topHit ? `${targetHtml}<span class="hit-pct">${pct}%</span>${warningHtml}${organismsBadge ? ' ' + organismsBadge : ''}` : '';
 
     rows.push(`<tr>
@@ -1144,11 +1179,11 @@ function renderSummary() {
 function getSummarySortValue(s, key) {
   if (key === 'variant_count') return (s.variants || []).length;
   if (key === 'top_identity') {
-    const h = getTopHit(s);
+    const h = getTopHit(s, 'variants');
     return h ? (h.adjusted_identity || h.identity || 0) : 0;
   }
   if (key === 'total_reads') {
-    const m = getTopMatch(s);
+    const m = getTopMatch(s, 'variants');
     if (m) {
       const v = (s.variants || []).find(v => v.name === m.cluster);
       if (v) return v.size || 0;
@@ -1164,11 +1199,25 @@ function getClusterSize(s, clusterName) {
   return c ? c.size : null;
 }
 
-function getTopMatch(s) {
+function getTopMatch(s, context) {
   if (!s.identification || !s.identification.length) return null;
   const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0]).toLowerCase();
-  // Use variants for summarized specimens, clusters otherwise
-  const seqs = s.status === 'summarized' && s.variants ? s.variants : (s.clusters || []);
+  const ctx = context || 'clusters';
+  let seqs;
+  if (ctx === 'variants' && s.variants && s.variants.length) {
+    seqs = s.variants;
+  } else {
+    seqs = s.clusters || [];
+  }
+  let result = _findTopMatch(s, seqs, communityGenus);
+  // In variant context, fall back to cluster IDs if no variant-level IDs exist yet
+  if (!result && ctx === 'variants' && s.clusters) {
+    result = _findTopMatch(s, s.clusters, communityGenus);
+  }
+  return result;
+}
+
+function _findTopMatch(s, seqs, communityGenus) {
   const seqSizeMap = {};
   for (const seq of seqs) seqSizeMap[seq.name] = seq.size || 0;
 
@@ -1194,13 +1243,13 @@ function getTopMatch(s) {
   return bestMatch;
 }
 
-function getTopHit(s) {
-  const m = getTopMatch(s);
+function getTopHit(s, context) {
+  const m = getTopMatch(s, context);
   return m ? m.top_hits[0] : null;
 }
 
-function getTopHitName(s) {
-  const h = getTopHit(s);
+function getTopHitName(s, context) {
+  const h = getTopHit(s, context);
   return h ? (h.name || h.ref_id || '') : '';
 }
 
