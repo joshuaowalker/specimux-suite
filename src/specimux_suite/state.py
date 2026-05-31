@@ -24,6 +24,14 @@ class ClusterInfo:
     size: int
     ric: Optional[int] = None
     rid: Optional[float] = None
+    rid_min: Optional[float] = None
+    primers: Optional[str] = None
+    ambig: Optional[int] = None
+    # 0.8.x variant-significance metadata (None on 0.7.x / always-pass clusters)
+    cer_factor: Optional[float] = None
+    err_factor: Optional[float] = None
+    gid: Optional[int] = None
+    vid: Optional[int] = None
 
 
 @dataclass
@@ -73,6 +81,9 @@ class PipelineState:
         self.total_input_reads: int = 0
         self.total_matched_reads: int = 0
         self.specimux_runs: int = 0
+        # Effective speconsense-summarize routing thresholds (from pipeline.started);
+        # the dashboard uses these to preview .ns/.lq routing per cluster.
+        self.summarize_filter: dict = {}
 
     def apply(self, event: Event) -> None:
         """Apply a single event to update state (thread-safe)."""
@@ -102,6 +113,7 @@ class PipelineState:
             return {
                 "version": self.version,
                 "mode": self.mode,
+                "summarize_filter": dict(self.summarize_filter),
                 "total_input_reads": self.total_input_reads,
                 "total_matched_reads": self.total_matched_reads,
                 "specimens": {
@@ -114,6 +126,10 @@ class PipelineState:
 
     def _on_pipeline_started(self, data: dict):
         self.mode = data.get("mode")
+        config_summary = data.get("config_summary") or {}
+        filt = config_summary.get("summarize_filter")
+        if filt:
+            self.summarize_filter = filt
 
     def _on_specimens_loaded(self, data: dict):
         for s in data.get("specimens", []):
@@ -190,6 +206,13 @@ class PipelineState:
                 size=c["size"],
                 ric=c.get("ric"),
                 rid=c.get("rid"),
+                rid_min=c.get("rid_min"),
+                primers=c.get("primers"),
+                ambig=c.get("ambig"),
+                cer_factor=c.get("cer_factor"),
+                err_factor=c.get("err_factor"),
+                gid=c.get("gid"),
+                vid=c.get("vid"),
             ))
         spec.clusters = clusters
 
@@ -263,7 +286,12 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
         "consensus_version": s.consensus_version,
         "status": s.status.value,
         "clusters": [
-            {"name": c.name, "size": c.size, "ric": c.ric, "rid": c.rid}
+            {
+                "name": c.name, "size": c.size, "ric": c.ric, "rid": c.rid,
+                "rid_min": c.rid_min, "primers": c.primers, "ambig": c.ambig,
+                "cer_factor": c.cer_factor, "err_factor": c.err_factor,
+                "gid": c.gid, "vid": c.vid,
+            }
             for c in s.clusters
         ],
         "identification": [

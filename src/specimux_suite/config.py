@@ -1,9 +1,21 @@
 """Pipeline configuration."""
 
+import importlib.util
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# speconsense-summarize built-in defaults for the variant-routing filters.
+# These mirror the `--min-cer-factor` / `--max-err-factor` argparse defaults in
+# speconsense.summarize.cli; a value of 0 disables the corresponding filter.
+# Kept here so the dashboard can preview which clusters summarize will route to
+# its `.ns` (CER-not-significant) / `.lq` (low-quality) tracks.
+SUMMARIZE_DEFAULT_MIN_CER_FACTOR = 1.0
+SUMMARIZE_DEFAULT_MAX_ERR_FACTOR = 1.5
 
 
 @dataclass
@@ -98,6 +110,44 @@ class PipelineConfig:
     def summarize_output_dir(self) -> Path:
         return self.output_dir / "summary"
 
+    def resolve_summarize_thresholds(self) -> dict:
+        """Resolve the effective ``--min-cer-factor`` / ``--max-err-factor``.
+
+        These determine how speconsense-summarize routes clusters to its
+        ``.ns`` / ``.lq`` tracks. We resolve them from the same inputs the suite
+        passes to the summarize subprocess, in the same precedence order the
+        summarize CLI applies (lowest to highest): tool defaults < ``-p``
+        profile < ``summarize.*`` overrides < ``--summarize-args`` escape hatch.
+
+        Returns ``{"min_cer_factor": float, "max_err_factor": float}``.
+        Profile resolution is best-effort: an unreadable/unknown profile leaves
+        the lower-precedence value in place (debug-logged), never raising.
+        """
+        min_cer = SUMMARIZE_DEFAULT_MIN_CER_FACTOR
+        max_err = SUMMARIZE_DEFAULT_MAX_ERR_FACTOR
+
+        # 1. Named summarize profile (best-effort YAML read).
+        if self.summarize_profile:
+            prof = _read_summarize_profile_filters(self.summarize_profile)
+            if "min-cer-factor" in prof:
+                min_cer = _as_float(prof["min-cer-factor"], min_cer)
+            if "max-err-factor" in prof:
+                max_err = _as_float(prof["max-err-factor"], max_err)
+
+        # 2. summarize.* overrides from the suite profile.
+        for key in ("min-cer-factor", "min_cer_factor"):
+            if key in self.summarize_overrides:
+                min_cer = _as_float(self.summarize_overrides[key], min_cer)
+        for key in ("max-err-factor", "max_err_factor"):
+            if key in self.summarize_overrides:
+                max_err = _as_float(self.summarize_overrides[key], max_err)
+
+        # 3. --summarize-args escape hatch (highest precedence).
+        min_cer = _scan_flag_value(self.summarize_args, "--min-cer-factor", min_cer)
+        max_err = _scan_flag_value(self.summarize_args, "--max-err-factor", max_err)
+
+        return {"min_cer_factor": min_cer, "max_err_factor": max_err}
+
     def summary(self) -> dict:
         """Return a JSON-serializable config summary for events."""
         return {
@@ -110,4 +160,56 @@ class PipelineConfig:
             "min_reads": self.min_reads,
             "reprocess_ratio": self.reprocess_ratio,
             "workers": self.workers,
+            "summarize_filter": self.resolve_summarize_thresholds(),
         }
+
+
+def _as_float(value, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _scan_flag_value(args: list[str], flag: str, fallback: float) -> float:
+    """Return the float value of ``flag`` in ``args`` (``--flag V`` or ``--flag=V``)."""
+    result = fallback
+    for i, arg in enumerate(args):
+        if arg == flag and i + 1 < len(args):
+            result = _as_float(args[i + 1], result)
+        elif arg.startswith(flag + "="):
+            result = _as_float(arg.split("=", 1)[1], result)
+    return result
+
+
+def _read_summarize_profile_filters(name: str) -> dict:
+    """Best-effort read of a speconsense profile's ``speconsense-summarize`` keys.
+
+    Mirrors speconsense's profile search order (user dir, then the installed
+    package's bundled profiles) without importing speconsense's API. Returns an
+    empty dict on any failure so threshold resolution degrades to defaults.
+    """
+    import yaml
+
+    candidates = [Path.home() / ".config" / "speconsense" / "profiles" / f"{name}.yaml"]
+    try:
+        spec = importlib.util.find_spec("speconsense")
+        if spec and spec.submodule_search_locations:
+            for loc in spec.submodule_search_locations:
+                candidates.append(Path(loc) / "profiles" / f"{name}.yaml")
+    except (ImportError, ValueError):
+        pass
+
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            return data.get("speconsense-summarize", {}) or {}
+        except (OSError, yaml.YAMLError) as e:
+            logger.debug(f"Could not read summarize profile '{name}' at {path}: {e}")
+            return {}
+
+    logger.debug(f"Summarize profile '{name}' not found; using filter defaults")
+    return {}

@@ -212,6 +212,20 @@ a.hit-name:hover { text-decoration: underline; }
   background: #b8860b;
   color: #fff;
 }
+/* summarize-routing preview badges (cluster would be filtered out as .lq/.ns) */
+.badge-filter {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  cursor: help;
+  vertical-align: middle;
+}
+.badge-lq { background: var(--error); color: #fff; }
+.badge-ns { background: var(--no-match); color: #fff; }
 
 .cluster-detail { background: rgba(255,255,255,0.02); }
 .cluster-detail td { padding: 0.3rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.8rem; }
@@ -310,6 +324,8 @@ col.col-sum-reads { width: 12%; }
   font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 12px; cursor: pointer; }
 .filter-chip:hover { border-color: var(--text-dim); color: var(--text); }
 .filter-chip.active { background: var(--done); border-color: var(--done); color: var(--bg); }
+.filter-divider { width: 1px; align-self: stretch; background: var(--border); margin: 0.1rem 0.2rem; }
+.cluster-hidden-note td { color: var(--text-dim); font-style: italic; font-size: 0.72rem; }
 
 #search-summary {
   width: 300px;
@@ -371,6 +387,8 @@ col.col-sum-reads { width: 12%; }
       <span class="filter-chip" data-filter="off-target">Off-target</span>
       <span class="filter-chip" data-filter="no-match">No match</span>
       <span class="filter-chip" data-filter="watched">Watched</span>
+      <span class="filter-divider"></span>
+      <span class="filter-chip" id="chip-hide-filtered" title="Hide clusters speconsense-summarize would route to its .ns (not-significant) / .lq (low-quality) tracks" style="display:none">Hide NS/LQ</span>
     </div>
   </div>
   <div class="controls-row">
@@ -456,10 +474,10 @@ col.col-sum-reads { width: 12%; }
 </div><!-- end tab-summary -->
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, summarizeFilter: {} };
 let activeTab = 'processing';
 const tabState = {
-  processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set() },
+  processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set(), hideFiltered: false },
   summary:    { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set() },
 };
 let minReads = 30;
@@ -525,6 +543,7 @@ function applyEvent(event) {
       if (d.config_summary) {
         if (d.config_summary.min_reads) minReads = d.config_summary.min_reads;
         if (d.config_summary.reprocess_ratio != null) reprocessRatio = d.config_summary.reprocess_ratio;
+        if (d.config_summary.summarize_filter) state.summarizeFilter = d.config_summary.summarize_filter;
       }
       break;
     case 'specimens.loaded':
@@ -728,6 +747,48 @@ function isHitOnTarget(hit, communityGenus) {
   return hitGenus === communityGenus;
 }
 
+// Preview which summarize track a cluster would be routed to, replicating
+// speconsense-summarize's load_consensus_sequences logic: lq (err_factor too
+// high) takes precedence over ns (CER not significant). A filter value of 0
+// disables that filter; a null factor (anchor / always-pass / pre-0.8.x)
+// always passes. Returns 'lq', 'ns', or null (passes through to Summary).
+function clusterFilterRouting(cluster) {
+  const f = state.summarizeFilter || {};
+  const minCer = f.min_cer_factor != null ? f.min_cer_factor : 1.0;
+  const maxErr = f.max_err_factor != null ? f.max_err_factor : 1.5;
+  if (maxErr > 0 && cluster.err_factor != null && cluster.err_factor > maxErr) return 'lq';
+  if (minCer > 0 && cluster.cer_factor != null && cluster.cer_factor < minCer) return 'ns';
+  return null;
+}
+
+// Count clusters across all specimens that would be routed to .ns/.lq. Drives
+// visibility + the count label on the "Hide NS/LQ" toggle, so the toggle only
+// appears when there is something to hide (e.g. never on 0.7.x output, or when
+// summarize filters are disabled via a profile).
+function countFilteredClusters() {
+  let n = 0;
+  for (const s of Object.values(state.specimens)) {
+    for (const c of (s.clusters || [])) {
+      if (clusterFilterRouting(c)) n++;
+    }
+  }
+  return n;
+}
+
+function clusterFilterBadge(cluster) {
+  const route = clusterFilterRouting(cluster);
+  if (!route) return '';
+  const f = state.summarizeFilter || {};
+  if (route === 'lq') {
+    const maxErr = f.max_err_factor != null ? f.max_err_factor : 1.5;
+    const ef = cluster.err_factor != null ? cluster.err_factor.toFixed(2) : '?';
+    return `<span class="badge-filter badge-lq" title="Low quality: err_factor ${ef} > ${maxErr}. speconsense-summarize routes this cluster to its .lq track (excluded from Summary).">LQ</span>`;
+  }
+  const minCer = f.min_cer_factor != null ? f.min_cer_factor : 1.0;
+  const cf = cluster.cer_factor != null ? cluster.cer_factor.toFixed(2) : '?';
+  return `<span class="badge-filter badge-ns" title="Not significant: cer_factor ${cf} < ${minCer}. speconsense-summarize routes this cluster to its .ns track (excluded from Summary).">NS</span>`;
+}
+
 function getActiveMatches(s, context) {
   // context: 'clusters' = raw cluster IDs (Processing tab), 'variants' = variant IDs with cluster fallback (Summary tab)
   // Default: 'clusters' for Processing tab behavior
@@ -787,6 +848,20 @@ function render() {
 function renderProcessing() {
   const ts = tabState.processing;
   let specs = Object.values(state.specimens);
+
+  // "Hide NS/LQ" toggle: show only when some cluster is actually routable, and
+  // reflect the current count + hide/show state in its label.
+  const hideChip = document.getElementById('chip-hide-filtered');
+  if (hideChip) {
+    const filteredCount = countFilteredClusters();
+    if (filteredCount > 0) {
+      hideChip.style.display = '';
+      hideChip.textContent = `${ts.hideFiltered ? 'Show' : 'Hide'} NS/LQ (${filteredCount})`;
+      hideChip.classList.toggle('active', ts.hideFiltered);
+    } else {
+      hideChip.style.display = 'none';
+    }
+  }
 
   // Filter
   if (ts.searchTerm) {
@@ -955,7 +1030,9 @@ function renderProcessing() {
         if (aOn !== bOn) return aOn - bOn;
         return (b.size || 0) - (a.size || 0);
       });
+      let hiddenCount = 0;
       for (const cluster of sortedClusters) {
+        if (ts.hideFiltered && clusterFilterRouting(cluster)) { hiddenCount++; continue; }
         const clusterName = cluster.name || '?';
         const match = idByCluster[clusterName];
         const hits = match ? (match.top_hits || []) : [];
@@ -970,12 +1047,18 @@ function renderProcessing() {
           }).join('<br>');
         }
         const seqBtn = `<button class="show-seq-btn" data-specimen="${esc(s.specimen_id)}" data-seq="${esc(clusterName)}">seq</button>`;
+        const filterBadge = clusterFilterBadge(cluster);
         rows.push(`<tr class="cluster-detail">
-          <td>${esc(clusterName)}${seqBtn}</td>
+          <td>${esc(clusterName)}${filterBadge}${seqBtn}</td>
           <td></td>
           <td>${cPct ? `<span class="hit-pct">${cPct}%</span>` : ''}</td>
           <td class="top-hit">${top ? `${linkedName(top.name || top.ref_id || '')}${altHits}` : '<span class="alt-hit">—</span>'}</td>
           <td>${cluster.size != null ? cluster.size : ''}</td>
+        </tr>`);
+      }
+      if (hiddenCount > 0) {
+        rows.push(`<tr class="cluster-detail cluster-hidden-note">
+          <td colspan="5">${hiddenCount} low-confidence cluster${hiddenCount > 1 ? 's' : ''} hidden (NS/LQ)</td>
         </tr>`);
       }
     }
@@ -1327,7 +1410,7 @@ document.getElementById('search-summary').addEventListener('input', (e) => {
 });
 
 // Filter chips — Processing
-document.querySelectorAll('#filters-processing .filter-chip').forEach(chip => {
+document.querySelectorAll('#filters-processing .filter-chip[data-filter]').forEach(chip => {
   chip.addEventListener('click', () => {
     const f = chip.dataset.filter;
     const ts = tabState.processing;
@@ -1336,6 +1419,15 @@ document.querySelectorAll('#filters-processing .filter-chip').forEach(chip => {
     render();
   });
 });
+
+// "Hide NS/LQ" toggle — Processing (cluster-row visibility, not a specimen filter)
+{
+  const hideChip = document.getElementById('chip-hide-filtered');
+  if (hideChip) hideChip.addEventListener('click', () => {
+    tabState.processing.hideFiltered = !tabState.processing.hideFiltered;
+    render();
+  });
+}
 
 // Filter chips — Summary
 document.querySelectorAll('#filters-summary .filter-chip').forEach(chip => {
@@ -1355,6 +1447,7 @@ fetch('/api/state').then(r => r.json()).then(data => {
     state.version = data.version || 0;
   }
   state.totalInputReads = data.total_input_reads || 0;
+  if (data.summarize_filter) state.summarizeFilter = data.summarize_filter;
   if (data.config_summary) {
     if (data.config_summary.min_reads) minReads = data.config_summary.min_reads;
     if (data.config_summary.reprocess_ratio != null) reprocessRatio = data.config_summary.reprocess_ratio;

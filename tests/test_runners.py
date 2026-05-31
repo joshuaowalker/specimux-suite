@@ -5,7 +5,7 @@ from pathlib import Path
 from specimux_suite.config import PipelineConfig
 from specimux_suite.events import EventLog
 from specimux_suite.runners.specimux_runner import SpecimuxRunner
-from specimux_suite.runners.speconsense_runner import SpeconsenseRunner, CLUSTER_HEADER_RE
+from specimux_suite.runners.speconsense_runner import SpeconsenseRunner, parse_cluster_header
 
 
 def _make_config(tmp_path, **kwargs):
@@ -92,32 +92,51 @@ def test_speconsense_command_construction(tmp_path):
     assert "-O" in cmd
 
 
-def test_cluster_header_parsing():
-    """Test regex parsing of speconsense FASTA headers."""
-    headers = [
-        ">sample-c0 size=120 ric=100 rid=95.5",
-        ">sample-c1 size=30 ric=30 rid=92.1 primers=ITS3,ITS4",
-        ">sample-c2 size=10",
-    ]
+def test_cluster_header_parsing_legacy_0_7():
+    """0.7.x headers (-c{n} naming, no CER/err fields) parse correctly."""
+    c0 = parse_cluster_header(">sample-c0 size=120 ric=100 rid=95.5")
+    assert c0["name"] == "sample-c0"
+    assert c0["size"] == 120
+    assert c0["ric"] == 100
+    assert c0["rid"] == 95.5
+    # Fields absent from the header are simply not present.
+    assert "cer_factor" not in c0
+    assert "gid" not in c0
 
-    m = CLUSTER_HEADER_RE.match(headers[0])
-    assert m
-    assert m.group(1) == "sample-c0"
-    assert m.group(2) == "120"
-    assert m.group(3) == "100"
-    assert m.group(4) == "95.5"
+    c1 = parse_cluster_header(">sample-c1 size=30 ric=30 rid=92.1 rid_min=88.0 primers=ITS3,ITS4 ambig=2")
+    assert c1["name"] == "sample-c1"
+    assert c1["rid_min"] == 88.0
+    assert c1["primers"] == "ITS3,ITS4"
+    assert c1["ambig"] == 2
 
-    m = CLUSTER_HEADER_RE.match(headers[1])
-    assert m
-    assert m.group(1) == "sample-c1"
-    assert m.group(2) == "30"
+    c2 = parse_cluster_header(">sample-c2 size=10")
+    assert c2 == {"name": "sample-c2", "size": 10}
 
-    m = CLUSTER_HEADER_RE.match(headers[2])
-    assert m
-    assert m.group(1) == "sample-c2"
-    assert m.group(2) == "10"
-    assert m.group(3) is None  # no ric
-    assert m.group(4) is None  # no rid
+
+def test_cluster_header_parsing_0_8():
+    """0.8.x headers carry gid/vid naming plus cer_factor/err_factor fields."""
+    c = parse_cluster_header(
+        ">sample-1.v2 size=120 ric=100 rid=95.5 rid_min=90.1 "
+        "primers=ITS1F,ITS4 ambig=1 cer_factor=1.234 err_factor=1.100 gid=1 vid=2"
+    )
+    assert c["name"] == "sample-1.v2"
+    assert c["size"] == 120
+    assert c["cer_factor"] == 1.234
+    assert c["err_factor"] == 1.100
+    assert c["gid"] == 1
+    assert c["vid"] == 2
+
+
+def test_cluster_header_inf_cer_factor_normalized():
+    """cer_factor=inf (always-pass anchors) is normalized to None for JSON-safety."""
+    c = parse_cluster_header(">sample-1.v1 size=200 ric=100 cer_factor=inf err_factor=1.0 gid=1 vid=1")
+    assert c["cer_factor"] is None
+    assert c["err_factor"] == 1.0
+
+
+def test_cluster_header_non_defline_returns_none():
+    assert parse_cluster_header("ACGTACGT") is None
+    assert parse_cluster_header(">") is None
 
 
 def test_specimux_thread_flag(tmp_path):

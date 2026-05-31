@@ -188,6 +188,23 @@ speconsense <specimen.fastq> \
 | `--key value` pairs | Suite profile `speconsense.*` keys or suite CLI flags | Higher |
 | `--speconsense-args` contents | User escape hatch, passed through verbatim | Highest |
 
+#### Consensus FASTA header contract
+
+The suite parses each defline in `<output_dir>/<specimen>-all.fasta` (see
+`speconsense_runner.parse_cluster_header`). The first whitespace token is the
+record name; remaining `key=value` tokens are captured by type:
+
+| Field | Type | Notes |
+|---|---|---|
+| *(name)* | str | `sample-c{n}` on 0.7.x; `sample-{gid}.v{vid}` on 0.8.x (fallback `sample-c{n}` when the CER pipeline is bypassed). Used as the correlation key across consensus → identification → dashboard. |
+| `size`, `ric`, `ambig`, `gid`, `vid` | int | `gid`/`vid` are 0.8.x only. |
+| `rid`, `rid_min`, `cer_factor`, `err_factor` | float | percentages for `rid`/`rid_min`; `cer_factor`/`err_factor` are 0.8.x only. `cer_factor=inf` (always-pass anchors) is normalized to `None` for JSON-safety. |
+| `primers` | str | comma-separated, no spaces. |
+
+The parser is tolerant: unknown keys are ignored and absent keys are simply
+omitted, so a single code path handles both 0.7.x and 0.8.x headers. Only the
+field *names* and the leading position of `size` are assumed.
+
 ### speconsense-summarize
 
 ```
@@ -212,6 +229,24 @@ The suite invokes speconsense-summarize in two modes:
 | `-p <profile>` | Suite profile `summarize.profile` | Middle |
 | `--key value` pairs | Suite profile `summarize.*` keys | Higher |
 | `--summarize-args` contents | User escape hatch, passed through verbatim | Highest |
+
+#### `.ns` / `.lq` routing preview (0.8.x)
+
+speconsense-summarize routes clusters whose `cer_factor` is below
+`--min-cer-factor` to a `.ns` (not-significant) track and those whose
+`err_factor` exceeds `--max-err-factor` to a `.lq` (low-quality) track; `.lq`
+takes precedence, and a `0` threshold disables that filter. Neither track is
+returned in the single-specimen JSON, so they never reach the Summary tab.
+
+To preview which raw clusters summarize will drop, the suite resolves the
+effective thresholds (`PipelineConfig.resolve_summarize_thresholds`, precedence:
+tool defaults `1.0`/`1.5` < `summarize` profile < `summarize.*` overrides <
+`--summarize-args`) and emits them in `pipeline.started`'s `config_summary`
+under `summarize_filter`. The Processing tab badges each cluster `LQ`/`NS`
+client-side using the same comparison speconsense applies, and a "Hide NS/LQ"
+toggle (shown only when some cluster is actually routable, so never on 0.7.x
+output or when the filters are disabled) collapses those rows. Profile resolution
+is best-effort: an unreadable/unknown summarize profile falls back to defaults.
 
 ### vsearch (identification)
 

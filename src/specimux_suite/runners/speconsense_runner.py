@@ -1,7 +1,7 @@
 """Subprocess wrapper for speconsense consensus generation."""
 
 import logging
-import re
+import math
 import subprocess
 import uuid
 from pathlib import Path
@@ -11,13 +11,54 @@ from ..events import EventLog
 
 logger = logging.getLogger(__name__)
 
-# Parse FASTA header: >specimen-c0 size=123 ric=100 rid=95.2 ...
-CLUSTER_HEADER_RE = re.compile(
-    r">(\S+)\s+"
-    r"size=(\d+)"
-    r"(?:\s+ric=(\d+))?"
-    r"(?:\s+rid=([\d.]+))?"
-)
+# Typed cluster-header fields (key -> converter). Numeric values are parsed
+# defensively; anything that fails conversion is dropped rather than raising.
+_INT_FIELDS = ("size", "ric", "ambig", "gid", "vid")
+_FLOAT_FIELDS = ("rid", "rid_min", "cer_factor", "err_factor")
+_STR_FIELDS = ("primers",)
+
+
+def parse_cluster_header(line: str) -> dict | None:
+    """Parse a speconsense consensus defline into a cluster dict.
+
+    Handles both 0.7.x headers (``>sample-c0 size=.. ric=.. rid=.. rid_min=..
+    primers=.. ambig=..``) and 0.8.x headers, which additionally carry
+    ``cer_factor=``, ``err_factor=``, ``gid=`` and ``vid=`` and name the record
+    ``sample-{gid}.v{vid}`` instead of ``sample-c{n}``. The first whitespace
+    token is the record name; remaining ``key=value`` tokens are captured by
+    type. Unknown keys are ignored. Missing keys are simply absent.
+
+    ``cer_factor`` is emitted by core as ``inf`` for always-pass clusters
+    (anchors / no comparison peer); since JSON has no infinity literal that
+    browsers accept, non-finite factors are normalized to ``None`` — which the
+    routing logic already treats as "passes the filter".
+    """
+    line = line.strip()
+    if not line.startswith(">"):
+        return None
+    parts = line[1:].split()
+    if not parts:
+        return None
+
+    cluster: dict = {"name": parts[0]}
+    for token in parts[1:]:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if key in _INT_FIELDS:
+            try:
+                cluster[key] = int(value)
+            except ValueError:
+                continue
+        elif key in _FLOAT_FIELDS:
+            try:
+                num = float(value)  # accepts "inf" / "nan"
+            except ValueError:
+                continue
+            cluster[key] = num if math.isfinite(num) else None
+        elif key in _STR_FIELDS:
+            cluster[key] = value
+    return cluster
 
 
 class SpeconsenseRunner:
@@ -33,7 +74,10 @@ class SpeconsenseRunner:
         Args:
             presample: If > 0, pass --presample N to limit reads considered.
 
-        Returns list of cluster dicts: [{name, size, ric, rid}, ...]
+        Returns list of cluster dicts. Always carries ``name`` and ``size``;
+        ``ric``, ``rid``, ``rid_min``, ``primers``, ``ambig`` and (0.8.x only)
+        ``cer_factor``, ``err_factor``, ``gid``, ``vid`` are present when the
+        header supplies them.
         """
         job_id = str(uuid.uuid4())[:8]
         from ..util import count_fastq_reads_fast
@@ -137,17 +181,8 @@ class SpeconsenseRunner:
             for line in f:
                 if not line.startswith(">"):
                     continue
-                m = CLUSTER_HEADER_RE.match(line.strip())
-                if m:
-                    name, size, ric, rid = m.groups()
-                    cluster = {
-                        "name": name,
-                        "size": int(size),
-                    }
-                    if ric is not None:
-                        cluster["ric"] = int(ric)
-                    if rid is not None:
-                        cluster["rid"] = float(rid)
+                cluster = parse_cluster_header(line)
+                if cluster and "size" in cluster:
                     clusters.append(cluster)
 
         return clusters
