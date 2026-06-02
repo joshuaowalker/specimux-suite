@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,7 @@ name = "specimux-suite"
 version = "0.1.0"
 description = "Orchestration and UX layer for the Mycomap fungal DNA barcoding pipeline"
 readme = "README.md"
-license = "BSD-3-Clause"
+license = { text = "BSD-3-Clause" }
 authors = [
     { name = "Josh Walker", email = "joshowalker@yahoo.com" },
 ]
