@@ -74,6 +74,13 @@ async def get_state():
     return result
 
 
+@app.get("/api/viewers")
+async def get_viewers():
+    """Lightweight endpoint for viewer count polling."""
+    with _sse_lock:
+        return {"sse_clients": _sse_clients}
+
+
 @app.get("/api/specimens")
 async def get_specimens():
     """Specimen list with status."""
@@ -109,11 +116,14 @@ async def event_stream(request: Request, after_version: int = 0):
             while True:
                 if await request.is_disconnected():
                     return
-                # Run the blocking tail() in a thread to avoid blocking the event loop
-                events = await loop.run_in_executor(
-                    None,
-                    lambda: list(_event_log.tail(after_version=version, timeout=5.0))
-                )
+                try:
+                    events = await loop.run_in_executor(
+                        None,
+                        lambda: list(_event_log.tail(after_version=version, timeout=5.0))
+                    )
+                except RuntimeError:
+                    # Executor shut down during server exit
+                    return
                 for event in events:
                     version = event.version
                     yield {

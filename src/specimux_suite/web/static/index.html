@@ -327,6 +327,26 @@ col.col-sum-reads { width: 12%; }
 .filter-divider { width: 1px; align-self: stretch; background: var(--border); margin: 0.1rem 0.2rem; }
 .cluster-hidden-note td { color: var(--text-dim); font-style: italic; font-size: 0.72rem; }
 
+#scroll-top {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1rem;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  transition: opacity 0.2s;
+}
+#scroll-top:hover { color: var(--text); border-color: var(--text-dim); }
+
 #search-summary {
   width: 300px;
   padding: 0.5rem 0.75rem;
@@ -472,6 +492,8 @@ col.col-sum-reads { width: 12%; }
 </table>
 </div>
 </div><!-- end tab-summary -->
+
+<button id="scroll-top" aria-label="Scroll to top">▲</button>
 
 <script>
 const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, summarizeFilter: {} };
@@ -1470,9 +1492,9 @@ function updateViewerCount(n) {
   }
 }
 
-// Periodically refresh viewer count
+// Periodically refresh viewer count (lightweight endpoint, not full state)
 setInterval(() => {
-  fetch('/api/state').then(r => r.json()).then(data => {
+  fetch('/api/viewers').then(r => r.json()).then(data => {
     if (data.sse_clients != null) updateViewerCount(data.sse_clients);
   }).catch(() => {});
 }, 10000);
@@ -1516,6 +1538,13 @@ function initQrCode(share) {
 
 // QR code generation uses vendored qrcode-generator library (MIT licensed)
 // See static/vendor/qrcode.min.js
+
+// Scroll-to-top button
+const scrollBtn = document.getElementById('scroll-top');
+scrollBtn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+window.addEventListener('scroll', () => {
+  scrollBtn.style.display = window.scrollY > 400 ? 'flex' : 'none';
+}, { passive: true });
 
 </script>
 </body>
