@@ -67,7 +67,7 @@ class IdentifyRunner:
         ref = self.config.reference_db
         if not ref or not ref.exists():
             return
-        name_re = re.compile(r'name="(.+)"')
+        name_re = re.compile(r'name="(.+?)"')
         with open(ref) as f:
             for line in f:
                 if line.startswith(">"):
