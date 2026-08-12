@@ -110,3 +110,60 @@ def test_log_rotation(tmp_output):
     # Version recovery across rotation
     log2 = EventLog(path, max_bytes=200)
     assert log2.version == 20
+
+
+def test_listener_receives_emitted_events(tmp_output):
+    """Registered listeners see every event, in version order."""
+    log = EventLog(tmp_output / "events.jsonl")
+    seen = []
+    log.add_listener(seen.append)
+
+    log.emit("pipeline.started", {"mode": "batch"})
+    log.emit("specimen.updated", {"specimen_id": "A", "total_reads": 5})
+
+    assert [e.type for e in seen] == ["pipeline.started", "specimen.updated"]
+    assert [e.version for e in seen] == [1, 2]
+
+
+def test_listener_keeps_state_incrementally_in_sync(tmp_output):
+    """A PipelineState registered as a listener matches a full rebuild."""
+    from specimux_suite.state import PipelineState, SpecimenStatus
+
+    log = EventLog(tmp_output / "events.jsonl")
+    live = PipelineState()
+    live.rebuild(log)
+    log.add_listener(live.apply)
+
+    log.emit("specimux.completed", {
+        "job_id": "j1", "exit_code": 0,
+        "specimens": {"specimen_A": 100},
+    })
+    log.emit("consensus.started", {"specimen_id": "specimen_A", "job_id": "c1"})
+    log.emit("consensus.completed", {
+        "specimen_id": "specimen_A", "job_id": "c1",
+        "clusters": [{"name": "specimen_A-c0", "size": 90}],
+    })
+
+    rebuilt = PipelineState()
+    rebuilt.rebuild(log)
+
+    assert live.version == rebuilt.version == 3
+    assert live.specimens["specimen_A"].status == SpecimenStatus.CONSENSUS_DONE
+    assert live.to_dict() == rebuilt.to_dict()
+
+
+def test_failing_listener_does_not_break_emit(tmp_output):
+    """An exception in one listener must not prevent the emit or other listeners."""
+    log = EventLog(tmp_output / "events.jsonl")
+    seen = []
+
+    def bad_listener(event):
+        raise RuntimeError("boom")
+
+    log.add_listener(bad_listener)
+    log.add_listener(seen.append)
+
+    event = log.emit("pipeline.started", {"mode": "batch"})
+    assert event.version == 1
+    assert len(seen) == 1
+    assert len(list(log.replay())) == 1

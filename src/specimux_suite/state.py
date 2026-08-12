@@ -218,6 +218,13 @@ class PipelineState:
 
     def _on_identification_completed(self, data: dict):
         spec = self.get_specimen(data["specimen_id"])
+        # Drop results from a superseded consensus generation: an in-flight
+        # identification can land after the specimen was re-consensused, and
+        # 0.8.x cluster names (sample-{gid}.v{vid}) can collide across
+        # generations, so a name-based merge can't detect staleness itself.
+        event_cv = data.get("consensus_version")
+        if event_cv is not None and event_cv != spec.consensus_version:
+            return
         matches = []
         for m in data.get("matches", []):
             matches.append(IdentificationMatch(

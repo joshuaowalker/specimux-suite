@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-**Event-sourced pipeline.** All state changes are recorded as append-only JSONL events (`output_dir/events.jsonl` with automatic rotation at 100MB). `PipelineState` is a pure in-memory materialized view rebuilt by replaying all events — it is never persisted to disk. State rebuild is the single source of truth; the web API rebuilds on every request for freshness.
+**Event-sourced pipeline.** All state changes are recorded as append-only JSONL events (`output_dir/events.jsonl` with automatic rotation at 100MB). `PipelineState` is a pure in-memory materialized view — it is never persisted to disk. The pipeline holds a single live state instance: history is replayed once at startup, then the instance stays current via an `EventLog` listener that applies each event as it is emitted. The scheduler, console, and web API all share that instance (never reassign it); web requests serve O(state) snapshots with no replay.
 
 **Pipeline flow:**
 ```
@@ -54,9 +54,9 @@ WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE → IDENTIFIED → SUMMARIZED
 ## Test data
 
 - Unit tests: `test_data/` (synthetic)
-- Integration: `~/mm/data/ont98/scale-test/all25k.fastq`
+- Integration: subset of `~/mm/data/ont98/data/filteredcalls.fastq` (e.g. `head -100000` for 25k reads)
 - Config: `~/mm/data/ont98/data/primers.fasta`, `~/mm/data/ont98/data/Index.txt`
-- Reference DB: `~/mm/data/general/iNaturalist20250902.fasta`
+- Reference DB: `~/mm/data/general/mycomap_reference.fasta` (or the larger `iNaturalist20250902.fasta`)
 
 ## Adding a new event type
 

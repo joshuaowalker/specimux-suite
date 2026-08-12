@@ -637,6 +637,10 @@ function applyEvent(event) {
       break;
     case 'identification.completed':
       if (state.specimens[d.specimen_id]) {
+        // Discard results from a superseded consensus generation (an
+        // in-flight identification can land after a re-consensus).
+        const cv = state.specimens[d.specimen_id].consensus_version || 0;
+        if (d.consensus_version != null && d.consensus_version !== cv) break;
         const matches = d.matches || [];
         const hasHits = matches.some(m => m.top_hits && m.top_hits.length > 0);
         if (state.specimens[d.specimen_id].status !== 'summarized') {

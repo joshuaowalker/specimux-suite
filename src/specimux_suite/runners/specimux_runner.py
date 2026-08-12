@@ -66,12 +66,29 @@ class SpecimuxRunner:
             )
             monitor.start()
 
-            # Wait for completion
-            stdout, stderr = proc.communicate()
-
-            # Stop monitor
-            stop_event.set()
-            monitor.join(timeout=2.0)
+            # Wait for completion, killing the process if it exceeds job_timeout
+            try:
+                stdout, stderr = proc.communicate(timeout=self.config.job_timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                msg = f"specimux timed out after {self.config.job_timeout}s (killed)"
+                logger.error(msg)
+                self.event_log.emit("pipeline.error", {
+                    "component": "specimux",
+                    "message": msg,
+                })
+                self.event_log.emit("specimux.completed", {
+                    "job_id": job_id,
+                    "exit_code": -1,
+                    "specimens": {},
+                    "file_path": str(fastq_path),
+                })
+                return {}
+            finally:
+                # Stop monitor
+                stop_event.set()
+                monitor.join(timeout=2.0)
 
             if proc.returncode != 0:
                 logger.error(f"specimux failed (exit {proc.returncode}): {stderr}")

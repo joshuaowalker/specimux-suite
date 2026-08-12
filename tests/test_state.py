@@ -231,3 +231,86 @@ def test_to_dict(tmp_output):
     assert d["mode"] == "batch"
     assert "s1" in d["specimens"]
     assert d["specimens"]["s1"]["total_reads"] == 42
+
+
+def test_stale_identification_is_dropped(tmp_output):
+    """identification.completed from a superseded consensus generation is ignored."""
+    log = EventLog(tmp_output / "events.jsonl")
+
+    log.emit("consensus.completed", {
+        "specimen_id": "specimen_A", "job_id": "c1",
+        "clusters": [{"name": "specimen_A-0.v1", "size": 90}],
+    })
+    # Re-consensus: generation 2
+    log.emit("consensus.completed", {
+        "specimen_id": "specimen_A", "job_id": "c2",
+        "clusters": [{"name": "specimen_A-0.v1", "size": 150}],
+    })
+    # Identification launched against generation 1 lands late — must be dropped
+    log.emit("identification.completed", {
+        "specimen_id": "specimen_A",
+        "consensus_version": 1,
+        "matches": [{"cluster": "specimen_A-0.v1",
+                     "top_hits": [{"ref_id": "stale", "name": "Stale hit",
+                                   "identity": 0.9, "adjusted_identity": 0.9}]}],
+    })
+
+    state = PipelineState()
+    state.rebuild(log)
+    spec = state.specimens["specimen_A"]
+    assert spec.consensus_version == 2
+    assert spec.identification == []
+    assert spec.status == SpecimenStatus.CONSENSUS_DONE
+
+    # Identification for the current generation is applied
+    log.emit("identification.completed", {
+        "specimen_id": "specimen_A",
+        "consensus_version": 2,
+        "matches": [{"cluster": "specimen_A-0.v1",
+                     "top_hits": [{"ref_id": "fresh", "name": "Fresh hit",
+                                   "identity": 0.99, "adjusted_identity": 0.99}]}],
+    })
+    state = PipelineState()
+    state.rebuild(log)
+    spec = state.specimens["specimen_A"]
+    assert spec.status == SpecimenStatus.IDENTIFIED
+    assert spec.identification[0].top_hits[0]["ref_id"] == "fresh"
+
+
+def test_unversioned_identification_still_applies(tmp_output):
+    """Events without consensus_version (older logs) are applied as before."""
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("consensus.completed", {
+        "specimen_id": "specimen_A", "job_id": "c1",
+        "clusters": [{"name": "specimen_A-c0", "size": 90}],
+    })
+    log.emit("identification.completed", {
+        "specimen_id": "specimen_A",
+        "matches": [{"cluster": "specimen_A-c0",
+                     "top_hits": [{"ref_id": "r1", "name": "Some hit",
+                                   "identity": 0.98, "adjusted_identity": 0.98}]}],
+    })
+    state = PipelineState()
+    state.rebuild(log)
+    assert state.specimens["specimen_A"].status == SpecimenStatus.IDENTIFIED
+
+
+def test_file_processed_requires_demux(tmp_output):
+    """A stable-but-never-demuxed file must not read as processed (live-mode
+    restart seeds the watcher from `processed`, so it gets picked up again)."""
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("file.detected", {"path": "/w/a.fastq", "size_bytes": 10})
+    log.emit("file.stable", {"path": "/w/a.fastq", "size_bytes": 10})
+
+    state = PipelineState()
+    state.rebuild(log)
+    f = state.files["/w/a.fastq"]
+    assert f.stable and not f.processed
+
+    log.emit("specimux.completed", {
+        "job_id": "j1", "exit_code": 0, "specimens": {},
+        "file_path": "/w/a.fastq",
+    })
+    state = PipelineState()
+    state.rebuild(log)
+    assert state.files["/w/a.fastq"].processed

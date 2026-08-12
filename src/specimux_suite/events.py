@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, Callable, Generator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ class EventLog:
         self._condition = threading.Condition(self._lock)
         self._max_bytes = max_bytes
         self._buffer: deque[Event] = deque(maxlen=_TAIL_BUFFER_SIZE)
+        self._listeners: list[Callable[[Event], None]] = []
 
         # Ensure parent dir exists
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +64,15 @@ class EventLog:
                     except (json.JSONDecodeError, KeyError):
                         pass
 
+    def add_listener(self, fn: Callable[[Event], None]) -> None:
+        """Register a callback invoked synchronously for every emitted event.
+
+        Listeners run under the log lock so they observe events in version
+        order; they must be fast and must never emit events themselves.
+        """
+        with self._lock:
+            self._listeners.append(fn)
+
     def emit(self, event_type: str, data: Optional[dict] = None) -> Event:
         """Append an event and return it with its assigned version."""
         with self._condition:
@@ -77,6 +87,11 @@ class EventLog:
             with open(self.path, "a") as f:
                 f.write(json.dumps(_event_to_dict(event)) + "\n")
             self._buffer.append(event)
+            for listener in self._listeners:
+                try:
+                    listener(event)
+                except Exception:
+                    logger.exception(f"Event listener failed for {event_type}")
             self._condition.notify_all()
             return event
 

@@ -22,6 +22,9 @@ class IdentifyRunner:
         self.event_log = event_log
         self._udb_path: Path | None = None
         self._name_lookup: dict[str, str] = {}
+        # ref_id -> byte offset of its header line in the reference FASTA,
+        # so sequences can be extracted with a seek instead of a full scan.
+        self._seq_offsets: dict[str, int] = {}
 
     def ensure_db(self) -> bool:
         """Build UDB from reference FASTA if needed. Returns True on success."""
@@ -51,10 +54,12 @@ class IdentifyRunner:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=self.config.job_timeout,
             )
             self._udb_path = udb
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        except (subprocess.CalledProcessError, FileNotFoundError,
+                subprocess.TimeoutExpired) as e:
             logger.error(f"Failed to build UDB: {e}")
             # Fall back to using FASTA directly
             self._udb_path = ref
@@ -63,21 +68,36 @@ class IdentifyRunner:
             self._load_name_lookup()
 
     def _load_name_lookup(self) -> None:
-        """Scan reference FASTA headers for name="..." fields."""
+        """Scan reference FASTA headers once: name="..." fields and seek offsets."""
         ref = self.config.reference_db
         if not ref or not ref.exists():
             return
-        name_re = re.compile(r'name="(.+?)"')
-        with open(ref) as f:
+        # Greedy on purpose: name="..." is the last field on the header line
+        # (both MycoMap and iNaturalist DBs), and real iNaturalist headers
+        # contain unescaped embedded quotes (name="= Gymnopilus "sp-IN03"").
+        # Matching to the last quote on the line handles both embedded and
+        # backslash-escaped quotes; a non-greedy match truncates such names.
+        name_re = re.compile(rb'name="(.+)"')
+        offset = 0
+        with open(ref, "rb") as f:
             for line in f:
-                if line.startswith(">"):
-                    seq_id = line[1:].strip().split()[0]
+                if line.startswith(b">"):
+                    seq_id = line[1:].strip().split()[0].decode("utf-8", "replace")
+                    self._seq_offsets[seq_id] = offset
                     m = name_re.search(line)
                     if m:
-                        self._name_lookup[seq_id] = m.group(1).replace('\\"', '"')
+                        name = m.group(1).decode("utf-8", "replace")
+                        self._name_lookup[seq_id] = name.replace('\\"', '"')
+                offset += len(line)
 
-    def run(self, specimen_id: str, consensus_fasta: Path) -> list[dict]:
+    def run(self, specimen_id: str, consensus_fasta: Path,
+            consensus_version: int | None = None) -> list[dict]:
         """Identify consensus clusters against reference DB.
+
+        Args:
+            consensus_version: The specimen's consensus generation these
+                queries came from. Stamped into the event so stale results
+                (landing after a re-consensus) can be discarded on apply.
 
         Returns list of {cluster, top_hits: [{ref_id, name, identity, adjusted_identity}]}
         """
@@ -91,10 +111,13 @@ class IdentifyRunner:
         # Step 2: adjusted-identity scoring for candidates
         matches = self._score_hits(consensus_fasta, vsearch_hits)
 
-        self.event_log.emit("identification.completed", {
+        event_data = {
             "specimen_id": specimen_id,
             "matches": matches,
-        })
+        }
+        if consensus_version is not None:
+            event_data["consensus_version"] = consensus_version
+        self.event_log.emit("identification.completed", event_data)
 
         return matches
 
@@ -114,12 +137,20 @@ class IdentifyRunner:
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                                    timeout=self.config.job_timeout)
         except FileNotFoundError:
             logger.error("vsearch not found on PATH")
             self.event_log.emit("pipeline.error", {
                 "component": "vsearch",
                 "message": "vsearch not found on PATH",
+            })
+            return {}
+        except subprocess.TimeoutExpired:
+            logger.error(f"vsearch timed out after {self.config.job_timeout}s")
+            self.event_log.emit("pipeline.error", {
+                "component": "vsearch",
+                "message": f"vsearch timed out after {self.config.job_timeout}s",
             })
             return {}
 
@@ -208,7 +239,12 @@ class IdentifyRunner:
         return matches
 
     def _extract_reference_seqs(self, ref_ids: set[str]) -> dict[str, str]:
-        """Extract specific sequences from the reference database."""
+        """Extract specific sequences from the reference database.
+
+        Uses the header offset index built by _load_name_lookup to seek
+        directly to each entry instead of scanning the whole file (the
+        reference DB can be hundreds of MB and this runs per specimen).
+        """
         if not ref_ids:
             return {}
 
@@ -216,21 +252,24 @@ class IdentifyRunner:
         if not ref_path or not ref_path.exists():
             return {}
 
+        if not self._seq_offsets:
+            self._load_name_lookup()
+
         seqs = {}
-        current_id = None
-        current_seq = []
-        with open(ref_path) as f:
-            for line in f:
-                if line.startswith(">"):
-                    if current_id and current_id in ref_ids:
-                        seqs[current_id] = "".join(current_seq)
-                    header = line[1:].strip().split()[0]
-                    current_id = header
-                    current_seq = []
-                else:
-                    current_seq.append(line.strip())
-            if current_id and current_id in ref_ids:
-                seqs[current_id] = "".join(current_seq)
+        with open(ref_path, "rb") as f:
+            for ref_id in ref_ids:
+                offset = self._seq_offsets.get(ref_id)
+                if offset is None:
+                    continue
+                f.seek(offset)
+                f.readline()  # skip the header line
+                parts = []
+                for line in f:
+                    if line.startswith(b">"):
+                        break
+                    parts.append(line.strip())
+                if parts:
+                    seqs[ref_id] = b"".join(parts).decode("utf-8", "replace")
 
         return seqs
 

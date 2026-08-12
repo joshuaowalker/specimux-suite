@@ -43,6 +43,7 @@ class SummarizeRunner:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=self.config.job_timeout,
             )
 
             if result.returncode != 0:
@@ -67,6 +68,15 @@ class SummarizeRunner:
 
             return variants
 
+        except subprocess.TimeoutExpired:
+            msg = f"speconsense-summarize timed out after {self.config.job_timeout}s (killed)"
+            logger.error(f"{msg} for {specimen_id}")
+            self.event_log.emit("pipeline.error", {
+                "component": "summarize",
+                "specimen_id": specimen_id,
+                "message": msg,
+            })
+            return []
         except FileNotFoundError:
             msg = "speconsense-summarize not found on PATH"
             logger.error(msg)
@@ -91,6 +101,7 @@ class SummarizeRunner:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=self.config.job_timeout,
             )
 
             if result.returncode != 0:
@@ -105,6 +116,13 @@ class SummarizeRunner:
             self.event_log.emit("summarize.aggregate_completed", {})
             logger.info("Summarize aggregate complete")
 
+        except subprocess.TimeoutExpired:
+            msg = f"speconsense-summarize aggregate timed out after {self.config.job_timeout}s (killed)"
+            logger.error(msg)
+            self.event_log.emit("pipeline.error", {
+                "component": "summarize",
+                "message": msg,
+            })
         except FileNotFoundError:
             logger.error("speconsense-summarize not found on PATH")
 

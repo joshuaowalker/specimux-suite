@@ -210,3 +210,73 @@ def test_parse_clusters_from_fasta(tmp_path):
     assert clusters[0]["ric"] == 100
     assert clusters[0]["rid"] == 95.5
     assert clusters[1]["size"] == 30
+
+
+def test_extract_reference_seqs_via_offset_index(tmp_path):
+    """Sequence extraction should use header offsets, handling multi-line and last entries."""
+    from specimux_suite.runners.identify_runner import IdentifyRunner
+
+    ref = tmp_path / "refs.fasta"
+    ref.write_text(
+        '>ref_A name="Alpha one"\n'
+        "ACGT\nACGT\n"
+        ">ref_B\n"
+        "TTTT\n"
+        '>ref_C name="Gamma three"\n'
+        "GGGG\nCCCC\nAAAA\n"
+    )
+
+    config = _make_config(tmp_path, reference_db=ref)
+    log = EventLog(tmp_path / "events.jsonl")
+    runner = IdentifyRunner(config, log)
+    runner._load_name_lookup()
+
+    seqs = runner._extract_reference_seqs({"ref_A", "ref_C", "ref_missing"})
+    assert seqs == {"ref_A": "ACGTACGT", "ref_C": "GGGGCCCCAAAA"}
+    # Lazy index build when called before _load_name_lookup
+    runner2 = IdentifyRunner(config, log)
+    assert runner2._extract_reference_seqs({"ref_B"}) == {"ref_B": "TTTT"}
+
+
+def test_speconsense_timeout_kills_and_reports(tmp_path, monkeypatch):
+    """A hung speconsense must be killed at job_timeout and leave the specimen in ERROR."""
+    import os
+    import stat
+    import time
+    from specimux_suite.state import PipelineState, SpecimenStatus
+
+    # Fake speconsense that hangs far longer than the timeout
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_tool = fake_bin / "speconsense"
+    fake_tool.write_text("#!/bin/sh\nsleep 30\n")
+    fake_tool.chmod(fake_tool.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    config = _make_config(tmp_path)
+    config.job_timeout = 0.5
+    log = EventLog(tmp_path / "events.jsonl")
+    runner = SpeconsenseRunner(config, log)
+
+    fastq = tmp_path / "specimen_A.fastq"
+    fastq.write_text("@r1\nACGT\n+\nIIII\n")
+
+    start = time.monotonic()
+    clusters = runner.run("specimen_A", fastq)
+    elapsed = time.monotonic() - start
+
+    assert clusters == []
+    assert elapsed < 10  # killed at ~0.5s, not the full 30s sleep
+
+    events = list(log.replay())
+    types = [e.type for e in events]
+    # consensus.completed precedes pipeline.error so replayed status is ERROR
+    assert types.index("consensus.completed") < types.index("pipeline.error")
+    err = next(e for e in events if e.type == "pipeline.error")
+    assert "timed out" in err.data["message"]
+
+    state = PipelineState()
+    state.rebuild(log)
+    spec = state.specimens["specimen_A"]
+    assert spec.status == SpecimenStatus.ERROR
+    assert spec.consensus_version == 1  # failed run still counts, no retry loop

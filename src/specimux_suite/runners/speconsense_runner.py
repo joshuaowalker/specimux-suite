@@ -100,21 +100,16 @@ class SpeconsenseRunner:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=self.config.job_timeout,
             )
 
             if result.returncode != 0:
                 logger.error(f"speconsense failed for {specimen_id}: {result.stderr}")
-                self.event_log.emit("pipeline.error", {
-                    "component": "speconsense",
-                    "specimen_id": specimen_id,
-                    "message": f"speconsense exited with code {result.returncode}",
-                    "details": result.stderr[-2000:] if result.stderr else "",
-                })
-                self.event_log.emit("consensus.completed", {
-                    "specimen_id": specimen_id,
-                    "job_id": job_id,
-                    "clusters": [],
-                })
+                self._emit_failure(
+                    specimen_id, job_id,
+                    f"speconsense exited with code {result.returncode}",
+                    result.stderr,
+                )
                 return []
 
             # Parse the -all.fasta output
@@ -136,6 +131,11 @@ class SpeconsenseRunner:
 
             return clusters
 
+        except subprocess.TimeoutExpired:
+            msg = f"speconsense timed out after {self.config.job_timeout}s (killed)"
+            logger.error(f"{msg} for {specimen_id}")
+            self._emit_failure(specimen_id, job_id, msg)
+            return []
         except FileNotFoundError:
             msg = "speconsense not found on PATH"
             logger.error(msg)
@@ -145,6 +145,27 @@ class SpeconsenseRunner:
                 "message": msg,
             })
             return []
+
+    def _emit_failure(self, specimen_id: str, job_id: str, message: str,
+                      stderr: str = "") -> None:
+        """Emit a failed-run event pair for a specimen.
+
+        consensus.completed is emitted first so that state replay applies
+        pipeline.error last — otherwise the specimen displays CONSENSUS_DONE
+        instead of ERROR. The completed event still bumps consensus_version
+        and reads_at_last_consensus, preventing an immediate retry loop.
+        """
+        self.event_log.emit("consensus.completed", {
+            "specimen_id": specimen_id,
+            "job_id": job_id,
+            "clusters": [],
+        })
+        self.event_log.emit("pipeline.error", {
+            "component": "speconsense",
+            "specimen_id": specimen_id,
+            "message": message,
+            "details": stderr[-2000:] if stderr else "",
+        })
 
     def _build_command(self, specimen_fastq: Path, output_dir: Path, presample: int = 0) -> list[str]:
         """Build the speconsense command line."""
