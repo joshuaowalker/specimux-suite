@@ -157,7 +157,9 @@ def main():
 
     if args.command == "batch":
         pipeline.run_batch()
-        if sys.stdin.isatty() and sys.stderr.isatty():
+        # Show the results screen only on natural completion — a user who
+        # quit with [Q] wants out, not another keypress prompt.
+        if not pipeline.was_shutdown and sys.stdin.isatty() and sys.stderr.isatty():
             import queue
             from .console import ConsoleUI
             cmd_queue = queue.Queue()

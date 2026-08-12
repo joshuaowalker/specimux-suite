@@ -4,6 +4,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
 from pathlib import Path
 
@@ -34,7 +35,14 @@ class Pipeline:
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.event_log = EventLog(config.event_log_path)
+
+        # Single live state: replay history once, then stay current by
+        # applying every event as it is emitted. This instance is shared
+        # with the scheduler, console, and web server — never reassign it.
         self.state = PipelineState()
+        self.state.rebuild(self.event_log)
+        self.event_log.add_listener(self.state.apply)
+
         self.scheduler = Scheduler(config, self.state)
 
         self.specimux = SpecimuxRunner(config, self.event_log)
@@ -44,18 +52,12 @@ class Pipeline:
 
         self._executor = ThreadPoolExecutor(max_workers=config.workers)
         self._futures: dict[str, Future] = {}
-        self._identifying: set[str] = set()  # specimen IDs with in-flight identification
+        self._id_futures: dict[str, Future] = {}  # in-flight identification jobs
         self._shutdown = threading.Event()
         self._draining = False  # True while waiting for specimux to run
         self.cmd_queue: queue.Queue = queue.Queue()
         self._file_queue: queue.Queue[Path] = queue.Queue()
         self._console: ConsoleUI | None = None
-
-    def _rebuild_state(self) -> None:
-        """Rebuild state from event log and update scheduler reference."""
-        self.state = PipelineState()
-        self.state.rebuild(self.event_log)
-        self.scheduler.state = self.state
 
     def _load_specimens(self) -> None:
         """Parse the specimens file and emit specimens.loaded event."""
@@ -95,9 +97,6 @@ class Pipeline:
             logger.error(f"Required tools not found on PATH: {', '.join(missing)}")
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
-        # Rebuild state from any existing events
-        self._rebuild_state()
-
         self.event_log.emit("pipeline.started", {
             "mode": "batch",
             "config_summary": self.config.summary(),
@@ -129,9 +128,6 @@ class Pipeline:
                     self._console = None
                     return
 
-            # Rebuild state after specimux events
-            self._rebuild_state()
-            console.state = self.state
             console.redraw()
 
             # Step 2: Run consensus → identification, interleaved per-specimen
@@ -139,12 +135,15 @@ class Pipeline:
             self._run_consensus_round(min_reads=0)
 
             # Step 3: Run summarize for all identified/no_match specimens
-            self._run_summarize_round()
+            if not self._shutdown.is_set():
+                self._run_summarize_round()
 
-            self._executor.shutdown(wait=True)
+            self._shutdown_executor()
             self._console = None
 
-        if not self._shutdown.is_set():
+        if self._shutdown.is_set():
+            logger.info("Batch pipeline stopped by user")
+        else:
             logger.info("Batch pipeline complete")
 
     def run_live(self) -> None:
@@ -155,8 +154,6 @@ class Pipeline:
         if missing:
             logger.error(f"Required tools not found on PATH: {', '.join(missing)}")
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
-
-        self._rebuild_state()
 
         self.event_log.emit("pipeline.started", {
             "mode": "live",
@@ -180,9 +177,12 @@ class Pipeline:
             stable_queue=self._file_queue,
         )
 
-        # Seed tracker with files already processed in previous runs
+        # Seed tracker with files already processed in previous runs.
+        # Keyed on processed (demuxed), not merely stable: a file that
+        # stabilized right before a quit was never demuxed and must be
+        # picked up again on restart.
         already_processed = [
-            f.path for f in self.state.files.values() if f.stable
+            f.path for f in self.state.files.values() if f.processed
         ]
         if already_processed:
             watcher._tracker.seed(already_processed)
@@ -199,7 +199,7 @@ class Pipeline:
             with ConsoleUI("live", self.state, self.cmd_queue) as console:
                 self._console = console
                 while not self._shutdown.is_set():
-                    self._shutdown.wait(timeout=2.0)
+                    self._shutdown.wait(timeout=self._TICK)
                     self._check_completed_futures()
 
                     # Process any stable files (drain once, run all back-to-back)
@@ -213,7 +213,6 @@ class Pipeline:
                             break
                         if cmd == "finalize":
                             self._run_finalization()
-                            self._rebuild_state()
                             self._schedule_consensus()
                         elif cmd == "quit":
                             logger.info("Quit command received, shutting down")
@@ -226,14 +225,40 @@ class Pipeline:
             logger.info("Shutting down live pipeline")
         finally:
             watcher.stop()
-            self._executor.shutdown(wait=True)
+            self._shutdown_executor()
 
     def shutdown(self) -> None:
         """Signal the pipeline to shut down."""
         self._shutdown.set()
 
+    @property
+    def was_shutdown(self) -> bool:
+        """True if the run ended via quit/shutdown rather than completing."""
+        return self._shutdown.is_set()
+
+    def _shutdown_executor(self) -> None:
+        """Shut down the thread pool: cancel queued jobs, wait for running ones.
+
+        Running subprocesses are allowed to finish (killing specimux mid-append
+        could corrupt per-specimen FASTQs); queued-but-unstarted jobs are
+        cancelled so quitting waits on at most `workers` jobs.
+        """
+        running = sum(
+            1 for f in list(self._futures.values()) + list(self._id_futures.values())
+            if f.running()
+        )
+        if running:
+            logger.info(f"Waiting for {running} in-flight job(s) to finish; queued jobs cancelled")
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
     def _drain_cmd_queue(self) -> None:
-        """Process pending commands from the console UI."""
+        """Process pending commands from the console UI.
+
+        Handles "quit" directly; "finalize" is owned by the live main loop,
+        so it is re-queued (once) rather than dropped — this method is also
+        called from wait loops that would otherwise swallow it.
+        """
+        finalize_seen = False
         while True:
             try:
                 cmd = self.cmd_queue.get_nowait()
@@ -243,10 +268,10 @@ class Pipeline:
                 logger.info("Quit command received, shutting down")
                 self._shutdown.set()
             elif cmd == "finalize":
-                # Finalize is handled in the live mode main loop, not here
-                pass
+                finalize_seen = True
+        if finalize_seen:
+            self.cmd_queue.put("finalize")
         if self._console:
-            self._console.state = self.state
             self._console.redraw()
 
     def _on_file_stable(self, file_path: Path) -> None:
@@ -279,6 +304,9 @@ class Pipeline:
             self._wait_all_futures()
 
         for file_path in files:
+            if self._shutdown.is_set():
+                logger.info("Shutdown requested; remaining file(s) will be picked up on restart")
+                break
             logger.info(f"Running specimux on {file_path.name}")
             try:
                 self.specimux.run(file_path)
@@ -290,12 +318,10 @@ class Pipeline:
                 })
 
         self._draining = False
-        self._rebuild_state()
 
     def _drain_all_files(self) -> None:
         """Drain queued files and wait for any settling files to stabilize."""
         self._drain_file_queue()
-        self._rebuild_state()
         if self._has_unsettled_files():
             wait = self.config.settle_time + 5
             logger.info(f"Waiting up to {wait}s for {sum(1 for f in self.state.files.values() if not f.stable)} settling file(s)")
@@ -328,6 +354,9 @@ class Pipeline:
 
         # 3. Run specimux on each file back-to-back
         for file_path in files:
+            if self._shutdown.is_set():
+                logger.info("Shutdown requested; remaining file(s) will be picked up on restart")
+                break
             logger.info(f"Running specimux on {file_path.name}")
             try:
                 self.specimux.run(file_path)
@@ -340,7 +369,6 @@ class Pipeline:
 
         # 4. Resume scheduling
         self._draining = False
-        self._rebuild_state()
 
         # 5. Trigger identification for consensus jobs that completed during drain
         if self.identify and drained_sids:
@@ -359,7 +387,6 @@ class Pipeline:
         # Also wait for files that are detected but still settling
         self._drain_all_files()
 
-        self._rebuild_state()
         jobs = self.scheduler.get_all_eligible_jobs(max_jobs=None, min_reads=0)
 
         # Filter out specimens already in-flight or with no reads (nothing to process)
@@ -410,7 +437,6 @@ class Pipeline:
             # Wait for at least one to finish
             if self._futures:
                 self._wait_for_any_future()
-                self._rebuild_state()
                 self._drain_cmd_queue()
 
                 # Identify specimens that just completed consensus
@@ -456,7 +482,6 @@ class Pipeline:
             # Wait for at least one to finish
             if self._futures:
                 self._wait_for_any_future()
-                self._rebuild_state()
                 self._drain_cmd_queue()
 
                 # Identify specimens that just completed consensus
@@ -471,7 +496,7 @@ class Pipeline:
 
     def _schedule_consensus(self) -> None:
         """Check scheduler and submit consensus jobs for available slots."""
-        if self._draining:
+        if self._draining or self._shutdown.is_set():
             return
         # Use _futures as ground truth for in-flight work, since state may lag
         # behind actual submissions (consensus.started not yet emitted)
@@ -507,7 +532,7 @@ class Pipeline:
 
     def _submit_identification(self, specimen_id: str, deferred: bool = False) -> None:
         """Submit identification for a specimen if it has clusters."""
-        if specimen_id in self._identifying:
+        if specimen_id in self._id_futures:
             return
         spec = self.state.get_specimen(specimen_id)
         if not spec or not spec.clusters:
@@ -517,13 +542,46 @@ class Pipeline:
             return
         label = f" (deferred from drain)" if deferred else ""
         logger.info(f"Identifying {specimen_id}{label}")
-        self._identifying.add(specimen_id)
-        future = self._executor.submit(self.identify.run, specimen_id, consensus_fasta)
-        future.add_done_callback(lambda _: self._identifying.discard(specimen_id))
+        future = self._executor.submit(
+            self.identify.run, specimen_id, consensus_fasta,
+            consensus_version=spec.consensus_version,
+        )
+        self._id_futures[specimen_id] = future
+        future.add_done_callback(
+            lambda fut, sid=specimen_id: self._on_identification_done(sid, fut)
+        )
+
+    def _on_identification_done(self, specimen_id: str, fut: Future) -> None:
+        """Reap a finished identification future and surface any error."""
+        self._id_futures.pop(specimen_id, None)
+        exc = fut.exception()
+        if exc is not None:
+            logger.error(f"Identification failed for {specimen_id}: {exc}")
+            self.event_log.emit("pipeline.error", {
+                "component": "identify",
+                "specimen_id": specimen_id,
+                "message": str(exc),
+            })
+
+    def _drain_identifications(self) -> None:
+        """Wait for all in-flight identification jobs to finish.
+
+        Ticks so console commands keep working; returns early on shutdown.
+        Failures are logged and reported by _on_identification_done.
+        """
+        from concurrent.futures import wait
+        if not self._id_futures:
+            return
+        logger.info(f"Waiting for {len(self._id_futures)} in-flight identification(s)")
+        deadline = time.monotonic() + self.config.job_timeout + 60
+        while self._id_futures and not self._shutdown.is_set():
+            _done, not_done = wait(list(self._id_futures.values()), timeout=self._TICK)
+            self._drain_cmd_queue()
+            if not not_done or time.monotonic() > deadline:
+                break
 
     def _build_variant_fasta(self, specimen_id: str) -> Path | None:
         """Combine all variant FASTA files for a specimen into one file for identification."""
-        self._rebuild_state()
         spec = self.state.get_specimen(specimen_id)
         if not spec or not spec.variants:
             return None
@@ -552,8 +610,12 @@ class Pipeline:
         combined_fasta = self._build_variant_fasta(specimen_id)
         if not combined_fasta:
             return
+        spec = self.state.get_specimen(specimen_id)
         logger.info(f"Identifying variants for {specimen_id}")
-        future = self._executor.submit(self.identify.run, specimen_id, combined_fasta)
+        future = self._executor.submit(
+            self.identify.run, specimen_id, combined_fasta,
+            consensus_version=spec.consensus_version,
+        )
         self._futures[specimen_id] = future
 
     def _submit_summarize(self, specimen_id: str) -> None:
@@ -567,7 +629,14 @@ class Pipeline:
 
     def _run_summarize_round(self) -> None:
         """Run summarize for all identified/no_match specimens, then aggregate."""
-        self._rebuild_state()
+        if self._shutdown.is_set():
+            return
+
+        # Wait for in-flight identifications first: the last consensus jobs
+        # submit identification right before the consensus round exits, and
+        # those specimens are still CONSENSUS_DONE until identification lands.
+        # Computing eligibility before that would silently skip them.
+        self._drain_identifications()
 
         eligible = [
             sid for sid, spec in self.state.specimens.items()
@@ -594,7 +663,6 @@ class Pipeline:
 
             if self._futures:
                 self._wait_for_any_future()
-                self._rebuild_state()
                 self._drain_cmd_queue()
 
                 # Identify specimens that just completed summarization
@@ -609,6 +677,9 @@ class Pipeline:
                             variant_id_submitted.add(sid)
 
         # Run aggregate to generate summary.fasta etc.
+        if self._shutdown.is_set():
+            logger.info("Skipping summarize aggregate (shutdown requested)")
+            return
         logger.info("Running summarize aggregate")
         self.summarize.run_aggregate()
 
@@ -630,48 +701,80 @@ class Pipeline:
                         return path
         return None
 
+    # Interval between console-command checks while blocked on jobs.
+    # Keeps [Q] responsive during long-running subprocess work.
+    _TICK = 0.5
+
     def _wait_for_any_future(self) -> None:
-        """Wait for at least one future to complete, with timeout."""
-        from concurrent.futures import as_completed, TimeoutError
-        if self._futures:
-            timeout = self.config.job_timeout
-            try:
-                done_iter = as_completed(self._futures.values(), timeout=timeout)
-                next(done_iter)
-            except (StopIteration, TimeoutError):
-                pass
-            # Find and remove completed (or timed-out) futures
-            for sid, fut in list(self._futures.items()):
-                if fut.done():
-                    del self._futures[sid]
-                    try:
-                        fut.result()
-                    except Exception as e:
-                        logger.error(f"Job failed for {sid}: {e}")
-                        self.event_log.emit("pipeline.error", {
-                            "component": "pipeline",
-                            "specimen_id": sid,
-                            "message": str(e),
-                        })
+        """Wait until at least one future completes, staying responsive.
+
+        Polls in short ticks, processing console commands between ticks so
+        [Q] is acknowledged within ~_TICK even while jobs run for minutes.
+        Returns early (without reaping) if shutdown is requested. Runners
+        enforce job_timeout at the subprocess level, so futures always finish
+        within roughly that window; the deadline here is a backstop.
+        """
+        from concurrent.futures import wait, FIRST_COMPLETED
+        if not self._futures:
+            return
+        deadline = time.monotonic() + self.config.job_timeout + 60
+        while not self._shutdown.is_set():
+            done, _ = wait(list(self._futures.values()),
+                           timeout=self._TICK, return_when=FIRST_COMPLETED)
+            self._drain_cmd_queue()
+            if done:
+                break
+            if time.monotonic() > deadline:
+                logger.warning(
+                    f"No job finished within the backstop window; still in-flight: "
+                    f"{', '.join(self._futures)}"
+                )
+                break
+        self._reap_completed_futures()
+
+    def _reap_completed_futures(self) -> None:
+        """Remove finished futures from _futures, reporting failures."""
+        for sid, fut in list(self._futures.items()):
+            if fut.done():
+                del self._futures[sid]
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.error(f"Job failed for {sid}: {e}")
+                    self.event_log.emit("pipeline.error", {
+                        "component": "pipeline",
+                        "specimen_id": sid,
+                        "message": str(e),
+                    })
 
     def _wait_all_futures(self) -> list[str]:
-        """Wait for all pending futures, with timeout.
+        """Wait for all pending futures, staying responsive to console commands.
 
         Returns list of specimen IDs whose consensus completed successfully.
+        Returns early on shutdown (callers must not run specimux in that case);
+        unfinished futures stay in _futures so they cannot be double-submitted.
         """
+        from concurrent.futures import wait
+        deadline = time.monotonic() + self.config.job_timeout + 60
+        while self._futures and not self._shutdown.is_set():
+            _done, not_done = wait(list(self._futures.values()), timeout=self._TICK)
+            self._drain_cmd_queue()
+            if not not_done:
+                break
+            if time.monotonic() > deadline:
+                logger.error(
+                    f"Jobs did not finish within the backstop window: "
+                    f"{', '.join(sid for sid, f in self._futures.items() if not f.done())}"
+                )
+                break
         completed = []
-        timeout = self.config.job_timeout
         for sid, fut in list(self._futures.items()):
+            if not fut.done():
+                continue
+            del self._futures[sid]
             try:
-                fut.result(timeout=timeout)
+                fut.result()
                 completed.append(sid)
-            except TimeoutError:
-                logger.error(f"Job timed out for {sid} after {timeout}s")
-                self.event_log.emit("pipeline.error", {
-                    "component": "pipeline",
-                    "specimen_id": sid,
-                    "message": f"Job timed out after {timeout}s",
-                })
             except Exception as e:
                 logger.error(f"Job failed for {sid}: {e}")
                 self.event_log.emit("pipeline.error", {
@@ -679,7 +782,6 @@ class Pipeline:
                     "specimen_id": sid,
                     "message": str(e),
                 })
-        self._futures.clear()
         return completed
 
     def _check_completed_futures(self) -> None:
@@ -705,10 +807,8 @@ class Pipeline:
 
         for sid in completed:
             if self.identify:
-                self._rebuild_state()
                 self._submit_identification(sid)
 
         # Check for new consensus work
         if completed or errored:
-            self._rebuild_state()
             self._schedule_consensus()

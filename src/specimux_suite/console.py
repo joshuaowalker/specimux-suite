@@ -60,6 +60,9 @@ class ConsoleUI:
     def __exit__(self, *exc):
         if self._active:
             self._stop_event.set()
+            if self._reader_thread is not None:
+                self._reader_thread.join(timeout=1.0)
+                self._reader_thread = None
             self._clear_bar()
             self._remove_log_handler()
             self._restore_terminal()
@@ -155,9 +158,22 @@ class ConsoleUI:
         self._reader_thread.start()
 
     def _key_reader(self):
-        """Read single bytes from stdin and push commands onto the queue."""
+        """Read single bytes from stdin and push commands onto the queue.
+
+        Polls with select so the thread actually exits when _stop_event is
+        set — a reader blocked in os.read() would outlive this console and
+        steal keypresses from the next one (batch → batch_complete).
+        """
+        import select
+
         fd = sys.stdin.fileno()
         while not self._stop_event.is_set():
+            try:
+                readable, _, _ = select.select([fd], [], [], 0.2)
+            except OSError:
+                break
+            if not readable:
+                continue
             try:
                 ch = os.read(fd, 1)
             except OSError:
@@ -171,7 +187,9 @@ class ConsoleUI:
                 elif c in (ord("q"), ord("Q")):
                     self.cmd_queue.put("quit")
             elif self.mode == "batch_complete":
-                if c in (13, 10):  # Enter / newline
+                # Enter is advertised, but accept q too — it's the quit key
+                # everywhere else in the UI
+                if c in (13, 10, ord("q"), ord("Q")):
                     self.cmd_queue.put("enter")
 
     def _clear_bar(self):

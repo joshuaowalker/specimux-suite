@@ -55,13 +55,14 @@ async def index():
 
 @app.get("/api/state")
 async def get_state():
-    """Full state snapshot."""
+    """Full state snapshot.
+
+    The pipeline keeps this state instance current by applying every event
+    as it is emitted, so a snapshot is O(state), not O(event history).
+    """
     if _state is None:
         return {"error": "State not initialized"}
-    # Rebuild from events for freshness
-    fresh = PipelineState()
-    fresh.rebuild(_event_log)
-    result = fresh.to_dict()
+    result = _state.to_dict()
     if _config:
         result["config_summary"] = _config.summary()
         if _config.share_url:
@@ -86,9 +87,7 @@ async def get_specimens():
     """Specimen list with status."""
     if _state is None:
         return []
-    fresh = PipelineState()
-    fresh.rebuild(_event_log)
-    return list(fresh.to_dict()["specimens"].values())
+    return list(_state.to_dict()["specimens"].values())
 
 
 @app.get("/events")
@@ -202,11 +201,9 @@ async def get_sequence(specimen_id: str, sequence_name: str):
 @app.post("/api/watch/{specimen_id}")
 async def toggle_watch(specimen_id: str):
     """Toggle watched state for a specimen."""
-    if _event_log is None:
+    if _event_log is None or _state is None:
         return JSONResponse(status_code=500, content={"error": "Not initialized"})
-    fresh = PipelineState()
-    fresh.rebuild(_event_log)
-    spec = fresh.specimens.get(specimen_id)
+    spec = _state.specimens.get(specimen_id)
     if not spec:
         return JSONResponse(status_code=404, content={"error": "Specimen not found"})
     new_watched = not spec.watched

@@ -121,3 +121,140 @@ def test_finalization_calls_get_all_eligible_jobs(tmp_path):
         pipeline.scheduler.get_ready_jobs.assert_not_called()
 
         pipeline._executor.shutdown(wait=False)
+
+
+def test_summarize_round_waits_for_inflight_identification(tmp_path):
+    """Specimens whose identification is still running when the consensus round
+    ends must not be skipped by the summarize round (regression: the last
+    specimens to finish consensus were silently excluded from summarization)."""
+    import time
+
+    config = _make_config(tmp_path)
+    (tmp_path / "reads.fastq").write_text("@r1\nACGT\n+\nIIII\n")
+
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+
+    log = pipeline.event_log
+
+    # Specimen finished consensus; identification still in flight
+    log.emit("consensus.completed", {
+        "specimen_id": "specimen_A", "job_id": "c1",
+        "clusters": [{"name": "specimen_A-c0", "size": 90}],
+    })
+
+    def slow_identify():
+        time.sleep(0.3)
+        log.emit("identification.completed", {
+            "specimen_id": "specimen_A",
+            "consensus_version": 1,
+            "matches": [{"cluster": "specimen_A-c0",
+                         "top_hits": [{"ref_id": "r1", "name": "Hit",
+                                       "identity": 0.99, "adjusted_identity": 0.99}]}],
+        })
+
+    fut = pipeline._executor.submit(slow_identify)
+    pipeline._id_futures["specimen_A"] = fut
+    fut.add_done_callback(
+        lambda f: pipeline._on_identification_done("specimen_A", f))
+
+    summarized = []
+    pipeline.summarize = MagicMock()
+    pipeline.summarize.run.side_effect = lambda sid: (
+        summarized.append(sid),
+        log.emit("summarize.completed", {"specimen_id": sid, "variants": []}),
+    ) and []
+
+    pipeline._run_summarize_round()
+
+    assert summarized == ["specimen_A"]
+    pipeline.summarize.run_aggregate.assert_called_once()
+    pipeline._executor.shutdown(wait=True)
+
+
+def _quiet_pipeline(tmp_path):
+    """Construct a Pipeline with tool checks patched out."""
+    config = _make_config(tmp_path)
+    (tmp_path / "reads.fastq").write_text("@r1\nACGT\n+\nIIII\n")
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        return Pipeline(config)
+
+
+def test_quit_is_responsive_during_long_job(tmp_path):
+    """[Q] must be processed within ~a tick even while a job runs for minutes
+    (regression: cmd queue was only drained after a future completed)."""
+    import time
+
+    pipeline = _quiet_pipeline(tmp_path)
+    stop = __import__("threading").Event()
+    pipeline._futures["slow_specimen"] = pipeline._executor.submit(stop.wait, 30)
+
+    pipeline.cmd_queue.put("quit")
+    start = time.monotonic()
+    pipeline._wait_for_any_future()
+    elapsed = time.monotonic() - start
+
+    assert pipeline._shutdown.is_set()
+    assert elapsed < 5  # not the 30s the job would take
+    stop.set()
+    pipeline._executor.shutdown(wait=True)
+
+
+def test_wait_all_futures_returns_early_on_quit(tmp_path):
+    """Drain-before-specimux must abort promptly when quit is pressed."""
+    import time
+
+    pipeline = _quiet_pipeline(tmp_path)
+    stop = __import__("threading").Event()
+    pipeline._futures["slow_specimen"] = pipeline._executor.submit(stop.wait, 30)
+
+    pipeline.cmd_queue.put("quit")
+    start = time.monotonic()
+    completed = pipeline._wait_all_futures()
+    elapsed = time.monotonic() - start
+
+    assert pipeline._shutdown.is_set()
+    assert elapsed < 5
+    assert completed == []
+    # Unfinished job stays tracked so it cannot be double-submitted
+    assert "slow_specimen" in pipeline._futures
+    stop.set()
+    pipeline._executor.shutdown(wait=True)
+
+
+def test_summarize_round_skipped_after_quit(tmp_path):
+    """After quit, no summarize work (including aggregate) should start."""
+    pipeline = _quiet_pipeline(tmp_path)
+    pipeline.event_log.emit("consensus.completed", {
+        "specimen_id": "specimen_A", "job_id": "c1",
+        "clusters": [{"name": "specimen_A-c0", "size": 90}],
+    })
+    pipeline.event_log.emit("identification.completed", {
+        "specimen_id": "specimen_A", "consensus_version": 1,
+        "matches": [{"cluster": "specimen_A-c0",
+                     "top_hits": [{"ref_id": "r", "name": "n",
+                                   "identity": 0.99, "adjusted_identity": 0.99}]}],
+    })
+    pipeline.summarize = MagicMock()
+    pipeline._shutdown.set()
+
+    pipeline._run_summarize_round()
+
+    pipeline.summarize.run.assert_not_called()
+    pipeline.summarize.run_aggregate.assert_not_called()
+    pipeline._executor.shutdown(wait=True)
+
+
+def test_drain_cmd_queue_requeues_finalize(tmp_path):
+    """finalize must survive _drain_cmd_queue for the live main loop to handle."""
+    pipeline = _quiet_pipeline(tmp_path)
+    pipeline.cmd_queue.put("finalize")
+    pipeline.cmd_queue.put("quit")
+
+    pipeline._drain_cmd_queue()
+
+    assert pipeline._shutdown.is_set()
+    assert pipeline.cmd_queue.get_nowait() == "finalize"
+    pipeline._executor.shutdown(wait=True)
