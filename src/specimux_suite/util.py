@@ -32,11 +32,35 @@ def count_fastq_reads_fast(path: Path) -> int:
     return line_count // 4
 
 
-def scan_specimen_reads(specimux_output_dir: Path) -> dict[str, dict]:
+def _count_reads_from_offset(path: Path, offset: int) -> int:
+    """Count FASTQ records in the region of a file starting at offset.
+
+    Valid only when offset is a record boundary — true for the append-only
+    per-specimen files specimux writes, where offset is a previous EOF.
+    """
+    count = 0
+    with open(path, "rb") as f:
+        f.seek(offset)
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            count += chunk.count(b"\n")
+    return count // 4
+
+
+def scan_specimen_reads(specimux_output_dir: Path, cache: dict | None = None) -> dict[str, dict]:
     """Scan specimux output for specimen read counts.
 
     Returns {specimen_id: {"pool": pool_name, "reads": count, "path": fastq_path}}
     Looks in full/{pool}/{specimen}.fastq
+
+    Args:
+        cache: optional {path: (size_bytes, reads)} from a previous scan.
+            Specimux only appends to these files, so an unchanged size means
+            an unchanged count, and growth means counting just the new bytes
+            — O(new data) per scan instead of O(all data). A shrunken file
+            (unexpected) falls back to a full recount. Updated in place.
     """
     results = {}
     full_dir = specimux_output_dir / "full"
@@ -49,11 +73,23 @@ def scan_specimen_reads(specimux_output_dir: Path) -> dict[str, dict]:
         pool_name = pool_dir.name
         for fastq_file in sorted(pool_dir.glob("*.fastq")):
             specimen_id = fastq_file.stem
-            reads = count_fastq_reads_fast(fastq_file)
+            path_key = str(fastq_file)
+            size = fastq_file.stat().st_size
+
+            cached = cache.get(path_key) if cache is not None else None
+            if cached is not None and size == cached[0]:
+                reads = cached[1]
+            elif cached is not None and size > cached[0]:
+                reads = cached[1] + _count_reads_from_offset(fastq_file, cached[0])
+            else:
+                reads = count_fastq_reads_fast(fastq_file)
+
+            if cache is not None:
+                cache[path_key] = (size, reads)
             results[specimen_id] = {
                 "pool": pool_name,
                 "reads": reads,
-                "path": str(fastq_file),
+                "path": path_key,
             }
 
     return results

@@ -21,6 +21,9 @@ class SpecimuxRunner:
     def __init__(self, config: PipelineConfig, event_log: EventLog):
         self.config = config
         self.event_log = event_log
+        # Per-file (size, reads) from previous scans; makes each post-demux
+        # scan O(new data) instead of recounting every specimen file.
+        self._scan_cache: dict[str, tuple[int, int]] = {}
 
     def run(self, fastq_path: Path, threads: int | None = None) -> dict[str, dict]:
         """Run specimux on a FASTQ file.
@@ -109,7 +112,7 @@ class SpecimuxRunner:
                 return {}
 
             # Scan output directory for specimen read counts
-            specimens = scan_specimen_reads(output_dir)
+            specimens = scan_specimen_reads(output_dir, cache=self._scan_cache)
             specimen_counts = {sid: info["reads"] for sid, info in specimens.items()}
             matched_reads = sum(specimen_counts.values())
 

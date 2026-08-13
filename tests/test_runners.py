@@ -305,3 +305,36 @@ def test_identification_tsv_written(tmp_path):
     assert lines[1].split("\t") == ["spec_A-c0", "r1", "Russula emetica",
                                     "0.9700", "0.9850", "0.9100"]
     assert lines[2].split("\t")[5] == ""  # missing coverage -> empty field
+
+
+def test_scan_specimen_reads_incremental_cache(tmp_path):
+    """Cached scans must count only appended bytes and detect shrinkage."""
+    from specimux_suite.util import scan_specimen_reads
+
+    pool = tmp_path / "specimux" / "full" / "ITS"
+    pool.mkdir(parents=True)
+    fq = pool / "spec_A.fastq"
+    record = "@r{}\nACGT\n+\nIIII\n"
+    fq.write_text("".join(record.format(i) for i in range(3)))
+
+    cache = {}
+    out = scan_specimen_reads(tmp_path / "specimux", cache=cache)
+    assert out["spec_A"]["reads"] == 3
+
+    # Unchanged size -> cached count reused
+    out = scan_specimen_reads(tmp_path / "specimux", cache=cache)
+    assert out["spec_A"]["reads"] == 3
+
+    # Append two records -> incremental count from prior EOF
+    with open(fq, "a") as f:
+        f.write("".join(record.format(i) for i in range(3, 5)))
+    out = scan_specimen_reads(tmp_path / "specimux", cache=cache)
+    assert out["spec_A"]["reads"] == 5
+
+    # Shrunken file (unexpected) -> full recount, not garbage
+    fq.write_text(record.format(0))
+    out = scan_specimen_reads(tmp_path / "specimux", cache=cache)
+    assert out["spec_A"]["reads"] == 1
+
+    # No-cache call still works and matches
+    assert scan_specimen_reads(tmp_path / "specimux")["spec_A"]["reads"] == 1
