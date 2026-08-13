@@ -297,6 +297,41 @@ a.hit-name:hover { text-decoration: underline; }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
+/* Forecast tab */
+.forecast-wrap { padding: 1rem 1.5rem; max-width: 1100px; }
+.forecast-empty { color: var(--text-dim); padding: 2rem 0; max-width: 60ch; line-height: 1.6; }
+.forecast-headline {
+  font-size: 1.05rem; line-height: 1.65; max-width: 72ch; margin-bottom: 1rem;
+}
+.forecast-headline b { font-variant-numeric: tabular-nums; }
+.forecast-badges { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+.forecast-badge {
+  font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 999px;
+  background: var(--accent); color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.forecast-badge.ok { background: var(--summarized); color: #fff; }
+.forecast-badge.warn { background: var(--no-match); color: #fff; }
+.forecast-section { margin: 1.5rem 0 0.5rem; font-size: 0.95rem; font-weight: 600; }
+.forecast-note { color: var(--text-dim); font-size: 0.8rem; max-width: 72ch; margin: 0.25rem 0 0.75rem; }
+table.forecast-table { width: auto; table-layout: auto; }
+table.forecast-table th { cursor: default; }
+table.forecast-table td { white-space: nowrap; font-variant-numeric: tabular-nums; }
+table.forecast-table td:first-child { white-space: normal; overflow-wrap: anywhere; }
+.forecast-chart-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.75rem; margin: 0.5rem 0 1rem; max-width: 860px;
+}
+.forecast-chart-card svg { display: block; width: 100%; height: auto; }
+.forecast-legend { display: flex; gap: 1rem; font-size: 0.75rem; color: var(--text-dim); padding: 0 0.25rem 0.5rem; }
+.forecast-legend i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+#forecast-tip {
+  position: fixed; pointer-events: none; z-index: 20; display: none;
+  background: #000; color: #eee; border: 1px solid var(--border); border-radius: 5px;
+  font-size: 0.72rem; line-height: 1.5; padding: 0.35rem 0.55rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
 col.col-sum-specimen { width: 30%; }
 col.col-sum-variants { width: 12%; }
 col.col-sum-topmatch { width: 30%; }
@@ -388,6 +423,7 @@ col.col-sum-reads { width: 12%; }
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="processing">Processing</button>
   <button class="tab-btn" data-tab="summary">Summary</button>
+  <button class="tab-btn" data-tab="forecast">Forecast</button>
 </div>
 
 <script src="/static/vendor/qrcode.min.js"></script>
@@ -493,10 +529,17 @@ col.col-sum-reads { width: 12%; }
 </div>
 </div><!-- end tab-summary -->
 
+<div id="tab-forecast" class="tab-content">
+<div class="forecast-wrap" id="forecast-body">
+  <div class="forecast-empty">The forecast needs a live run with at least two demultiplexed files.</div>
+</div>
+</div><!-- end tab-forecast -->
+<div id="forecast-tip"></div>
+
 <button id="scroll-top" aria-label="Scroll to top">▲</button>
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, summarizeFilter: {} };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, summarizeFilter: {}, demuxHistory: [] };
 let activeTab = 'processing';
 const tabState = {
   processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set(), hideFiltered: false },
@@ -609,6 +652,18 @@ function applyEvent(event) {
         state.specimens[name].total_reads = reads;
       }
       state.totalInputReads += d.input_reads || 0;
+      // Per-file snapshot for the Forecast tab: cumulative matched clock.
+      // matched_reads and the per-specimen counts are cumulative already.
+      // (History from before this page connected comes from the /api/state
+      // bootstrap — SSE only delivers events after the snapshot version.)
+      if (d.exit_code === 0 && d.matched_reads > 0) {
+        state.demuxHistory.push({
+          ts: event.ts,
+          inputCum: state.totalInputReads,
+          matchedCum: d.matched_reads,
+          counts: d.specimens || {},
+        });
+      }
       break;
     case 'finalization.started':
       state.finalizing = true;
@@ -868,7 +923,268 @@ function buildClusterBadge(s) {
 
 function render() {
   if (activeTab === 'processing') renderProcessing();
-  else renderSummary();
+  else if (activeTab === 'summary') renderSummary();
+  else renderForecast();
+}
+
+// ===================== Forecast tab =====================
+// Model (validated on ont98 + run116): per-specimen read share is stationary
+// on the cumulative-DEMULTIPLEXED-reads clock. Each below-threshold specimen's
+// crossing is forecast from rate = reads / matched_cum, with a 90% Poisson
+// interval (Wilson–Hilferty) on the read count.
+
+const FORECAST_Z = 1.645; // 90% interval
+
+function poissonLo(n) {
+  if (n === 0) return 0;
+  const t = 1 - 1 / (9 * n) - FORECAST_Z / (3 * Math.sqrt(n));
+  return n * t * t * t;
+}
+function poissonHi(n) {
+  const m = n + 1;
+  const t = 1 - 1 / (9 * m) + FORECAST_Z / (3 * Math.sqrt(m));
+  return m * t * t * t;
+}
+
+function computeForecast() {
+  const hist = state.demuxHistory;
+  if (hist.length < 2) return null;
+  const last = hist[hist.length - 1];
+  const M = last.matchedCum;
+  if (!M) return null;
+
+  // Recent throughput over up to the last 5 file intervals
+  const k = Math.min(5, hist.length - 1);
+  const a = hist[hist.length - 1 - k], b = last;
+  const matchedPerFile = (b.matchedCum - a.matchedCum) / k;
+  const dtMs = (Date.parse(b.ts) - Date.parse(a.ts)) / k;
+  const matchedPerHour = dtMs > 0 ? matchedPerFile * 3600000 / dtMs : null;
+
+  // Per-specimen forecasts against each threshold
+  const thresholds = [10, minReads, 100].filter((t, i, arr) => arr.indexOf(t) === i).sort((x, y) => x - y);
+  const specs = Object.values(state.specimens);
+  const perT = {};
+  for (const T of thresholds) {
+    let over = 0, withinHour = 0, eventually = 0, unlikely = 0, noReads = 0;
+    for (const s of specs) {
+      const n = s.total_reads || 0;
+      if (n >= T) { over++; continue; }
+      if (n === 0) { noReads++; unlikely++; continue; }
+      const dM = (T - n) * M / n; // expected additional matched reads
+      const dMlo = (T - n) * M / poissonHi(n); // optimistic
+      if (matchedPerHour != null && dMlo <= matchedPerHour) withinHour++;
+      if (dM <= M) eventually++; // within doubling the run
+      else unlikely++;
+    }
+    perT[T] = { over, withinHour, eventually, unlikely, noReads };
+  }
+
+  // Below-min_reads specimen rows, nearest crossing first
+  const rows = [];
+  for (const s of specs) {
+    const n = s.total_reads || 0;
+    if (n >= minReads || n === 0) continue;
+    const need = minReads - n;
+    const dM = need * M / n;
+    const dMlo = need * M / poissonHi(n);
+    const dMhiRaw = poissonLo(n) > 0 ? need * M / poissonLo(n) : Infinity;
+    rows.push({ sid: s.specimen_id, n, need, share: n / M, dM, dMlo, dMhi: dMhiRaw });
+  }
+  rows.sort((x, y) => x.dM - y.dM);
+
+  // Stationarity self-check: share in first vs second half of the matched clock
+  let drift = null;
+  const halfIdx = hist.findIndex(h => h.matchedCum >= M / 2);
+  if (halfIdx > 0 && halfIdx < hist.length - 1) {
+    const half = hist[halfIdx];
+    const M1 = half.matchedCum, M2 = M - M1;
+    if (M1 > 0 && M2 > 0) {
+      const ratios = [];
+      for (const s of specs) {
+        const n = s.total_reads || 0;
+        if (n < 20) continue;
+        const n1 = half.counts[s.specimen_id] || 0;
+        const n2 = n - n1;
+        if (n1 > 0) ratios.push((n2 / M2) / (n1 / M1));
+      }
+      if (ratios.length >= 10) {
+        ratios.sort((x, y) => x - y);
+        drift = ratios[Math.floor(ratios.length / 2)];
+      }
+    }
+  }
+
+  return { M, matchedPerFile, matchedPerHour, dtMs, thresholds, perT, rows, drift,
+           nFiles: hist.length, specs };
+}
+
+function fmtReads(v) {
+  if (!isFinite(v)) return '∞';
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e4) return Math.round(v / 1000) + 'k';
+  if (v >= 1e3) return (v / 1000).toFixed(1) + 'k';
+  return Math.round(v).toString();
+}
+
+function fmtEta(dM, f) {
+  // Express additional matched reads as wall time when the rate is known
+  if (!isFinite(dM)) return 'never';
+  if (f.matchedPerHour) {
+    const h = dM / f.matchedPerHour;
+    if (h < 1) return Math.max(1, Math.round(h * 60)) + 'm';
+    if (h < 48) return h.toFixed(1) + 'h';
+    return Math.round(h / 24) + 'd';
+  }
+  return '+' + fmtReads(dM);
+}
+
+function renderForecast() {
+  const body = document.getElementById('forecast-body');
+  const f = computeForecast();
+  if (!f) {
+    body.innerHTML = '<div class="forecast-empty">The forecast needs a live run with at least two ' +
+      'demultiplexed files — it estimates each specimen’s read-accumulation rate from the ' +
+      'per-file demultiplex history and projects when below-threshold specimens will cross.</div>';
+    return;
+  }
+
+  const total = f.specs.length;
+  const T = f.thresholds.includes(minReads) ? minReads : f.thresholds[1];
+  const p = f.perT[T];
+  const identified = f.specs.filter(s => getIdResult(s) === 'identified').length;
+  const hourTxt = f.matchedPerHour
+    ? `≈${fmtReads(f.matchedPerHour)} matched reads/hour → <b>${p.withinHour}</b> more projected to cross within the next hour`
+    : `<b>${p.withinHour}</b> more projected to cross soon`;
+
+  let html = `
+    <div class="forecast-headline">
+      <b>${p.over}</b> of <b>${total}</b> specimens have ≥${T} reads
+      (<b>${identified}</b> identified so far).
+      At current throughput, ${hourTxt};
+      <b>${p.unlikely - p.noReads}</b> below-threshold specimens are unlikely to ever cross
+      (need more than doubling the run), and <b>${p.noReads}</b> have no reads at all.
+    </div>
+    <div class="forecast-badges">
+      <span class="forecast-badge">${f.nFiles} files demuxed</span>
+      <span class="forecast-badge">${fmtReads(f.M)} matched reads</span>
+      <span class="forecast-badge">${fmtReads(f.matchedPerFile)} matched/file</span>
+      ${f.drift != null ? (Math.abs(Math.log(f.drift)) < Math.log(1.15)
+        ? `<span class="forecast-badge ok">rates stable (drift ${f.drift.toFixed(2)}×)</span>`
+        : `<span class="forecast-badge warn">rates drifting ${f.drift.toFixed(2)}× — forecasts less reliable</span>`)
+        : ''}
+    </div>`;
+
+  // Threshold sensitivity
+  html += `<div class="forecast-section">Threshold sensitivity</div>
+    <div class="forecast-note">How the stopping picture changes with the read bar — verification
+    has succeeded down to RiC 3–9, so the configured min_reads (${minReads}) is not the only bar worth watching.</div>
+    <table class="forecast-table"><thead><tr>
+      <th>threshold</th><th>over now</th><th>projected +1h</th><th>within 2× run</th><th>unlikely ever</th>
+    </tr></thead><tbody>`;
+  for (const t of f.thresholds) {
+    const q = f.perT[t];
+    html += `<tr><td>≥${t} reads${t === minReads ? ' (min_reads)' : ''}</td>
+      <td>${q.over}</td><td>+${q.withinHour}</td><td>+${q.eventually}</td><td>${q.unlikely}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // Accumulation chart
+  html += `<div class="forecast-section">Specimens over threshold, on the matched-read clock</div>
+    <div class="forecast-chart-card">
+      <div class="forecast-legend" id="forecast-legend"></div>
+      <svg id="forecast-chart" viewBox="0 0 820 300"></svg>
+    </div>`;
+
+  // Nearest-crossing table
+  const shown = f.rows.slice(0, 100);
+  html += `<div class="forecast-section">Below min_reads (${minReads}) — nearest projected crossings</div>
+    <div class="forecast-note">Expected time to cross at each specimen's current accumulation rate,
+    with a 90% interval. Specimens with zero reads are excluded (${f.perT[T].noReads} of them).</div>
+    <div class="table-wrap" style="padding:0"><table class="forecast-table"><thead><tr>
+      <th>specimen</th><th>reads</th><th>needs</th><th>share /100k</th><th>expected</th><th>90% range</th>
+    </tr></thead><tbody>`;
+  for (const r of shown) {
+    const lo = fmtEta(r.dMlo, f), hi = fmtEta(r.dMhi, f);
+    html += `<tr><td>${esc(r.sid)}</td><td>${r.n}</td><td>+${r.need}</td>
+      <td>${(r.share * 1e5).toFixed(1)}</td>
+      <td>${fmtEta(r.dM, f)}</td>
+      <td>${lo === hi ? lo : lo + ' – ' + hi}</td></tr>`;
+  }
+  if (f.rows.length > shown.length) {
+    html += `<tr><td colspan="6" style="color:var(--text-dim)">… ${f.rows.length - shown.length} more</td></tr>`;
+  }
+  html += `</tbody></table></div>`;
+
+  body.innerHTML = html;
+  drawForecastChart(f);
+}
+
+function drawForecastChart(f) {
+  const svg = document.getElementById('forecast-chart');
+  if (!svg) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  const W = 820, H = 300, M = { l: 46, r: 110, t: 12, b: 34 };
+  const hist = state.demuxHistory;
+  const seriesColors = ['#3987e5', '#d95926', '#199e70'];
+  const series = f.thresholds.map((t, i) => ({ t, color: seriesColors[i % 3], pts: [] }));
+  for (const h of hist) {
+    for (const s of series) {
+      let c = 0;
+      for (const sid in h.counts) if (h.counts[sid] >= s.t) c++;
+      s.pts.push([h.matchedCum, c]);
+    }
+  }
+  const xmax = f.M * 1.02;
+  const ymax = Math.max(10, ...series.map(s => s.pts.length ? s.pts[s.pts.length - 1][1] : 0)) * 1.15;
+  const X = v => M.l + (v / xmax) * (W - M.l - M.r);
+  const Y = v => H - M.b - (v / ymax) * (H - M.t - M.b);
+  const mk = (tag, attrs) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    svg.appendChild(e);
+    return e;
+  };
+  const yStep = ymax > 400 ? 200 : ymax > 150 ? 100 : ymax > 60 ? 50 : 10;
+  for (let v = 0; v <= ymax; v += yStep) {
+    mk('line', { x1: M.l, x2: W - M.r, y1: Y(v), y2: Y(v), stroke: 'rgba(255,255,255,0.08)' });
+    const t = mk('text', { x: M.l - 6, y: Y(v) + 3, 'text-anchor': 'end', fill: 'var(--text-dim)', 'font-size': 10 });
+    t.textContent = v;
+  }
+  for (let fr = 0; fr <= 1.0001; fr += 0.25) {
+    const t = mk('text', { x: X(xmax * fr), y: H - M.b + 16, 'text-anchor': 'middle', fill: 'var(--text-dim)', 'font-size': 10 });
+    t.textContent = fmtReads(xmax * fr);
+  }
+  const xl = mk('text', { x: M.l + (W - M.l - M.r) / 2, y: H - 4, 'text-anchor': 'middle', fill: 'var(--text-dim)', 'font-size': 10 });
+  xl.textContent = 'cumulative matched reads';
+  const leg = document.getElementById('forecast-legend');
+  for (const s of series) {
+    mk('polyline', { points: s.pts.map(p => `${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(' '),
+                     fill: 'none', stroke: s.color, 'stroke-width': 2, 'stroke-linejoin': 'round' });
+    const last = s.pts[s.pts.length - 1];
+    if (last) {
+      const t = mk('text', { x: W - M.r + 8, y: Y(last[1]) + 3, fill: s.color, 'font-size': 11, 'font-weight': 600 });
+      t.textContent = `≥${s.t} · ${last[1]}`;
+    }
+    const span = document.createElement('span');
+    span.innerHTML = `<i style="background:${s.color}"></i>≥${s.t} reads`;
+    leg.appendChild(span);
+  }
+  // hover: nearest file snapshot
+  const tip = document.getElementById('forecast-tip');
+  const hit = mk('rect', { x: M.l, y: M.t, width: W - M.l - M.r, height: H - M.t - M.b, fill: 'transparent' });
+  hit.addEventListener('mousemove', ev => {
+    const r = svg.getBoundingClientRect();
+    const mx = (ev.clientX - r.left) * (W / r.width);
+    let best = 0, bd = Infinity;
+    hist.forEach((h, i) => { const d = Math.abs(X(h.matchedCum) - mx); if (d < bd) { bd = d; best = i; } });
+    const h = hist[best];
+    tip.innerHTML = `file ${best + 1} · ${fmtReads(h.matchedCum)} matched<br>` +
+      series.map(s => `≥${s.t}: <b>${s.pts[best][1]}</b>`).join('<br>');
+    tip.style.display = 'block';
+    tip.style.left = Math.min(ev.clientX + 12, innerWidth - 160) + 'px';
+    tip.style.top = (ev.clientY + 12) + 'px';
+  });
+  hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
 }
 
 function renderProcessing() {
@@ -1473,6 +1789,9 @@ fetch('/api/state').then(r => r.json()).then(data => {
     state.version = data.version || 0;
   }
   state.totalInputReads = data.total_input_reads || 0;
+  state.demuxHistory = (data.demux_history || []).map(h => ({
+    ts: h.ts, inputCum: h.input_cum, matchedCum: h.matched_cum, counts: h.counts || {},
+  }));
   if (data.summarize_filter) state.summarizeFilter = data.summarize_filter;
   if (data.config_summary) {
     if (data.config_summary.min_reads) minReads = data.config_summary.min_reads;

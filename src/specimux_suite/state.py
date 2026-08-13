@@ -84,11 +84,19 @@ class PipelineState:
         # Effective speconsense-summarize routing thresholds (from pipeline.started);
         # the dashboard uses these to preview .ns/.lq routing per cluster.
         self.summarize_filter: dict = {}
+        # Per-demux snapshots for the dashboard's Forecast tab:
+        # {ts, input_cum, matched_cum, counts: {sid: cumulative reads}}.
+        # Decimated by halving beyond _DEMUX_HISTORY_MAX entries.
+        self.demux_history: list[dict] = []
+        self._event_ts: Optional[str] = None  # ts of the event being applied
+
+    _DEMUX_HISTORY_MAX = 512
 
     def apply(self, event: Event) -> None:
         """Apply a single event to update state (thread-safe)."""
         with self._lock:
             self.version = event.version
+            self._event_ts = event.ts
             handler = self._handlers.get(event.type)
             if handler:
                 handler(self, event.data)
@@ -98,6 +106,7 @@ class PipelineState:
         with self._lock:
             for event in event_log.replay():
                 self.version = event.version
+                self._event_ts = event.ts
                 handler = self._handlers.get(event.type)
                 if handler:
                     handler(self, event.data)
@@ -116,6 +125,7 @@ class PipelineState:
                 "summarize_filter": dict(self.summarize_filter),
                 "total_input_reads": self.total_input_reads,
                 "total_matched_reads": self.total_matched_reads,
+                "demux_history": [dict(h) for h in self.demux_history],
                 "specimens": {
                     sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
                 },
@@ -178,6 +188,20 @@ class PipelineState:
         # Recompute matched reads from specimen totals (scan_specimen_reads
         # returns cumulative counts, so accumulating would double-count)
         self.total_matched_reads = sum(s.total_reads for s in self.specimens.values())
+
+        # Forecast history snapshot (successful demux runs only)
+        if data.get("exit_code") == 0 and data.get("matched_reads", 0) > 0:
+            self.demux_history.append({
+                "ts": self._event_ts,
+                "input_cum": self.total_input_reads,
+                "matched_cum": data["matched_reads"],
+                "counts": dict(specimens),
+            })
+            if len(self.demux_history) > self._DEMUX_HISTORY_MAX:
+                # Halve by dropping every second entry, always keeping the last
+                self.demux_history = (
+                    self.demux_history[:-1:2] + [self.demux_history[-1]]
+                )
 
     def _on_specimen_updated(self, data: dict):
         spec = self.get_specimen(data["specimen_id"])

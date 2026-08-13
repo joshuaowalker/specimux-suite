@@ -169,6 +169,21 @@ The built-in dashboard provides a real-time view of pipeline progress, streamed 
 - Per-variant identification, read count, and sequence length
 - Identification results shown only after variant-level identification completes
 
+### Forecast tab
+
+A live stop estimator for the sequencing operator (live mode, after at least two
+files have been demultiplexed). From the per-file demultiplex history it estimates
+each specimen's read-accumulation rate on the cumulative-matched-reads clock and
+projects when below-threshold specimens will cross — with 90% intervals — plus:
+
+- A headline: how many specimens are over threshold, how many more are projected
+  to cross within the next hour, and how many will likely never make it
+- Threshold sensitivity (≥10 / min_reads / ≥100), since downstream verification
+  often succeeds well below `min_reads`
+- The specimens-over-threshold accumulation curve for the run so far
+- A rate-drift self-check that flags when the forecast's stationarity assumption
+  looks shaky for the current run
+
 ### Watch feature
 
 Click the star on any specimen row to boost its scheduling priority. Watched specimens are processed ahead of all others in live mode.

@@ -314,3 +314,47 @@ def test_file_processed_requires_demux(tmp_output):
     state = PipelineState()
     state.rebuild(log)
     assert state.files["/w/a.fastq"].processed
+
+
+def test_demux_history_snapshots(tmp_output):
+    """Successful demux runs append forecast snapshots with the event ts;
+    failed runs don't; to_dict carries the history for the dashboard bootstrap."""
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("specimux.completed", {
+        "job_id": "j1", "exit_code": 0, "input_reads": 5000,
+        "matched_reads": 2700, "specimens": {"A": 2000, "B": 700},
+    })
+    log.emit("specimux.completed", {  # failed run — no snapshot
+        "job_id": "j2", "exit_code": 1, "specimens": {},
+    })
+    log.emit("specimux.completed", {
+        "job_id": "j3", "exit_code": 0, "input_reads": 5000,
+        "matched_reads": 5600, "specimens": {"A": 4100, "B": 1500},
+    })
+
+    state = PipelineState()
+    state.rebuild(log)
+    h = state.demux_history
+    assert len(h) == 2
+    assert h[0]["matched_cum"] == 2700 and h[1]["matched_cum"] == 5600
+    assert h[1]["input_cum"] == 10000
+    assert h[0]["counts"] == {"A": 2000, "B": 700}
+    assert h[0]["ts"]  # event timestamp captured
+    assert state.to_dict()["demux_history"][1]["counts"]["A"] == 4100
+
+
+def test_demux_history_decimation(tmp_output):
+    """History is halved beyond the cap, always keeping the newest entry."""
+    log = EventLog(tmp_output / "events.jsonl")
+    n = PipelineState._DEMUX_HISTORY_MAX + 1
+    for i in range(1, n + 1):
+        log.emit("specimux.completed", {
+            "job_id": f"j{i}", "exit_code": 0, "input_reads": 10,
+            "matched_reads": i, "specimens": {"A": i},
+        })
+    state = PipelineState()
+    state.rebuild(log)
+    h = state.demux_history
+    assert len(h) <= PipelineState._DEMUX_HISTORY_MAX
+    assert h[-1]["matched_cum"] == n  # newest always retained
+    assert h[0]["matched_cum"] == 1
