@@ -15,7 +15,7 @@ from .events import EventLog
 from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
 from .inat import extract_inat_ids, fetch_community_taxa
-from .util import parse_specimens_file
+from .util import clone_or_copy, parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
 from .runners.speconsense_runner import SpeconsenseRunner
 from .runners.identify_runner import IdentifyRunner
@@ -362,46 +362,13 @@ class Pipeline:
         return any(not f.stable for f in self.state.files.values())
 
     def _drain_file_queue(self) -> None:
-        """Process all queued stable files without scheduling consensus afterward."""
-        files: list[Path] = []
-        while True:
-            try:
-                files.append(self._file_queue.get_nowait())
-            except queue.Empty:
-                break
+        """Process all queued stable files without scheduling consensus afterward.
 
-        if not files:
-            return
-
-        logger.info(f"Draining {len(files)} stable file(s): {', '.join(f.name for f in files)}")
-
-        self._draining = True
-
-        if self._futures:
-            logger.info(f"Draining {len(self._futures)} in-flight jobs before specimux")
-            self._wait_all_futures()
-
-        for file_path in files:
-            if self._shutdown.is_set():
-                logger.info("Shutdown requested; remaining file(s) will be picked up on restart")
-                break
-            logger.info(f"Running specimux on {file_path.name}")
-            self._run_specimux_file(file_path)
-
-        self._draining = False
-
-    def _drain_all_files(self) -> None:
-        """Drain queued files and wait for any settling files to stabilize."""
-        self._drain_file_queue()
-        if self._has_unsettled_files():
-            wait = self.config.settle_time + 5
-            logger.info(f"Waiting up to {wait}s for {sum(1 for f in self.state.files.values() if not f.stable)} settling file(s)")
-            self._shutdown.wait(timeout=wait)
-            self._drain_file_queue()
-
-    def _process_stable_files(self) -> None:
-        """Process all queued stable files back-to-back with a single drain cycle."""
-        # Collect all ready files
+        In-flight consensus jobs read copy-on-write snapshots of their input,
+        so specimux can append to the live per-specimen FASTQs while they run
+        — no need to wait for them. _draining only pauses NEW submissions so
+        snapshots are never taken while specimux is appending.
+        """
         files: list[Path] = []
         while True:
             try:
@@ -414,31 +381,34 @@ class Pipeline:
 
         logger.info(f"Processing {len(files)} stable file(s): {', '.join(f.name for f in files)}")
 
-        # 1. Stop scheduling new consensus jobs
         self._draining = True
-
-        # 2. Drain in-flight jobs once (not per-file)
-        drained_sids = []
-        if self._futures:
-            logger.info(f"Draining {len(self._futures)} in-flight jobs before specimux")
-            drained_sids = self._wait_all_futures()
-
-        # 3. Run specimux on each file back-to-back
         for file_path in files:
             if self._shutdown.is_set():
                 logger.info("Shutdown requested; remaining file(s) will be picked up on restart")
                 break
-            logger.info(f"Running specimux on {file_path.name}")
-            self._run_specimux_file(file_path)
-
-        # 4. Resume scheduling
+            threads = max(1, self.config.workers - len(self._futures))
+            logger.info(f"Running specimux on {file_path.name} ({threads} threads)")
+            self._run_specimux_file(file_path, threads=threads)
         self._draining = False
 
-        # 5. Trigger identification for consensus jobs that completed during drain
-        if self.identify and drained_sids:
-            for sid in drained_sids:
-                self._submit_identification(sid, deferred=True)
+    def _drain_all_files(self) -> None:
+        """Drain queued files and wait for any settling files to stabilize."""
+        self._drain_file_queue()
+        if self._has_unsettled_files():
+            wait = self.config.settle_time + 5
+            logger.info(f"Waiting up to {wait}s for {sum(1 for f in self.state.files.values() if not f.stable)} settling file(s)")
+            self._shutdown.wait(timeout=wait)
+            self._drain_file_queue()
 
+    def _process_stable_files(self) -> None:
+        """Demux all queued stable files, then schedule any newly-ready work.
+
+        In-flight consensus jobs keep running throughout: they read snapshots
+        taken at submission time, so specimux appending to the live specimen
+        FASTQs cannot race them. Consensus jobs that complete during demux
+        get their identification from the next _check_completed_futures tick.
+        """
+        self._drain_file_queue()
         self._schedule_consensus()
 
     def _run_finalization(self) -> None:
@@ -586,15 +556,32 @@ class Pipeline:
             logger.warning(f"No FASTQ found for specimen {specimen_id}")
             return
 
+        # Snapshot the input (copy-on-write where the filesystem supports it)
+        # so specimux can append to the live file while this job runs. All
+        # snapshots are taken on the orchestrator thread — the same thread
+        # that runs specimux — so a snapshot never captures a half-written
+        # record. The file must keep the specimen's name: speconsense derives
+        # its output naming from the input file stem.
+        snapshot = self.config.output_dir / "snapshots" / f"{specimen_id}.fastq"
+        try:
+            clone_or_copy(specimen_fastq, snapshot)
+        except OSError as e:
+            logger.warning(f"Snapshot failed for {specimen_id}, using live file: {e}")
+            snapshot = specimen_fastq
+
         logger.info(f"Submitting consensus job for {specimen_id} ({spec.total_reads} reads)")
-        future = self._executor.submit(self._run_consensus_job, specimen_id, specimen_fastq, presample)
+        future = self._executor.submit(self._run_consensus_job, specimen_id, snapshot, presample)
         self._futures[specimen_id] = future
 
     def _run_consensus_job(self, specimen_id: str, specimen_fastq: Path, presample: int = 0) -> list[dict]:
         """Run consensus for a single specimen (executed in thread pool)."""
-        return self.speconsense.run(specimen_id, specimen_fastq, presample=presample)
+        try:
+            return self.speconsense.run(specimen_id, specimen_fastq, presample=presample)
+        finally:
+            if specimen_fastq.parent.name == "snapshots":
+                specimen_fastq.unlink(missing_ok=True)
 
-    def _submit_identification(self, specimen_id: str, deferred: bool = False) -> None:
+    def _submit_identification(self, specimen_id: str) -> None:
         """Submit identification for a specimen if it has clusters."""
         if specimen_id in self._id_futures:
             return
@@ -604,8 +591,7 @@ class Pipeline:
         consensus_fasta = self.speconsense.get_consensus_fasta(specimen_id)
         if not consensus_fasta:
             return
-        label = f" (deferred from drain)" if deferred else ""
-        logger.info(f"Identifying {specimen_id}{label}")
+        logger.info(f"Identifying {specimen_id}")
         future = self._executor.submit(
             self.identify.run, specimen_id, consensus_fasta,
             consensus_version=spec.consensus_version,
@@ -811,43 +797,6 @@ class Pipeline:
                         "specimen_id": sid,
                         "message": str(e),
                     })
-
-    def _wait_all_futures(self) -> list[str]:
-        """Wait for all pending futures, staying responsive to console commands.
-
-        Returns list of specimen IDs whose consensus completed successfully.
-        Returns early on shutdown (callers must not run specimux in that case);
-        unfinished futures stay in _futures so they cannot be double-submitted.
-        """
-        from concurrent.futures import wait
-        deadline = time.monotonic() + self.config.job_timeout + 60
-        while self._futures and not self._shutdown.is_set():
-            _done, not_done = wait(list(self._futures.values()), timeout=self._TICK)
-            self._drain_cmd_queue()
-            if not not_done:
-                break
-            if time.monotonic() > deadline:
-                logger.error(
-                    f"Jobs did not finish within the backstop window: "
-                    f"{', '.join(sid for sid, f in self._futures.items() if not f.done())}"
-                )
-                break
-        completed = []
-        for sid, fut in list(self._futures.items()):
-            if not fut.done():
-                continue
-            del self._futures[sid]
-            try:
-                fut.result()
-                completed.append(sid)
-            except Exception as e:
-                logger.error(f"Job failed for {sid}: {e}")
-                self.event_log.emit("pipeline.error", {
-                    "component": "pipeline",
-                    "specimen_id": sid,
-                    "message": str(e),
-                })
-        return completed
 
     def _check_completed_futures(self) -> None:
         """Check for completed futures and trigger identification."""

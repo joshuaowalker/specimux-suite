@@ -28,7 +28,7 @@ watcher (live) or CLI (batch)
                 → web dashboard (SSE-streamed events)
 ```
 
-**Batch vs live:** Batch runs specimux once on a single FASTQ, then consensus with interleaved identification, then summarization with interleaved variant identification. Live mode watches a directory for new FASTQs; when one stabilizes, it *drains* all in-flight consensus jobs, runs specimux with all cores, then resumes scheduling. This drain-run-resume pattern is central to live mode correctness. Ctrl+C triggers finalization: drain remaining files, process all eligible specimens (ignoring reprocess_ratio), run summarization, and exit.
+**Batch vs live:** Batch runs specimux once on a single FASTQ, then consensus with interleaved identification, then summarization with interleaved variant identification. Live mode watches a directory for new FASTQs; when one stabilizes, specimux runs immediately while in-flight consensus jobs continue — consensus jobs read copy-on-write snapshots (`output_dir/snapshots/`, via `clone_or_copy`) taken at submission time on the orchestrator thread, so specimux appending to live per-specimen FASTQs can never race them. New consensus submissions (and thus snapshots) pause during demux (`_draining`). Ctrl+C triggers finalization: drain remaining files, process all eligible specimens (ignoring reprocess_ratio), run summarization, and exit; a second Ctrl+C aborts.
 
 **Runners** are subprocess wrappers that follow a consistent pattern: emit `*.started` event → run external tool → parse output → emit `*.completed` event. All bioinformatics tools (specimux, speconsense, speconsense-summarize, vsearch) are invoked as subprocesses.
 

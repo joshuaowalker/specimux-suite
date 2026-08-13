@@ -202,28 +202,6 @@ def test_quit_is_responsive_during_long_job(tmp_path):
     pipeline._executor.shutdown(wait=True)
 
 
-def test_wait_all_futures_returns_early_on_quit(tmp_path):
-    """Drain-before-specimux must abort promptly when quit is pressed."""
-    import time
-
-    pipeline = _quiet_pipeline(tmp_path)
-    stop = __import__("threading").Event()
-    pipeline._futures["slow_specimen"] = pipeline._executor.submit(stop.wait, 30)
-
-    pipeline.cmd_queue.put("quit")
-    start = time.monotonic()
-    completed = pipeline._wait_all_futures()
-    elapsed = time.monotonic() - start
-
-    assert pipeline._shutdown.is_set()
-    assert elapsed < 5
-    assert completed == []
-    # Unfinished job stays tracked so it cannot be double-submitted
-    assert "slow_specimen" in pipeline._futures
-    stop.set()
-    pipeline._executor.shutdown(wait=True)
-
-
 def test_summarize_round_skipped_after_quit(tmp_path):
     """After quit, no summarize work (including aggregate) should start."""
     pipeline = _quiet_pipeline(tmp_path)
@@ -324,4 +302,68 @@ def test_quit_acknowledged_during_specimux(tmp_path):
 
     assert ack_delay is not None and ack_delay < 1.5  # acknowledged mid-demux
     pipeline.specimux.run.assert_called_once()  # demux itself not interrupted
+    pipeline._executor.shutdown(wait=True)
+
+
+def test_demux_does_not_wait_for_inflight_consensus(tmp_path):
+    """Regression for the stop-the-world drain: a stable file must be demuxed
+    immediately even while a consensus job is still running."""
+    import threading
+    import time
+
+    pipeline = _quiet_pipeline(tmp_path)
+    stop = threading.Event()
+    pipeline._futures["slow_specimen"] = pipeline._executor.submit(stop.wait, 30)
+
+    pipeline.specimux = MagicMock()
+    pipeline.specimux.run.return_value = {}
+    pipeline._file_queue.put(tmp_path / "new_chunk.fastq")
+
+    start = time.monotonic()
+    pipeline._process_stable_files()
+    elapsed = time.monotonic() - start
+
+    pipeline.specimux.run.assert_called_once()
+    assert elapsed < 5  # did not wait out the 30s consensus job
+    # Demux got fewer threads because a consensus job holds a slot
+    _, kwargs = pipeline.specimux.run.call_args
+    assert kwargs["threads"] == max(1, pipeline.config.workers - 1)
+
+    stop.set()
+    pipeline._executor.shutdown(wait=True)
+
+
+def test_consensus_reads_snapshot_not_live_file(tmp_path):
+    """Consensus jobs must read a snapshot so specimux can append concurrently;
+    the snapshot is removed once the job finishes."""
+    config = _make_config(tmp_path)
+    (tmp_path / "reads.fastq").write_text("@r1\nACGT\n+\nIIII\n")
+
+    # Live specimen FASTQ in specimux output layout
+    pool_dir = config.specimux_output_dir / "full" / "ITS"
+    pool_dir.mkdir(parents=True)
+    live = pool_dir / "specimen_A.fastq"
+    live.write_text("@r1\nACGT\n+\nIIII\n")
+
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+
+    pipeline.state.get_specimen("specimen_A").pool = "ITS"
+    seen = {}
+
+    def fake_speconsense(sid, fastq, presample=0):
+        seen["path"] = Path(str(fastq))
+        seen["content"] = fastq.read_text()
+        return []
+    pipeline.speconsense = MagicMock()
+    pipeline.speconsense.run.side_effect = fake_speconsense
+
+    pipeline._submit_consensus("specimen_A")
+    pipeline._futures["specimen_A"].result(timeout=10)
+
+    assert seen["path"].parent.name == "snapshots"
+    assert seen["path"].name == "specimen_A.fastq"  # stem drives speconsense naming
+    assert seen["content"] == live.read_text()
+    assert not seen["path"].exists()  # cleaned up after the job
     pipeline._executor.shutdown(wait=True)

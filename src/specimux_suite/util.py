@@ -1,7 +1,13 @@
 """Shared helpers: FASTQ read counting, file utilities."""
 
+import logging
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def count_fastq_reads(path: Path) -> int:
@@ -85,3 +91,29 @@ def atomic_write(path: Path, content: bytes) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(content)
     os.replace(tmp, path)
+
+
+def clone_or_copy(src: Path, dst: Path) -> None:
+    """Copy src to dst, using filesystem cloning (copy-on-write) when available.
+
+    On APFS (macOS) and reflink-capable Linux filesystems (btrfs, XFS) the
+    clone is O(1) regardless of file size; elsewhere this degrades to a
+    regular copy. Any existing dst is replaced.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.unlink(missing_ok=True)
+
+    if sys.platform == "darwin":
+        cmd = ["cp", "-c", str(src), str(dst)]
+    elif sys.platform.startswith("linux"):
+        cmd = ["cp", "--reflink=auto", str(src), str(dst)]
+    else:
+        cmd = None
+
+    if cmd is not None:
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode == 0:
+            return
+        logger.debug(f"clone copy failed ({result.stderr!r}), falling back to plain copy")
+
+    shutil.copy2(src, dst)

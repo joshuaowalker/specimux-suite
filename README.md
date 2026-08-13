@@ -145,9 +145,9 @@ The scheduler uses two-tier prioritization:
 
 In live mode, watched specimens (starred in the dashboard) receive a priority boost and are processed first.
 
-### Live mode drain pattern
+### Live mode concurrency
 
-When a new FASTQ file stabilizes during live mode, the pipeline drains all in-flight consensus jobs, runs specimux with all available cores on the new data, then resumes scheduling. This ensures demultiplexing has full CPU access and read counts are up to date before scheduling the next round.
+Consensus jobs read copy-on-write snapshots of their input FASTQs (instant on APFS/btrfs/XFS, a plain copy elsewhere), so when a new FASTQ file stabilizes, specimux demultiplexes it immediately — appending to the live per-specimen files while in-flight consensus jobs keep running on their snapshots. Demultiplexing uses whatever worker threads aren't occupied by consensus jobs, and newly-ready specimens are scheduled as soon as it finishes.
 
 ## Web dashboard
 
