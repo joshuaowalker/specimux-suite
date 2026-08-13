@@ -1,6 +1,7 @@
 """Identification runner: vsearch + adjusted-identity scoring."""
 
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -93,7 +94,7 @@ class IdentifyRunner:
     def run(self, specimen_id: str, consensus_fasta: Path,
             consensus_version: int | None = None,
             output_name: str | None = None) -> list[dict]:
-        """Identify consensus clusters against reference DB.
+        """Identify one specimen's consensus clusters against the reference DB.
 
         Args:
             consensus_version: The specimen's consensus generation these
@@ -105,27 +106,89 @@ class IdentifyRunner:
 
         Returns list of {cluster, top_hits: [{ref_id, name, identity, adjusted_identity}]}
         """
+        results = self._identify_many(
+            [(specimen_id, consensus_fasta, consensus_version, output_name or specimen_id)]
+        )
+        return results.get(specimen_id, [])
+
+    def run_group(self, requests: list[tuple[str, Path, int | None]]) -> dict[str, list[dict]]:
+        """Identify several specimens with a single vsearch invocation.
+
+        Amortizes the reference-DB (UDB) load cost, which dominates when
+        queries are only a handful of sequences. Emits one
+        identification.completed event per specimen, exactly as run() does.
+
+        Args:
+            requests: (specimen_id, consensus_fasta, consensus_version) tuples.
+
+        Returns {specimen_id: matches}.
+        """
+        return self._identify_many([(sid, fasta, cv, sid) for sid, fasta, cv in requests])
+
+    def _identify_many(
+        self, requests: list[tuple[str, Path, int | None, str]]
+    ) -> dict[str, list[dict]]:
+        """Shared implementation: one vsearch call, per-specimen scoring/events."""
+        if not requests:
+            return {}
         if not self._udb_path:
             if not self.ensure_db():
-                return []
+                return {}
 
-        # Step 1: vsearch search
-        vsearch_hits = self._run_vsearch(consensus_fasta)
+        # Map each query sequence name to its specimen. Cluster names are
+        # specimen-prefixed and thus unique across a batch.
+        query_to_sid: dict[str, str] = {}
+        for sid, fasta, _cv, _name in requests:
+            for query_name in _read_fasta(fasta):
+                query_to_sid[query_name] = sid
 
-        # Step 2: adjusted-identity scoring for candidates
-        matches = self._score_hits(consensus_fasta, vsearch_hits)
+        # Single request queries its own file; larger batches get a combined
+        # temp file so vsearch loads the reference DB once.
+        combined: Path | None = None
+        if len(requests) == 1:
+            query_fasta = requests[0][1]
+            threads = 1
+        else:
+            out_dir = self.config.identification_output_dir
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                suffix=".fasta", prefix="_batch-", dir=out_dir)
+            combined = Path(tmp_name)
+            with os.fdopen(fd, "w") as out:
+                for _sid, fasta, _cv, _name in requests:
+                    out.write(fasta.read_text())
+                    out.write("\n")
+            query_fasta = combined
+            threads = max(1, self.config.workers // 2)
 
-        self._write_tsv(output_name or specimen_id, matches)
+        try:
+            all_hits = self._run_vsearch(query_fasta, threads=threads)
+        finally:
+            if combined is not None:
+                combined.unlink(missing_ok=True)
 
-        event_data = {
-            "specimen_id": specimen_id,
-            "matches": matches,
-        }
-        if consensus_version is not None:
-            event_data["consensus_version"] = consensus_version
-        self.event_log.emit("identification.completed", event_data)
+        # Group hits per specimen, then score each against its own FASTA
+        hits_by_sid: dict[str, dict[str, list[dict]]] = {}
+        for query_name, hits in all_hits.items():
+            sid = query_to_sid.get(query_name)
+            if sid is not None:
+                hits_by_sid.setdefault(sid, {})[query_name] = hits
 
-        return matches
+        results: dict[str, list[dict]] = {}
+        for sid, fasta, consensus_version, output_name in requests:
+            matches = self._score_hits(fasta, hits_by_sid.get(sid, {}))
+            self._write_tsv(output_name, matches)
+
+            event_data = {
+                "specimen_id": sid,
+                "matches": matches,
+            }
+            if consensus_version is not None:
+                event_data["consensus_version"] = consensus_version
+            self.event_log.emit("identification.completed", event_data)
+            results[sid] = matches
+
+        return results
 
     def _write_tsv(self, name: str, matches: list[dict]) -> None:
         """Write per-specimen identification results to identification/{name}.tsv."""
@@ -146,7 +209,7 @@ class IdentifyRunner:
         except OSError as e:
             logger.warning(f"Could not write identification TSV for {name}: {e}")
 
-    def _run_vsearch(self, query_fasta: Path) -> dict[str, list[dict]]:
+    def _run_vsearch(self, query_fasta: Path, threads: int = 1) -> dict[str, list[dict]]:
         """Run vsearch --usearch_global, return hits grouped by query."""
         db = self._udb_path or self.config.reference_db
         cmd = [
@@ -157,7 +220,7 @@ class IdentifyRunner:
             "--userfields", "query+target+id+alnlen+qcov",
             "--id", str(self.config.vsearch_min_identity),
             "--maxaccepts", str(self.config.vsearch_max_accepts),
-            "--threads", "1",
+            "--threads", str(threads),
             "--output_no_hits",
         ]
 

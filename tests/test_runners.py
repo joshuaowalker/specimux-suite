@@ -338,3 +338,61 @@ def test_scan_specimen_reads_incremental_cache(tmp_path):
 
     # No-cache call still works and matches
     assert scan_specimen_reads(tmp_path / "specimux")["spec_A"]["reads"] == 1
+
+
+def test_run_group_single_vsearch_per_batch(tmp_path, monkeypatch):
+    """run_group must serve multiple specimens from one vsearch call, emitting
+    correctly-versioned per-specimen events and TSVs."""
+    import os
+    import stat
+    from specimux_suite.runners.identify_runner import IdentifyRunner
+    from specimux_suite.state import PipelineState
+
+    # Fake vsearch: counts invocations, emits fixed hits for both queries
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    counter = tmp_path / "calls.txt"
+    fake_tool = fake_bin / "vsearch"
+    fake_tool.write_text(
+        "#!/bin/sh\n"
+        f"echo x >> {counter}\n"
+        'case "$*" in\n'
+        "  *--usearch_global*)\n"
+        "    printf 'specA-c0\\tref_X\\t97.0\\t8\\t95.0\\n'\n"
+        "    printf 'specB-c0\\tref_Y\\t99.0\\t8\\t96.0\\n'\n"
+        "    ;;\n"
+        "esac\n"
+    )
+    fake_tool.chmod(fake_tool.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    ref = tmp_path / "refs.fasta"
+    ref.write_text('>ref_X name="Species X"\nACGTACGT\n>ref_Y name="Species Y"\nTTTTCCCC\n')
+    fasta_a = tmp_path / "specA.fasta"
+    fasta_a.write_text(">specA-c0 size=50\nACGTACGT\n")
+    fasta_b = tmp_path / "specB.fasta"
+    fasta_b.write_text(">specB-c0 size=40\nTTTTCCCC\n")
+
+    config = _make_config(tmp_path, reference_db=ref)
+    log = EventLog(tmp_path / "events.jsonl")
+    runner = IdentifyRunner(config, log)
+
+    results = runner.run_group([("specA", fasta_a, 3), ("specB", fasta_b, 7)])
+
+    assert set(results) == {"specA", "specB"}
+    assert results["specA"][0]["cluster"] == "specA-c0"
+    assert results["specA"][0]["top_hits"][0]["ref_id"] == "ref_X"
+    assert results["specA"][0]["top_hits"][0]["name"] == "Species X"
+    assert results["specB"][0]["top_hits"][0]["ref_id"] == "ref_Y"
+
+    # One UDB build + one search — not one search per specimen
+    assert len(counter.read_text().splitlines()) == 2
+
+    events = [e for e in log.replay() if e.type == "identification.completed"]
+    versions = {e.data["specimen_id"]: e.data["consensus_version"] for e in events}
+    assert versions == {"specA": 3, "specB": 7}
+
+    assert (config.identification_output_dir / "specA.tsv").exists()
+    assert (config.identification_output_dir / "specB.tsv").exists()
+    # Combined temp file cleaned up
+    assert not list(config.identification_output_dir.glob("_batch-*"))

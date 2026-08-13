@@ -54,6 +54,19 @@ class Pipeline:
         self._executor = ThreadPoolExecutor(max_workers=config.workers)
         self._futures: dict[str, Future] = {}
         self._id_futures: dict[str, Future] = {}  # in-flight identification jobs
+
+        # Cluster identifications are micro-batched: requests are collected
+        # for a short window and served by a single vsearch call, amortizing
+        # the reference-DB load cost (which dominates for few-query calls).
+        self._id_requests: queue.Queue = queue.Queue()
+        self._id_batcher_stop = threading.Event()
+        self._id_batcher_thread: threading.Thread | None = None
+        if self.identify:
+            self._id_batcher_thread = threading.Thread(
+                target=self._identification_batcher,
+                name="identify-batcher", daemon=True,
+            )
+            self._id_batcher_thread.start()
         self._shutdown = threading.Event()
         self._draining = False  # True while waiting for specimux to run
         self.cmd_queue: queue.Queue = queue.Queue()
@@ -305,6 +318,20 @@ class Pipeline:
         if running:
             logger.info(f"Waiting for {running} in-flight job(s) to finish; queued jobs cancelled")
         self._executor.shutdown(wait=True, cancel_futures=True)
+
+        # Stop the identification batcher: cancel queued requests, then wait
+        # for any batch already running (its vsearch child should not be
+        # orphaned past process exit).
+        self._id_batcher_stop.set()
+        while True:
+            try:
+                _sid, _fasta, _cv, fut = self._id_requests.get_nowait()
+            except queue.Empty:
+                break
+            fut.cancel()
+        if self._id_batcher_thread is not None:
+            self._id_batcher_thread.join(timeout=self.config.job_timeout)
+            self._id_batcher_thread = None
 
     def _drain_cmd_queue(self) -> None:
         """Process pending commands from the console UI.
@@ -582,8 +609,12 @@ class Pipeline:
                 specimen_fastq.unlink(missing_ok=True)
 
     def _submit_identification(self, specimen_id: str) -> None:
-        """Submit identification for a specimen if it has clusters."""
-        if specimen_id in self._id_futures:
+        """Queue identification for a specimen if it has clusters.
+
+        Requests go to the micro-batching thread; the returned future
+        resolves when its batch's vsearch call completes.
+        """
+        if self.identify is None or specimen_id in self._id_futures:
             return
         spec = self.state.get_specimen(specimen_id)
         if not spec or not spec.clusters:
@@ -591,19 +622,61 @@ class Pipeline:
         consensus_fasta = self.speconsense.get_consensus_fasta(specimen_id)
         if not consensus_fasta:
             return
-        logger.info(f"Identifying {specimen_id}")
-        future = self._executor.submit(
-            self.identify.run, specimen_id, consensus_fasta,
-            consensus_version=spec.consensus_version,
-        )
+        logger.info(f"Queueing identification for {specimen_id}")
+        future: Future = Future()
         self._id_futures[specimen_id] = future
         future.add_done_callback(
             lambda fut, sid=specimen_id: self._on_identification_done(sid, fut)
         )
+        self._id_requests.put(
+            (specimen_id, consensus_fasta, spec.consensus_version, future)
+        )
+
+    # Collection window and size cap for one identification batch.
+    _ID_BATCH_WINDOW = 1.0
+    _ID_BATCH_MAX = 32
+
+    def _identification_batcher(self) -> None:
+        """Collect identification requests briefly, serve each batch with one
+        vsearch call (runs on a dedicated daemon thread)."""
+        while not self._id_batcher_stop.is_set():
+            try:
+                first = self._id_requests.get(timeout=self._TICK)
+            except queue.Empty:
+                continue
+
+            batch = [first]
+            deadline = time.monotonic() + self._ID_BATCH_WINDOW
+            while len(batch) < self._ID_BATCH_MAX:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    batch.append(self._id_requests.get(timeout=min(remaining, 0.1)))
+                except queue.Empty:
+                    continue
+
+            live = [r for r in batch if r[3].set_running_or_notify_cancel()]
+            if not live:
+                continue
+            if len(live) > 1:
+                logger.info(f"Identifying batch of {len(live)} specimens")
+            try:
+                results = self.identify.run_group(
+                    [(sid, fasta, cv) for sid, fasta, cv, _fut in live]
+                )
+                for sid, _fasta, _cv, fut in live:
+                    fut.set_result(results.get(sid, []))
+            except Exception as e:
+                for _sid, _fasta, _cv, fut in live:
+                    if not fut.done():
+                        fut.set_exception(e)
 
     def _on_identification_done(self, specimen_id: str, fut: Future) -> None:
         """Reap a finished identification future and surface any error."""
         self._id_futures.pop(specimen_id, None)
+        if fut.cancelled():
+            return
         exc = fut.exception()
         if exc is not None:
             logger.error(f"Identification failed for {specimen_id}: {exc}")

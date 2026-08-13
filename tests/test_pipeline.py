@@ -367,3 +367,47 @@ def test_consensus_reads_snapshot_not_live_file(tmp_path):
     assert seen["content"] == live.read_text()
     assert not seen["path"].exists()  # cleaned up after the job
     pipeline._executor.shutdown(wait=True)
+
+
+def test_identifications_are_micro_batched(tmp_path):
+    """Two identification requests inside the batch window must be served by a
+    single run_group call, and both futures must resolve."""
+    from concurrent.futures import wait as fwait
+
+    config = _make_config(tmp_path, reference_db=tmp_path / "refs.fasta")
+    (tmp_path / "refs.fasta").write_text(">r1\nACGT\n")
+    (tmp_path / "reads.fastq").write_text("@r1\nACGT\n+\nIIII\n")
+
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+
+    for sid in ("specimen_A", "specimen_B"):
+        pipeline.event_log.emit("consensus.completed", {
+            "specimen_id": sid, "job_id": "c1",
+            "clusters": [{"name": f"{sid}-c0", "size": 50}],
+        })
+
+    fasta = tmp_path / "cons.fasta"
+    fasta.write_text(">x\nACGT\n")
+    pipeline.speconsense = MagicMock()
+    pipeline.speconsense.get_consensus_fasta.return_value = fasta
+
+    pipeline.identify = MagicMock()
+    pipeline.identify.run_group.side_effect = lambda reqs: {sid: [] for sid, *_ in reqs}
+
+    pipeline._submit_identification("specimen_A")
+    pipeline._submit_identification("specimen_B")
+    futures = list(pipeline._id_futures.values())
+    assert len(futures) == 2
+
+    done, not_done = fwait(futures, timeout=10)
+    assert not not_done
+
+    pipeline.identify.run_group.assert_called_once()
+    batched_sids = {r[0] for r in pipeline.identify.run_group.call_args[0][0]}
+    assert batched_sids == {"specimen_A", "specimen_B"}
+    assert [r[2] for r in pipeline.identify.run_group.call_args[0][0]] == [1, 1]
+    assert not pipeline._id_futures  # reaped by done callbacks
+
+    pipeline._shutdown_executor()
