@@ -960,23 +960,30 @@ function computeForecast() {
   const dtMs = (Date.parse(b.ts) - Date.parse(a.ts)) / k;
   const matchedPerHour = dtMs > 0 ? matchedPerFile * 3600000 / dtMs : null;
 
-  // Per-specimen forecasts against each threshold
+  // Near-term horizon in matched reads: one hour of wall time when the
+  // event timestamps give us a rate, otherwise ten files' worth.
+  const horizon = matchedPerHour != null ? matchedPerHour : matchedPerFile * 10;
+  const horizonLabel = matchedPerHour != null ? 'the next hour' : 'the next 10 files';
+
+  // Per-specimen forecasts against each threshold. Buckets PARTITION the
+  // specimen set (each specimen lands in exactly one, using the expected
+  // crossing point throughout), so counts always sum to the total —
+  // interval bounds appear only in the per-specimen range column.
   const thresholds = [10, minReads, 100].filter((t, i, arr) => arr.indexOf(t) === i).sort((x, y) => x - y);
   const specs = Object.values(state.specimens);
   const perT = {};
   for (const T of thresholds) {
-    let over = 0, withinHour = 0, eventually = 0, unlikely = 0, noReads = 0;
+    let over = 0, nearTerm = 0, later = 0, unlikely = 0, noReads = 0;
     for (const s of specs) {
       const n = s.total_reads || 0;
       if (n >= T) { over++; continue; }
-      if (n === 0) { noReads++; unlikely++; continue; }
+      if (n === 0) { noReads++; continue; }
       const dM = (T - n) * M / n; // expected additional matched reads
-      const dMlo = (T - n) * M / poissonHi(n); // optimistic
-      if (matchedPerHour != null && dMlo <= matchedPerHour) withinHour++;
-      if (dM <= M) eventually++; // within doubling the run
+      if (dM <= horizon) nearTerm++;
+      else if (dM <= M) later++; // within doubling the run
       else unlikely++;
     }
-    perT[T] = { over, withinHour, eventually, unlikely, noReads };
+    perT[T] = { over, nearTerm, later, unlikely, noReads };
   }
 
   // Below-min_reads specimen rows, nearest crossing first
@@ -1014,8 +1021,8 @@ function computeForecast() {
     }
   }
 
-  return { M, matchedPerFile, matchedPerHour, dtMs, thresholds, perT, rows, drift,
-           nFiles: hist.length, specs };
+  return { M, matchedPerFile, matchedPerHour, horizon, horizonLabel,
+           dtMs, thresholds, perT, rows, drift, nFiles: hist.length, specs };
 }
 
 function fmtReads(v) {
@@ -1052,17 +1059,16 @@ function renderForecast() {
   const T = f.thresholds.includes(minReads) ? minReads : f.thresholds[1];
   const p = f.perT[T];
   const identified = f.specs.filter(s => getIdResult(s) === 'identified').length;
-  const hourTxt = f.matchedPerHour
-    ? `≈${fmtReads(f.matchedPerHour)} matched reads/hour → <b>${p.withinHour}</b> more projected to cross within the next hour`
-    : `<b>${p.withinHour}</b> more projected to cross soon`;
+  const rateTxt = f.matchedPerHour ? ` (≈${fmtReads(f.matchedPerHour)} matched reads/hour)` : '';
 
   let html = `
     <div class="forecast-headline">
       <b>${p.over}</b> of <b>${total}</b> specimens have ≥${T} reads
       (<b>${identified}</b> identified so far).
-      At current throughput, ${hourTxt};
-      <b>${p.unlikely - p.noReads}</b> below-threshold specimens are unlikely to ever cross
-      (need more than doubling the run), and <b>${p.noReads}</b> have no reads at all.
+      Of the remaining ${total - p.over}: <b>${p.nearTerm}</b> projected to cross within
+      ${f.horizonLabel} at current throughput${rateTxt}, <b>${p.later}</b> later
+      (within doubling the run), <b>${p.unlikely}</b> unlikely to ever cross,
+      and <b>${p.noReads}</b> with no reads at all.
     </div>
     <div class="forecast-badges">
       <span class="forecast-badge">${f.nFiles} files demuxed</span>
@@ -1074,17 +1080,19 @@ function renderForecast() {
         : ''}
     </div>`;
 
-  // Threshold sensitivity
+  // Threshold sensitivity — disjoint buckets, each row sums to the specimen total
   html += `<div class="forecast-section">Threshold sensitivity</div>
     <div class="forecast-note">How the stopping picture changes with the read bar — verification
-    has succeeded down to RiC 3–9, so the configured min_reads (${minReads}) is not the only bar worth watching.</div>
+    has succeeded down to RiC 3–9, so the configured min_reads (${minReads}) is not the only bar
+    worth watching. Each specimen appears in exactly one column; rows sum to ${total}.</div>
     <table class="forecast-table"><thead><tr>
-      <th>threshold</th><th>over now</th><th>projected +1h</th><th>within 2× run</th><th>unlikely ever</th>
+      <th>threshold</th><th>over now</th><th>crossing within ${f.horizonLabel}</th>
+      <th>later (≤2× run)</th><th>unlikely ever</th><th>no reads</th>
     </tr></thead><tbody>`;
   for (const t of f.thresholds) {
     const q = f.perT[t];
     html += `<tr><td>≥${t} reads${t === minReads ? ' (min_reads)' : ''}</td>
-      <td>${q.over}</td><td>+${q.withinHour}</td><td>+${q.eventually}</td><td>${q.unlikely}</td></tr>`;
+      <td>${q.over}</td><td>+${q.nearTerm}</td><td>+${q.later}</td><td>${q.unlikely}</td><td>${q.noReads}</td></tr>`;
   }
   html += `</tbody></table>`;
 
