@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 
@@ -174,11 +175,23 @@ def _read_single_fasta(path: Path) -> str | None:
     return "".join(seq_lines) if seq_lines else None
 
 
+# Specimen and sequence names as they appear in FASTA headers/filenames.
+# Path params are interpolated into filesystem globs/paths, so anything
+# else (separators, "..", null bytes, glob metacharacters) is rejected.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _is_safe_name(name: str) -> bool:
+    return bool(_SAFE_NAME_RE.match(name)) and ".." not in name
+
+
 @app.get("/api/sequence/{specimen_id}/{sequence_name}")
 async def get_sequence(specimen_id: str, sequence_name: str):
     """Return a nucleotide sequence from disk (summary or consensus FASTA)."""
     if _config is None:
         return JSONResponse(status_code=404, content={"error": "Config not initialized"})
+    if not _is_safe_name(specimen_id) or not _is_safe_name(sequence_name):
+        return JSONResponse(status_code=400, content={"error": "Invalid name"})
 
     # Try summary dir first: glob for {sequence_name}-RiC*.fasta
     summary_dir = _config.summarize_output_dir

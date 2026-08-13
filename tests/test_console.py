@@ -137,3 +137,17 @@ class TestKeyMapping:
     def test_batch_mode_ignores_f_key(self):
         q = self._run_key_reader("batch", b"f")
         assert q.empty()
+
+
+def test_web_safe_name_validation():
+    """Path params interpolated into globs must reject traversal/metacharacters."""
+    from specimux_suite.web.server import _is_safe_name
+
+    assert _is_safe_name("ONT01.01-A01--iNat233404001")
+    assert _is_safe_name("ONT01.01-A01--iNat233404001-1.v2")
+    assert not _is_safe_name("../etc/passwd")
+    assert not _is_safe_name("a/b")
+    assert not _is_safe_name(".hidden")
+    assert not _is_safe_name("a*")
+    assert not _is_safe_name("a..b")
+    assert not _is_safe_name("")

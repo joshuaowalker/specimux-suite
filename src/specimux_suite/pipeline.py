@@ -2,6 +2,7 @@
 
 import logging
 import queue
+import signal
 import sys
 import threading
 import time
@@ -58,6 +59,9 @@ class Pipeline:
         self.cmd_queue: queue.Queue = queue.Queue()
         self._file_queue: queue.Queue[Path] = queue.Queue()
         self._console: ConsoleUI | None = None
+        self._exit_after_finalize = False
+        self._sigint_count = 0
+        self._old_sigint = None
 
     def _load_specimens(self) -> None:
         """Parse the specimens file and emit specimens.loaded event."""
@@ -68,15 +72,22 @@ class Pipeline:
             })
             logger.info(f"Loaded {len(specimens)} specimens from index file")
 
-            # Fetch community taxon from iNaturalist asynchronously
+            # Fetch community taxon from iNaturalist asynchronously. Runs on
+            # a daemon thread, not the worker pool: a slow fetch must never
+            # hold a consensus slot or block executor shutdown on exit.
             inat_ids = extract_inat_ids(specimens)
             if inat_ids:
-                self._executor.submit(self._fetch_inat_taxa, inat_ids)
+                threading.Thread(
+                    target=self._fetch_inat_taxa, args=(inat_ids,),
+                    name="inat-fetch", daemon=True,
+                ).start()
 
     def _fetch_inat_taxa(self, inat_ids: dict[str, str]) -> None:
-        """Fetch community taxon from iNaturalist and emit event (runs in thread pool)."""
+        """Fetch community taxon from iNaturalist and emit event (daemon thread)."""
         try:
-            taxa = fetch_community_taxa(inat_ids, cache_dir=self.config.output_dir)
+            taxa = fetch_community_taxa(
+                inat_ids, cache_dir=self.config.output_dir, abort=self._shutdown,
+            )
             if taxa:
                 self.event_log.emit("specimens.taxa", {"taxa": taxa})
                 logger.info(f"Fetched community taxon for {len(taxa)} specimens")
@@ -113,33 +124,38 @@ class Pipeline:
         if self.identify:
             self.identify.ensure_db()
 
-        with ConsoleUI("batch", self.state, self.cmd_queue) as console:
-            self._console = console
+        self._install_sigint("batch")
+        try:
+            with ConsoleUI("batch", self.state, self.cmd_queue) as console:
+                self._console = console
 
-            # Step 1: Run specimux (skip if already completed in a prior run)
-            if self.state.specimux_runs > 0:
-                logger.info("Specimux already completed in prior run, skipping demux")
-            else:
-                logger.info(f"Running specimux on {self.config.reads_file}")
-                specimens = self.specimux.run(self.config.reads_file)
+                # Step 1: Run specimux (skip if already completed in a prior run)
+                if self.state.specimux_runs > 0:
+                    logger.info("Specimux already completed in prior run, skipping demux")
+                else:
+                    logger.info(f"Running specimux on {self.config.reads_file}")
+                    self._run_specimux_file(self.config.reads_file)
 
-                if not specimens:
-                    logger.warning("No specimens found after specimux")
-                    self._console = None
-                    return
+                    if not any(s.total_reads for s in self.state.specimens.values()):
+                        logger.warning("No specimens found after specimux")
+                        self._console = None
+                        return
 
-            console.redraw()
+                console.redraw()
 
-            # Step 2: Run consensus → identification, interleaved per-specimen
-            logger.info(f"Found {len(self.state.specimens)} specimens, scheduling consensus")
-            self._run_consensus_round(min_reads=0)
+                # Step 2: Run consensus → identification, interleaved per-specimen
+                if not self._shutdown.is_set():
+                    logger.info(f"Found {len(self.state.specimens)} specimens, scheduling consensus")
+                    self._run_consensus_round(min_reads=0)
 
-            # Step 3: Run summarize for all identified/no_match specimens
-            if not self._shutdown.is_set():
-                self._run_summarize_round()
+                # Step 3: Run summarize for all identified/no_match specimens
+                if not self._shutdown.is_set():
+                    self._run_summarize_round()
 
-            self._shutdown_executor()
-            self._console = None
+                self._shutdown_executor()
+                self._console = None
+        finally:
+            self._restore_sigint()
 
         if self._shutdown.is_set():
             logger.info("Batch pipeline stopped by user")
@@ -195,6 +211,7 @@ class Pipeline:
         # that gained reads before previous shutdown but never got consensus)
         self._schedule_consensus()
 
+        self._install_sigint("live")
         try:
             with ConsoleUI("live", self.state, self.cmd_queue) as console:
                 self._console = console
@@ -202,7 +219,7 @@ class Pipeline:
                     self._shutdown.wait(timeout=self._TICK)
                     self._check_completed_futures()
 
-                    # Process any stable files (drain once, run all back-to-back)
+                    # Process any stable files
                     self._process_stable_files()
 
                     # Drain command queue
@@ -213,23 +230,61 @@ class Pipeline:
                             break
                         if cmd == "finalize":
                             self._run_finalization()
-                            self._schedule_consensus()
+                            if self._exit_after_finalize:
+                                self._shutdown.set()
+                            else:
+                                self._schedule_consensus()
                         elif cmd == "quit":
                             logger.info("Quit command received, shutting down")
                             self._shutdown.set()
                             break
 
-                    console.state = self.state
                     console.redraw()
         except KeyboardInterrupt:
+            # Safety net — normally the SIGINT handler prevents this
             logger.info("Shutting down live pipeline")
         finally:
+            self._restore_sigint()
             watcher.stop()
             self._shutdown_executor()
 
     def shutdown(self) -> None:
         """Signal the pipeline to shut down."""
         self._shutdown.set()
+
+    def _install_sigint(self, mode: str) -> None:
+        """Install a SIGINT handler for graceful Ctrl+C behavior.
+
+        Live mode: first Ctrl+C finalizes then exits (as documented in the
+        README); a second Ctrl+C aborts the finalization and shuts down.
+        Batch mode: Ctrl+C behaves like [Q] — stop gracefully.
+
+        Replacing the default handler also means no KeyboardInterrupt is
+        raised mid-teardown, so the process exits 0 instead of 1/130.
+        """
+        def handler(signum, frame):
+            self._sigint_count += 1
+            if mode == "live" and self._sigint_count == 1:
+                logger.info("Ctrl+C: finalizing and exiting — press Ctrl+C again to abort")
+                self._exit_after_finalize = True
+                self.cmd_queue.put("finalize")
+            else:
+                logger.info("Ctrl+C: shutting down")
+                self._shutdown.set()
+
+        try:
+            self._old_sigint = signal.signal(signal.SIGINT, handler)
+        except ValueError:
+            # Not the main thread (e.g. under test harnesses) — skip
+            self._old_sigint = None
+
+    def _restore_sigint(self) -> None:
+        if self._old_sigint is not None:
+            try:
+                signal.signal(signal.SIGINT, self._old_sigint)
+            except ValueError:
+                pass
+            self._old_sigint = None
 
     @property
     def was_shutdown(self) -> bool:
@@ -274,6 +329,29 @@ class Pipeline:
         if self._console:
             self._console.redraw()
 
+    def _run_specimux_file(self, fastq_path: Path, threads: int | None = None) -> None:
+        """Run specimux in a worker thread, ticking console commands meanwhile.
+
+        Demux itself is never interrupted (killing specimux mid-append could
+        corrupt per-specimen FASTQs), but [Q]/Ctrl+C are acknowledged within
+        ~_TICK and callers skip remaining work after it returns.
+        """
+        def target():
+            try:
+                self.specimux.run(fastq_path, threads=threads)
+            except Exception as e:
+                logger.error(f"Error running specimux on {fastq_path}: {e}")
+                self.event_log.emit("pipeline.error", {
+                    "component": "specimux",
+                    "message": f"Error processing {fastq_path}: {e}",
+                })
+
+        t = threading.Thread(target=target, name="specimux-runner", daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(timeout=self._TICK)
+            self._drain_cmd_queue()
+
     def _on_file_stable(self, file_path: Path) -> None:
         """Legacy callback — only used if watcher has no queue."""
         self._file_queue.put(file_path)
@@ -308,14 +386,7 @@ class Pipeline:
                 logger.info("Shutdown requested; remaining file(s) will be picked up on restart")
                 break
             logger.info(f"Running specimux on {file_path.name}")
-            try:
-                self.specimux.run(file_path)
-            except Exception as e:
-                logger.error(f"Error running specimux on {file_path}: {e}")
-                self.event_log.emit("pipeline.error", {
-                    "component": "specimux",
-                    "message": f"Error processing {file_path}: {e}",
-                })
+            self._run_specimux_file(file_path)
 
         self._draining = False
 
@@ -358,14 +429,7 @@ class Pipeline:
                 logger.info("Shutdown requested; remaining file(s) will be picked up on restart")
                 break
             logger.info(f"Running specimux on {file_path.name}")
-            try:
-                self.specimux.run(file_path)
-            except Exception as e:
-                logger.error(f"Error running specimux on {file_path}: {e}")
-                self.event_log.emit("pipeline.error", {
-                    "component": "specimux",
-                    "message": f"Error processing {file_path}: {e}",
-                })
+            self._run_specimux_file(file_path)
 
         # 4. Resume scheduling
         self._draining = False
@@ -615,6 +679,7 @@ class Pipeline:
         future = self._executor.submit(
             self.identify.run, specimen_id, combined_fasta,
             consensus_version=spec.consensus_version,
+            output_name=f"{specimen_id}-variants",
         )
         self._futures[specimen_id] = future
 

@@ -258,3 +258,70 @@ def test_drain_cmd_queue_requeues_finalize(tmp_path):
     assert pipeline._shutdown.is_set()
     assert pipeline.cmd_queue.get_nowait() == "finalize"
     pipeline._executor.shutdown(wait=True)
+
+
+def test_sigint_live_finalizes_then_exits(tmp_path):
+    """First Ctrl+C in live mode queues finalization + exit; second aborts."""
+    import signal
+
+    pipeline = _quiet_pipeline(tmp_path)
+    pipeline._install_sigint("live")
+    try:
+        handler = signal.getsignal(signal.SIGINT)
+        handler(signal.SIGINT, None)
+        assert pipeline._exit_after_finalize
+        assert not pipeline._shutdown.is_set()
+        assert pipeline.cmd_queue.get_nowait() == "finalize"
+
+        handler(signal.SIGINT, None)  # second Ctrl+C aborts
+        assert pipeline._shutdown.is_set()
+    finally:
+        pipeline._restore_sigint()
+        pipeline._executor.shutdown(wait=True)
+
+
+def test_sigint_batch_stops_gracefully(tmp_path):
+    """Ctrl+C in batch mode behaves like [Q]."""
+    import signal
+
+    pipeline = _quiet_pipeline(tmp_path)
+    pipeline._install_sigint("batch")
+    try:
+        handler = signal.getsignal(signal.SIGINT)
+        handler(signal.SIGINT, None)
+        assert pipeline._shutdown.is_set()
+        assert not pipeline._exit_after_finalize
+    finally:
+        pipeline._restore_sigint()
+        pipeline._executor.shutdown(wait=True)
+
+
+def test_quit_acknowledged_during_specimux(tmp_path):
+    """[Q] pressed while specimux runs is processed within a tick."""
+    import time
+
+    pipeline = _quiet_pipeline(tmp_path)
+
+    def slow_run(fastq_path, threads=None):
+        time.sleep(2)
+        return {}
+    pipeline.specimux = MagicMock()
+    pipeline.specimux.run.side_effect = slow_run
+
+    pipeline.cmd_queue.put("quit")
+    start = time.monotonic()
+    ack_delay = None
+
+    orig_drain = pipeline._drain_cmd_queue
+    def drain_and_time():
+        nonlocal ack_delay
+        orig_drain()
+        if ack_delay is None and pipeline._shutdown.is_set():
+            ack_delay = time.monotonic() - start
+    pipeline._drain_cmd_queue = drain_and_time
+
+    pipeline._run_specimux_file(tmp_path / "reads.fastq")
+
+    assert ack_delay is not None and ack_delay < 1.5  # acknowledged mid-demux
+    pipeline.specimux.run.assert_called_once()  # demux itself not interrupted
+    pipeline._executor.shutdown(wait=True)

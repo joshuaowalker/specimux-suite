@@ -280,3 +280,28 @@ def test_speconsense_timeout_kills_and_reports(tmp_path, monkeypatch):
     spec = state.specimens["specimen_A"]
     assert spec.status == SpecimenStatus.ERROR
     assert spec.consensus_version == 1  # failed run still counts, no retry loop
+
+
+def test_identification_tsv_written(tmp_path):
+    """run() results are also written to identification/{name}.tsv."""
+    from specimux_suite.runners.identify_runner import IdentifyRunner
+
+    config = _make_config(tmp_path)
+    log = EventLog(tmp_path / "events.jsonl")
+    runner = IdentifyRunner(config, log)
+
+    matches = [{"cluster": "spec_A-c0", "top_hits": [
+        {"ref_id": "r1", "name": "Russula emetica", "identity": 0.97,
+         "adjusted_identity": 0.985, "coverage": 0.91},
+        {"ref_id": "r2", "name": "Russula sp.", "identity": 0.95,
+         "adjusted_identity": 0.96},
+    ]}]
+    runner._write_tsv("spec_A", matches)
+
+    tsv = (config.identification_output_dir / "spec_A.tsv").read_text()
+    lines = tsv.splitlines()
+    assert lines[0].split("\t") == ["cluster", "ref_id", "name", "identity",
+                                    "adjusted_identity", "coverage"]
+    assert lines[1].split("\t") == ["spec_A-c0", "r1", "Russula emetica",
+                                    "0.9700", "0.9850", "0.9100"]
+    assert lines[2].split("\t")[5] == ""  # missing coverage -> empty field

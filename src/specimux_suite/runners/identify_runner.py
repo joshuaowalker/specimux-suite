@@ -91,13 +91,17 @@ class IdentifyRunner:
                 offset += len(line)
 
     def run(self, specimen_id: str, consensus_fasta: Path,
-            consensus_version: int | None = None) -> list[dict]:
+            consensus_version: int | None = None,
+            output_name: str | None = None) -> list[dict]:
         """Identify consensus clusters against reference DB.
 
         Args:
             consensus_version: The specimen's consensus generation these
                 queries came from. Stamped into the event so stale results
                 (landing after a re-consensus) can be discarded on apply.
+            output_name: Basename for the identification TSV (defaults to
+                specimen_id; variant runs pass "{specimen_id}-variants" so
+                they don't overwrite the cluster results).
 
         Returns list of {cluster, top_hits: [{ref_id, name, identity, adjusted_identity}]}
         """
@@ -111,6 +115,8 @@ class IdentifyRunner:
         # Step 2: adjusted-identity scoring for candidates
         matches = self._score_hits(consensus_fasta, vsearch_hits)
 
+        self._write_tsv(output_name or specimen_id, matches)
+
         event_data = {
             "specimen_id": specimen_id,
             "matches": matches,
@@ -120,6 +126,25 @@ class IdentifyRunner:
         self.event_log.emit("identification.completed", event_data)
 
         return matches
+
+    def _write_tsv(self, name: str, matches: list[dict]) -> None:
+        """Write per-specimen identification results to identification/{name}.tsv."""
+        out_dir = self.config.identification_output_dir
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"{name}.tsv"
+            with open(path, "w") as f:
+                f.write("cluster\tref_id\tname\tidentity\tadjusted_identity\tcoverage\n")
+                for m in matches:
+                    for hit in m["top_hits"]:
+                        cov = hit.get("coverage")
+                        f.write(
+                            f"{m['cluster']}\t{hit['ref_id']}\t{hit['name']}\t"
+                            f"{hit['identity']:.4f}\t{hit['adjusted_identity']:.4f}\t"
+                            f"{'' if cov is None else f'{cov:.4f}'}\n"
+                        )
+        except OSError as e:
+            logger.warning(f"Could not write identification TSV for {name}: {e}")
 
     def _run_vsearch(self, query_fasta: Path) -> dict[str, list[dict]]:
         """Run vsearch --usearch_global, return hits grouped by query."""

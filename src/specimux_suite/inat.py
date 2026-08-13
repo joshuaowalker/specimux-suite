@@ -92,12 +92,15 @@ def _resolve_genera(ancestor_ids_by_taxon: dict[int, list[int]]) -> dict[int, st
 def fetch_community_taxa(
     inat_ids: dict[str, str],
     cache_dir: Path | None = None,
+    abort=None,
 ) -> dict[str, dict]:
     """Batch-fetch community taxon names for iNaturalist observations.
 
     Args:
         inat_ids: {specimen_id: observation_id}
         cache_dir: directory for persistent cache file
+        abort: optional threading.Event; checked between batches so a
+            shutting-down pipeline stops making network calls promptly
 
     Returns:
         {specimen_id: {"name": taxon_name, "genus": genus_name}}
@@ -146,6 +149,9 @@ def fetch_community_taxa(
     ancestor_ids_by_taxon: dict[int, list[int]] = {}  # {taxon_id: [ancestor_ids]}
 
     for i in range(0, len(unique_obs_ids), MAX_BATCH_SIZE):
+        if abort is not None and abort.is_set():
+            logger.info("iNaturalist fetch aborted (shutdown)")
+            break
         batch = unique_obs_ids[i : i + MAX_BATCH_SIZE]
         ids_str = ",".join(batch)
         url = f"{API_URL}?per_page={MAX_BATCH_SIZE}&id={ids_str}"
@@ -190,6 +196,8 @@ def fetch_community_taxa(
             time.sleep(1)
 
     # Second pass: resolve genera for infrageneric taxa by fetching their ancestors
+    if abort is not None and abort.is_set():
+        needs_genus_obs = {}
     if needs_genus_obs:
         logger.info(f"Resolving genus for {len(needs_genus_obs)} infrageneric taxa")
         genera = _resolve_genera(ancestor_ids_by_taxon)

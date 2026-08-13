@@ -22,8 +22,11 @@ class SpecimuxRunner:
         self.config = config
         self.event_log = event_log
 
-    def run(self, fastq_path: Path) -> dict[str, dict]:
+    def run(self, fastq_path: Path, threads: int | None = None) -> dict[str, dict]:
         """Run specimux on a FASTQ file.
+
+        Args:
+            threads: Worker-thread override; defaults to config.workers.
 
         Returns specimen read counts: {specimen_id: {"pool": str, "reads": int, "path": str}}
         """
@@ -45,7 +48,7 @@ class SpecimuxRunner:
         progress_path = Path(progress_file.name)
         progress_file.close()
 
-        cmd = self._build_command(fastq_path, output_dir)
+        cmd = self._build_command(fastq_path, output_dir, threads=threads)
         cmd.extend(["--progress-file", str(progress_path)])
         logger.info(f"Running specimux: {' '.join(str(c) for c in cmd)}")
 
@@ -179,7 +182,8 @@ class SpecimuxRunner:
         except (OSError, IOError):
             pass
 
-    def _build_command(self, fastq_path: Path, output_dir: Path) -> list[str]:
+    def _build_command(self, fastq_path: Path, output_dir: Path,
+                       threads: int | None = None) -> list[str]:
         """Build the specimux command line."""
         cmd = [
             "specimux",
@@ -188,7 +192,7 @@ class SpecimuxRunner:
             str(fastq_path),
             "-F",  # output to files
             "-O", str(output_dir),
-            "-t", str(self.config.workers),
+            "-t", str(threads if threads else self.config.workers),
         ]
         # Profile
         if self.config.specimux_profile:
