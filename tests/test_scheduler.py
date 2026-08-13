@@ -160,3 +160,146 @@ def test_available_slots(tmp_path):
 
     scheduler = Scheduler(config, state)
     assert scheduler.available_slots() == 1
+
+
+# --- Confidence-driven reprocess prioritization ---
+
+def _hit(name, identity):
+    return {"ref_id": name.replace(" ", "_"), "name": name,
+            "identity": identity, "adjusted_identity": identity}
+
+
+def _processed(log, sid, *, clusters, matches, reads_before=100, reads_after=160,
+               taxon=None):
+    """Emit events for a specimen with one completed consensus + identification."""
+    log.emit("specimen.updated", {"specimen_id": sid, "pool": "p1", "total_reads": reads_before})
+    if taxon:
+        log.emit("specimens.taxa", {"taxa": {sid: {"name": taxon, "genus": taxon.split()[0]}}})
+    log.emit("consensus.started", {"specimen_id": sid, "job_id": f"j-{sid}", "read_count": reads_before})
+    log.emit("consensus.completed", {"specimen_id": sid, "job_id": f"j-{sid}", "clusters": clusters})
+    log.emit("identification.completed", {
+        "specimen_id": sid, "consensus_version": 1, "matches": matches,
+    })
+    log.emit("specimen.updated", {"specimen_id": sid, "pool": "p1", "total_reads": reads_after})
+
+
+def test_confidence_band_ordering(tmp_path):
+    """Reprocess candidates order: no_match > low_identity > off_target > marginal > confident."""
+    config = _make_config(tmp_path, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+    c1 = [{"name": "c1", "size": 80}]
+
+    _processed(log, "NOMATCH", clusters=c1,
+               matches=[{"cluster": "c1", "top_hits": []}])
+    _processed(log, "LOWID", clusters=c1,
+               matches=[{"cluster": "c1", "top_hits": [_hit("Amanita muscaria", 0.85)]}],
+               taxon="Amanita muscaria")
+    _processed(log, "OFFTARGET", clusters=c1,
+               matches=[{"cluster": "c1", "top_hits": [_hit("Saccharomyces cerevisiae", 0.99)]}],
+               taxon="Amanita muscaria")
+    _processed(log, "MARGINAL", clusters=c1,
+               matches=[{"cluster": "c1", "top_hits": [_hit("Amanita muscaria", 0.95)]}],
+               taxon="Amanita muscaria")
+    _processed(log, "CONFIDENT", clusters=c1,
+               matches=[{"cluster": "c1", "top_hits": [_hit("Amanita muscaria", 0.995)]}],
+               taxon="Amanita muscaria")
+
+    state = PipelineState()
+    state.rebuild(log)
+    jobs = Scheduler(config, state).get_ready_jobs()
+
+    assert [j.specimen_id for j in jobs] == [
+        "NOMATCH", "LOWID", "OFFTARGET", "MARGINAL", "CONFIDENT"]
+    assert [j.reason for j in jobs] == [
+        "no_match", "low_identity", "off_target", "marginal", "confident"]
+
+
+def test_uncertain_bands_soften_reprocess_gate(tmp_path):
+    """Bands 1-3 re-enter the queue at half the reprocess_ratio; band 5 does not."""
+    config = _make_config(tmp_path, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+    c1 = [{"name": "c1", "size": 80}]
+
+    # Both at ratio 0.3: above 0.25 (softened) but below 0.5 (full gate)
+    _processed(log, "NOMATCH", clusters=c1, reads_after=130,
+               matches=[{"cluster": "c1", "top_hits": []}])
+    _processed(log, "CONFIDENT", clusters=c1, reads_after=130,
+               matches=[{"cluster": "c1", "top_hits": [_hit("Amanita muscaria", 0.995)]}],
+               taxon="Amanita muscaria")
+
+    state = PipelineState()
+    state.rebuild(log)
+    jobs = Scheduler(config, state).get_ready_jobs()
+
+    assert [j.specimen_id for j in jobs] == ["NOMATCH"]
+
+
+def test_minority_on_target_boosted(tmp_path):
+    """Community genus present only in a minority cluster => band 3 (depth may recover it)."""
+    from specimux_suite.scheduler import confidence_band
+
+    config = _make_config(tmp_path, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+
+    _processed(log, "HOSTPARA",
+               clusters=[{"name": "c1", "size": 80}, {"name": "c2", "size": 10}],
+               matches=[
+                   {"cluster": "c1", "top_hits": [_hit("Saccharomyces cerevisiae", 0.99)]},
+                   {"cluster": "c2", "top_hits": [_hit("Amanita muscaria", 0.99)]},
+               ],
+               taxon="Amanita muscaria")
+
+    state = PipelineState()
+    state.rebuild(log)
+    band, reason = confidence_band(state.specimens["HOSTPARA"])
+    assert (band, reason) == (3, "minority_on_target")
+
+    jobs = Scheduler(config, state).get_ready_jobs()
+    assert jobs[0].reason == "minority_on_target"
+
+
+def test_pending_identification_is_neutral(tmp_path):
+    """Consensus done but identification not yet landed: neutral band, full gate."""
+    config = _make_config(tmp_path, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+    c1 = [{"name": "c1", "size": 80}]
+
+    # No identification.completed event: status stays CONSENSUS_DONE
+    log.emit("specimen.updated", {"specimen_id": "PENDING", "pool": "p1", "total_reads": 100})
+    log.emit("consensus.started", {"specimen_id": "PENDING", "job_id": "j1", "read_count": 100})
+    log.emit("consensus.completed", {"specimen_id": "PENDING", "job_id": "j1", "clusters": c1})
+    log.emit("specimen.updated", {"specimen_id": "PENDING", "pool": "p1", "total_reads": 130})
+
+    state = PipelineState()
+    state.rebuild(log)
+
+    # ratio 0.3 < full gate 0.5: not eligible (pending must not get the softened gate)
+    assert Scheduler(config, state).get_ready_jobs() == []
+
+    # At ratio 0.6 it becomes eligible with the neutral reason
+    log.emit("specimen.updated", {"specimen_id": "PENDING", "pool": "p1", "total_reads": 160})
+    state = PipelineState()
+    state.rebuild(log)
+    jobs = Scheduler(config, state).get_ready_jobs()
+    assert [j.reason for j in jobs] == ["pending"]
+
+
+def test_new_specimens_and_watched_outrank_bands(tmp_path):
+    """Tier order preserved: watched > never-processed > any reprocess band."""
+    config = _make_config(tmp_path, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+    c1 = [{"name": "c1", "size": 80}]
+
+    _processed(log, "NOMATCH", clusters=c1,
+               matches=[{"cluster": "c1", "top_hits": []}])
+    log.emit("specimen.updated", {"specimen_id": "NEW", "pool": "p1", "total_reads": 40})
+    _processed(log, "STARRED", clusters=c1,
+               matches=[{"cluster": "c1", "top_hits": [_hit("Amanita muscaria", 0.995)]}],
+               taxon="Amanita muscaria")
+    log.emit("specimen.watched", {"specimen_id": "STARRED", "watched": True})
+
+    state = PipelineState()
+    state.rebuild(log)
+    jobs = Scheduler(config, state).get_ready_jobs()
+
+    assert [j.specimen_id for j in jobs] == ["STARRED", "NEW", "NOMATCH"]

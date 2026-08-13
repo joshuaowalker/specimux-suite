@@ -145,6 +145,25 @@ The scheduler uses two-tier prioritization:
 
 In live mode, watched specimens (starred in the dashboard) receive a priority boost and are processed first.
 
+Within the reprocessing tier, candidates are ordered by **result confidence** —
+uncertain results are revisited first, since additional depth might change the
+answer:
+
+1. **No match** — consensus produced but nothing hit the reference database
+2. **Low identity** — best hit below 90% adjusted identity
+3. **Off-target** — no hit matches the iNaturalist community genus (a
+   mycoparasite or yeast contaminant may be dominating the true target), or the
+   community genus appears only in a minority cluster
+4. **Marginal** — identity 90–98%, or ambiguous bases in the consensus
+5. **Confident** — ≥98% identity and on-target
+
+Uncertain results (the first three) also re-enter the queue at half the
+configured `--reprocess-ratio`, so depth reaches them sooner. Confidence only
+reorders work — confident specimens still reprocess whenever workers are free,
+and finalization always processes every specimen with unprocessed reads,
+regardless of confidence. The dashboard shows a small ↻ chip on each queued
+reprocess candidate with the reason it was prioritized.
+
 ### Live mode concurrency
 
 Consensus jobs read copy-on-write snapshots of their input FASTQs (instant on APFS/btrfs/XFS, a plain copy elsewhere), so when a new FASTQ file stabilizes, specimux demultiplexes it immediately — appending to the live per-specimen files while in-flight consensus jobs keep running on their snapshots. Demultiplexing uses whatever worker threads aren't occupied by consensus jobs, and newly-ready specimens are scheduled as soon as it finishes.

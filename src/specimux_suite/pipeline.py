@@ -493,7 +493,7 @@ class Pipeline:
                 if slots <= 0:
                     break
                 job = pending.pop(0)
-                self._submit_consensus(job.specimen_id)
+                self._submit_consensus(job.specimen_id, reason=job.reason)
 
             # Wait for at least one to finish
             if self._futures:
@@ -538,7 +538,7 @@ class Pipeline:
                 if slots <= 0:
                     break
                 job = pending.pop(0)
-                self._submit_consensus(job.specimen_id)
+                self._submit_consensus(job.specimen_id, reason=job.reason)
 
             # Wait for at least one to finish
             if self._futures:
@@ -567,9 +567,9 @@ class Pipeline:
         jobs = self.scheduler.get_ready_jobs(max_jobs=slots)
         logger.info(f"Scheduler: {len(jobs)} specimens ready for consensus ({slots} slots available)")
         for job in jobs:
-            self._submit_consensus(job.specimen_id, presample=self.config.live_presample)
+            self._submit_consensus(job.specimen_id, presample=self.config.live_presample, reason=job.reason)
 
-    def _submit_consensus(self, specimen_id: str, presample: int = 0) -> None:
+    def _submit_consensus(self, specimen_id: str, presample: int = 0, reason: str = "") -> None:
         """Submit a consensus job to the thread pool."""
         # Guard: don't submit if already in-flight (race between submit and
         # consensus.started event being written to the log)
@@ -596,7 +596,8 @@ class Pipeline:
             logger.warning(f"Snapshot failed for {specimen_id}, using live file: {e}")
             snapshot = specimen_fastq
 
-        logger.info(f"Submitting consensus job for {specimen_id} ({spec.total_reads} reads)")
+        why = f", {reason}" if reason else ""
+        logger.info(f"Submitting consensus job for {specimen_id} ({spec.total_reads} reads{why})")
         future = self._executor.submit(self._run_consensus_job, specimen_id, snapshot, presample)
         self._futures[specimen_id] = future
 

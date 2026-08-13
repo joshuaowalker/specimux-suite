@@ -146,6 +146,25 @@ tr:hover { background: rgba(255,255,255,0.03); }
 .status-summarized { background: var(--summarized); color: #fff; }
 .status-error { background: var(--error); color: #fff; }
 
+/* Reprocess-queue chip: why the scheduler will revisit this specimen.
+   Shown on its own line under the status pill (the column is narrow and
+   fixed-layout, so an inline chip would be ellipsized). */
+.reproc-chip {
+  display: block;
+  width: max-content;
+  margin-top: 0.25rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 8px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.reproc-band-1 { color: #ff8a80; border-color: #ff8a8066; }
+.reproc-band-2 { color: #ffb74d; border-color: #ffb74d66; }
+.reproc-band-3 { color: #ce93d8; border-color: #ce93d866; }
+.reproc-band-4 { color: #90a4ae; border-color: #90a4ae55; }
+.reproc-band-5 { color: #78909c; border-color: #78909c44; }
+
 .target-indicator {
   margin-right: 0.3rem;
   font-size: 0.85rem;
@@ -807,6 +826,66 @@ function getInatId(specimen_id) {
   return m ? m[1] : null;
 }
 
+function hitGenus(h) {
+  return (h.name || h.ref_id || '').split(/\s+/)[0].toLowerCase();
+}
+
+// Mirror of scheduler.confidence_band (scheduler.py) — keep in sync.
+// Band 1 = most worth revisiting with more reads.
+function reprocessBand(s) {
+  const ident = s.identification || [];
+  if (!ident.some(m => (m.top_hits || []).length)) {
+    if (s.status === 'no_match') return { band: 1, reason: 'no match' };
+    return { band: 4, reason: 'pending' };
+  }
+  const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0] || '').toLowerCase();
+  const sizes = {};
+  for (const c of (s.clusters || [])) sizes[c.name] = c.size || 0;
+  const hasSizes = (s.clusters || []).length > 0;
+  let bestHit = null, bestOn = false, bestSize = -1;
+  let domHit = null, domSize = -1;
+  let onAnywhere = false;
+  for (const m of ident) {
+    if (!(m.top_hits || []).length) continue;
+    if (hasSizes && !(m.cluster in sizes)) continue;
+    const top = m.top_hits[0];
+    const size = sizes[m.cluster] || 0;
+    if (size > domSize) { domSize = size; domHit = top; }
+    if (communityGenus && m.top_hits.some(h => hitGenus(h) === communityGenus)) onAnywhere = true;
+    const on = !!communityGenus && hitGenus(top) === communityGenus;
+    if (bestHit === null || (on && !bestOn) || (on === bestOn && size > bestSize)) {
+      bestHit = top; bestOn = on; bestSize = size;
+    }
+  }
+  if (!bestHit) return { band: 4, reason: 'pending' };
+  const identity = bestHit.adjusted_identity || bestHit.identity || 0;
+  if (identity < 0.90) return { band: 2, reason: 'low ID' };
+  if (communityGenus) {
+    if (!onAnywhere) return { band: 3, reason: 'off-target' };
+    if (domHit && hitGenus(domHit) !== communityGenus) return { band: 3, reason: 'minority target' };
+  }
+  let domAmbig = 0, domClusterSize = -1;
+  for (const c of (s.clusters || [])) {
+    if ((c.size || 0) > domClusterSize) { domClusterSize = c.size || 0; domAmbig = c.ambig || 0; }
+  }
+  if (identity < 0.98 || domAmbig > 0) return { band: 4, reason: 'marginal' };
+  return { band: 5, reason: 'confident' };
+}
+
+// Mirror of the scheduler's reprocess eligibility: uncertain results
+// (bands 1-3) re-enter the queue at half the configured reprocess_ratio.
+function isReprocessCandidate(s) {
+  if ((s.consensus_version || 0) === 0) return false;
+  if (s.status === 'consensus_running') return false;
+  const base = s.reads_at_last_consensus || 0;
+  const newReads = s.total_reads - base;
+  const ratio = base > 0 ? newReads / base : (newReads > 0 ? Infinity : 0);
+  if (!(s.clusters || []).length) return ratio > reprocessRatio;
+  const b = reprocessBand(s);
+  const gate = b.band <= 3 ? reprocessRatio / 2 : reprocessRatio;
+  return ratio > gate;
+}
+
 function getTargetStatus(s, context) {
   if (!s.community_taxon) return null;
   // Use community_genus (resolved from iNat ancestors for infrageneric ranks)
@@ -1332,14 +1411,8 @@ function renderProcessing() {
     document.getElementById('stat-queued-new').textContent = all.filter(s =>
       (s.consensus_version || 0) === 0 && s.total_reads >= effectiveMinReads && s.status !== 'consensus_running'
     ).length;
-    document.getElementById('stat-queued-reprocess').textContent = all.filter(s => {
-      if ((s.consensus_version || 0) === 0) return false;
-      if (s.status === 'consensus_running') return false;
-      const newReads = s.total_reads - (s.reads_at_last_consensus || 0);
-      const base = s.reads_at_last_consensus || 0;
-      const ratio = base > 0 ? newReads / base : (newReads > 0 ? Infinity : 0);
-      return ratio > reprocessRatio;
-    }).length;
+    document.getElementById('stat-queued-reprocess').textContent =
+      all.filter(isReprocessCandidate).length;
   }
 
   // Table
@@ -1352,6 +1425,13 @@ function renderProcessing() {
     const displayStatus = getDisplayStatus(s);
     const statusLabels = { queued: 'queued', no_match: 'no match', no_clusters: 'no clusters', consensus_running: 'processing', consensus_done: 'ready', updating: 'updating', identified: 'ID ready', summarized: 'summarized' };
     const statusLabel = statusLabels[displayStatus] || displayStatus.replace('_', ' ');
+
+    // Reprocess-queue chip: live mode only (batch has a single consensus round)
+    let reprocChip = '';
+    if (state.mode === 'live' && !state.finalizing && isReprocessCandidate(s)) {
+      const b = reprocessBand(s);
+      reprocChip = `<span class="reproc-chip reproc-band-${b.band}" title="queued for reprocessing: ${esc(b.reason)}">↻ ${esc(b.reason)}</span>`;
+    }
     const clusterBadge = buildClusterBadge(s);
     const organismsBadge = getOrganismsBadge(s);
     const isExpanded = ts.expanded.has(s.specimen_id);
@@ -1403,7 +1483,7 @@ function renderProcessing() {
 
     rows.push(`<tr>
       <td>${specimenCell}</td>
-      <td class="status-cell"><span class="status-pill status-${displayStatus}">${statusLabel}</span></td>
+      <td class="status-cell"><span class="status-pill status-${displayStatus}">${statusLabel}</span>${reprocChip}</td>
       <td>${identityCell}</td>
       <td class="top-hit">${chevron}${topHit ? `${linkedName(topHit.name || topHit.ref_id || '')}${clusterBadge}` : `${clusterBadge || '—'}`}</td>
       <td>${s.total_reads.toLocaleString()}</td>
@@ -1840,6 +1920,7 @@ fetch('/api/state').then(r => r.json()).then(data => {
     state.specimens = data.specimens;
     state.version = data.version || 0;
   }
+  state.mode = data.mode || null;
   state.totalInputReads = data.total_input_reads || 0;
   state.demuxHistory = (data.demux_history || []).map(h => ({
     ts: h.ts, inputCum: h.input_cum, matchedCum: h.matched_cum, counts: h.counts || {},
