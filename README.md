@@ -178,8 +178,10 @@ projects when below-threshold specimens will cross — with 90% intervals — pl
 
 - A headline: how many specimens are over threshold, how many more are projected
   to cross within the next hour, and how many will likely never make it
-- Threshold sensitivity (≥10 / min_reads / ≥100), since downstream verification
-  often succeeds well below `min_reads`
+- A viewer-selectable forecast threshold (chips for common values plus a custom
+  input) — view-only, the scheduler keeps using `min_reads`
+- Threshold sensitivity (≥10 / min_reads / ≥100 / selected), since downstream
+  verification often succeeds well below `min_reads`
 - The specimens-over-threshold accumulation curve for the run so far
 - A rate-drift self-check that flags when the forecast's stationarity assumption
   looks shaky for the current run

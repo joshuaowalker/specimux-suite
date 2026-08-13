@@ -544,6 +544,7 @@ let activeTab = 'processing';
 const tabState = {
   processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set(), hideFiltered: false },
   summary:    { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set() },
+  forecast:   { threshold: null },  // null = follow configured min_reads
 };
 let minReads = 30;
 let reprocessRatio = 0.5;
@@ -935,6 +936,13 @@ function render() {
 
 const FORECAST_Z = 1.645; // 90% interval
 
+// The forecast's read bar: viewer-selectable in the tab (view-only — the
+// scheduler keeps using the configured min_reads). Defaults to min_reads.
+function forecastThreshold() {
+  const t = tabState.forecast.threshold;
+  return (t && t > 0) ? t : minReads;
+}
+
 function poissonLo(n) {
   if (n === 0) return 0;
   const t = 1 - 1 / (9 * n) - FORECAST_Z / (3 * Math.sqrt(n));
@@ -969,7 +977,9 @@ function computeForecast() {
   // specimen set (each specimen lands in exactly one, using the expected
   // crossing point throughout), so counts always sum to the total —
   // interval bounds appear only in the per-specimen range column.
-  const thresholds = [10, minReads, 100].filter((t, i, arr) => arr.indexOf(t) === i).sort((x, y) => x - y);
+  const T = forecastThreshold();
+  const thresholds = [10, minReads, 100, T]
+    .filter((t, i, arr) => arr.indexOf(t) === i).sort((x, y) => x - y);
   const specs = Object.values(state.specimens);
   const perT = {};
   for (const T of thresholds) {
@@ -986,12 +996,12 @@ function computeForecast() {
     perT[T] = { over, nearTerm, later, unlikely, noReads };
   }
 
-  // Below-min_reads specimen rows, nearest crossing first
+  // Below-threshold specimen rows, nearest crossing first
   const rows = [];
   for (const s of specs) {
     const n = s.total_reads || 0;
-    if (n >= minReads || n === 0) continue;
-    const need = minReads - n;
+    if (n >= T || n === 0) continue;
+    const need = T - n;
     const dM = need * M / n;
     const dMlo = need * M / poissonHi(n);
     const dMhiRaw = poissonLo(n) > 0 ? need * M / poissonLo(n) : Infinity;
@@ -1021,7 +1031,7 @@ function computeForecast() {
     }
   }
 
-  return { M, matchedPerFile, matchedPerHour, horizon, horizonLabel,
+  return { M, matchedPerFile, matchedPerHour, horizon, horizonLabel, T,
            dtMs, thresholds, perT, rows, drift, nFiles: hist.length, specs };
 }
 
@@ -1054,7 +1064,7 @@ function renderForecast() {
   }
 
   const total = f.specs.length;
-  const T = f.thresholds.includes(minReads) ? minReads : f.thresholds[1];
+  const T = f.T;
   const p = f.perT[T];
   const identified = f.specs.filter(s => getIdResult(s) === 'identified').length;
   const rateTxt = f.matchedPerHour ? ` (≈${fmtReads(f.matchedPerHour)} matched reads/hour)` : '';
@@ -1078,6 +1088,19 @@ function renderForecast() {
         : ''}
     </div>`;
 
+  // Viewer-selectable read bar (view-only; scheduler still uses min_reads)
+  const chipVals = [10, 30, 50, 100, minReads]
+    .filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => a - b);
+  html += `<div class="forecast-section">Forecast threshold</div>
+    <div class="filter-chips" id="forecast-thresh">
+      ${chipVals.map(v =>
+        `<span class="filter-chip${v === T ? ' active' : ''}" data-t="${v}">≥${v}${v === minReads ? ' (min_reads)' : ''}</span>`
+      ).join('')}
+      <input type="number" id="forecast-thresh-custom" min="1" step="1" value="${T}"
+        title="Custom threshold — Enter to apply"
+        style="width:5.5em;padding:0.15rem 0.4rem;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--text);font-size:0.75rem">
+    </div>`;
+
   // Threshold sensitivity — disjoint buckets, each row sums to the specimen total
   html += `<div class="forecast-section">Threshold sensitivity</div>
     <div class="forecast-note">How the stopping picture changes with the read bar — verification
@@ -1089,7 +1112,9 @@ function renderForecast() {
     </tr></thead><tbody>`;
   for (const t of f.thresholds) {
     const q = f.perT[t];
-    html += `<tr><td>≥${t} reads${t === minReads ? ' (min_reads)' : ''}</td>
+    const tags = [t === minReads ? 'min_reads' : '', t === T && t !== minReads ? 'selected' : '']
+      .filter(Boolean).join(', ');
+    html += `<tr><td>≥${t} reads${tags ? ` (${tags})` : ''}</td>
       <td>${q.over}</td><td>+${q.nearTerm}</td><td>+${q.later}</td><td>${q.unlikely}</td><td>${q.noReads}</td></tr>`;
   }
   html += `</tbody></table>`;
@@ -1106,7 +1131,7 @@ function renderForecast() {
   // approximation through recent per-file yield, so it jitters when
   // sequencing speed does.
   const shown = f.rows.slice(0, 100);
-  html += `<div class="forecast-section">Below min_reads (${minReads}) — nearest projected crossings</div>
+  html += `<div class="forecast-section">Below threshold (${T}) — nearest projected crossings</div>
     <div class="forecast-note">Additional matched reads needed to cross at each specimen's current
     accumulation rate, with a 90% interval; the time column converts through recent per-file yield.
     Specimens with zero reads are excluded (${f.perT[T].noReads} of them).</div>
@@ -1129,6 +1154,21 @@ function renderForecast() {
 
   body.innerHTML = html;
   drawForecastChart(f);
+
+  // Threshold selector wiring (rebuilt with each render)
+  document.querySelectorAll('#forecast-thresh .filter-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const v = parseInt(chip.dataset.t, 10);
+      tabState.forecast.threshold = (v === minReads) ? null : v;
+      render();
+    });
+  });
+  const custom = document.getElementById('forecast-thresh-custom');
+  if (custom) custom.addEventListener('change', () => {
+    const v = parseInt(custom.value, 10);
+    tabState.forecast.threshold = (v > 0 && v !== minReads) ? v : null;
+    render();
+  });
 }
 
 function drawForecastChart(f) {
@@ -1137,8 +1177,8 @@ function drawForecastChart(f) {
   const NS = 'http://www.w3.org/2000/svg';
   const W = 820, H = 300, M = { l: 46, r: 110, t: 12, b: 34 };
   const hist = state.demuxHistory;
-  const seriesColors = ['#3987e5', '#d95926', '#199e70'];
-  const series = f.thresholds.map((t, i) => ({ t, color: seriesColors[i % 3], pts: [] }));
+  const seriesColors = ['#3987e5', '#d95926', '#199e70', '#c98500'];
+  const series = f.thresholds.map((t, i) => ({ t, color: seriesColors[i % seriesColors.length], pts: [] }));
   for (const h of hist) {
     for (const s of series) {
       let c = 0;
