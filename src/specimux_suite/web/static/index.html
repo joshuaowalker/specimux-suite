@@ -1033,16 +1033,14 @@ function fmtReads(v) {
   return Math.round(v).toString();
 }
 
-function fmtEta(dM, f) {
-  // Express additional matched reads as wall time when the rate is known
+function fmtTime(dM, f) {
+  // Approximate wall time for additional matched reads, via recent yield
   if (!isFinite(dM)) return 'never';
-  if (f.matchedPerHour) {
-    const h = dM / f.matchedPerHour;
-    if (h < 1) return Math.max(1, Math.round(h * 60)) + 'm';
-    if (h < 48) return h.toFixed(1) + 'h';
-    return Math.round(h / 24) + 'd';
-  }
-  return '+' + fmtReads(dM);
+  if (!f.matchedPerHour) return '—';
+  const h = dM / f.matchedPerHour;
+  if (h < 1) return '~' + Math.max(1, Math.round(h * 60)) + 'm';
+  if (h < 48) return '~' + h.toFixed(1) + 'h';
+  return '~' + Math.round(h / 24) + 'd';
 }
 
 function renderForecast() {
@@ -1086,7 +1084,7 @@ function renderForecast() {
     has succeeded down to RiC 3–9, so the configured min_reads (${minReads}) is not the only bar
     worth watching. Each specimen appears in exactly one column; rows sum to ${total}.</div>
     <table class="forecast-table"><thead><tr>
-      <th>threshold</th><th>over now</th><th>crossing within ${f.horizonLabel}</th>
+      <th>threshold</th><th>over now</th><th>crossing within ${f.horizonLabel} (≈${fmtReads(f.horizon)} reads)</th>
       <th>later (≤2× run)</th><th>unlikely ever</th><th>no reads</th>
     </tr></thead><tbody>`;
   for (const t of f.thresholds) {
@@ -1103,23 +1101,29 @@ function renderForecast() {
       <svg id="forecast-chart" viewBox="0 0 820 300"></svg>
     </div>`;
 
-  // Nearest-crossing table
+  // Nearest-crossing table. Matched reads are the model's native unit
+  // (per-specimen rates are stationary on that clock); wall time is an
+  // approximation through recent per-file yield, so it jitters when
+  // sequencing speed does.
   const shown = f.rows.slice(0, 100);
   html += `<div class="forecast-section">Below min_reads (${minReads}) — nearest projected crossings</div>
-    <div class="forecast-note">Expected time to cross at each specimen's current accumulation rate,
-    with a 90% interval. Specimens with zero reads are excluded (${f.perT[T].noReads} of them).</div>
+    <div class="forecast-note">Additional matched reads needed to cross at each specimen's current
+    accumulation rate, with a 90% interval; the time column converts through recent per-file yield.
+    Specimens with zero reads are excluded (${f.perT[T].noReads} of them).</div>
     <div class="table-wrap" style="padding:0"><table class="forecast-table"><thead><tr>
-      <th>specimen</th><th>reads</th><th>needs</th><th>share /100k</th><th>expected</th><th>90% range</th>
+      <th>specimen</th><th>reads</th><th>needs</th><th>share /100k</th>
+      <th>matched reads to cross</th><th>90% range</th><th>≈ time</th>
     </tr></thead><tbody>`;
   for (const r of shown) {
-    const lo = fmtEta(r.dMlo, f), hi = fmtEta(r.dMhi, f);
+    const lo = fmtReads(r.dMlo), hi = fmtReads(r.dMhi);
     html += `<tr><td>${esc(r.sid)}</td><td>${r.n}</td><td>+${r.need}</td>
       <td>${(r.share * 1e5).toFixed(1)}</td>
-      <td>${fmtEta(r.dM, f)}</td>
-      <td>${lo === hi ? lo : lo + ' – ' + hi}</td></tr>`;
+      <td>+${fmtReads(r.dM)}</td>
+      <td>${lo === hi ? lo : lo + ' – ' + hi}</td>
+      <td>${fmtTime(r.dM, f)}</td></tr>`;
   }
   if (f.rows.length > shown.length) {
-    html += `<tr><td colspan="6" style="color:var(--text-dim)">… ${f.rows.length - shown.length} more</td></tr>`;
+    html += `<tr><td colspan="7" style="color:var(--text-dim)">… ${f.rows.length - shown.length} more</td></tr>`;
   }
   html += `</tbody></table></div>`;
 
