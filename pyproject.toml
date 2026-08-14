@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "specimux-suite"
-version = "0.1.0"
+version = "0.1.1"
 description = "Orchestration and UX layer for the Mycomap fungal DNA barcoding pipeline"
 readme = "README.md"
 license = { text = "BSD-3-Clause" }
