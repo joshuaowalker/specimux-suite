@@ -411,3 +411,40 @@ def test_identifications_are_micro_batched(tmp_path):
     assert not pipeline._id_futures  # reaped by done callbacks
 
     pipeline._shutdown_executor()
+
+
+def test_finalize_identifies_consensus_inflight_at_start(tmp_path):
+    """Specimens whose consensus was still running when finalization started
+    must be identified and summarized (regression: they were invisible to
+    get_all_eligible_jobs and excluded from the job_sids identify filter, so
+    they stayed stranded at CONSENSUS_DONE forever)."""
+    import time
+
+    pipeline = _quiet_pipeline(tmp_path)
+    pipeline.identify = MagicMock()  # enable the identification path
+    pipeline.summarize = MagicMock()
+    pipeline._submit_identification = MagicMock()
+    log = pipeline.event_log
+
+    # Specimen B: consensus in flight at the moment 'f' is pressed
+    log.emit("consensus.started", {"specimen_id": "B", "job_id": "j1", "read_count": 12})
+
+    def consensus_job():
+        time.sleep(0.2)
+        log.emit("consensus.completed", {
+            "specimen_id": "B", "job_id": "j1",
+            "clusters": [{"name": "B-1.v1", "size": 10}],
+        })
+        return []
+
+    pipeline._futures["B"] = pipeline._executor.submit(consensus_job)
+
+    pipeline._run_finalization()
+
+    # B was identified even though it was in no finalization job list
+    assert any(c.args == ("B",) for c in pipeline._submit_identification.call_args_list)
+    # and the finalization set advertised to the dashboard included it
+    events = list(pipeline.event_log.replay())
+    fin = [e for e in events if e.type == "finalization.started"]
+    assert fin and "B" in fin[0].data["specimen_ids"]
+    pipeline._executor.shutdown(wait=True)

@@ -453,20 +453,35 @@ class Pipeline:
         # Filter out specimens already in-flight or with no reads (nothing to process)
         jobs = [j for j in jobs if j.specimen_id not in self._futures and j.read_count > 0]
 
-        if not jobs:
-            logger.info("Finalize: no eligible specimens to process")
-            return
+        # Live-phase consensus jobs still running when finalization starts are
+        # part of the finalization set too: the loop below waits for them, and
+        # their results must be identified and summarized like any other.
+        # (They are invisible to get_all_eligible_jobs — CONSENSUS_RUNNING —
+        # so specimens whose consensus completed just after 'f' used to be
+        # stranded at CONSENSUS_DONE, never identified.)
+        job_sids = {j.specimen_id for j in jobs} | set(self._futures.keys())
 
-        logger.info(f"Finalize: scheduling consensus for {len(jobs)} specimens")
+        logger.info(
+            f"Finalize: scheduling consensus for {len(jobs)} specimens "
+            f"({len(self._futures)} already in flight)"
+        )
         self.event_log.emit("finalization.started", {
-            "specimen_count": len(jobs),
-            "specimen_ids": [j.specimen_id for j in jobs],
+            "specimen_count": len(job_sids),
+            "specimen_ids": sorted(job_sids),
         })
+
+        # Heal any specimen already stranded awaiting identification (e.g.
+        # from an interrupted earlier session) even if no consensus runs now
+        if self.identify:
+            for sid, spec in self.state.specimens.items():
+                if (spec.status == SpecimenStatus.CONSENSUS_DONE
+                        and spec.clusters
+                        and not spec.identification):
+                    self._submit_identification(sid)
 
         # Submit in batches respecting concurrency, running identification
         # on each specimen as its consensus completes (like live mode)
         pending = list(jobs)
-        job_sids = {j.specimen_id for j in jobs}
         while not self._shutdown.is_set():
             # Drain any files that arrived since finalization started
             if not self._file_queue.empty() or self._has_unsettled_files():
@@ -501,11 +516,13 @@ class Pipeline:
                 self._drain_cmd_queue()
 
                 # Identify specimens that just completed consensus
-                # (consensus.completed sets CONSENSUS_DONE and clears identification)
+                # (consensus.completed sets CONSENSUS_DONE and clears
+                # identification). Deliberately not limited to job_sids: any
+                # specimen awaiting identification — including ones stranded
+                # by an earlier session — gets healed here.
                 if self.identify:
                     for sid, spec in self.state.specimens.items():
-                        if (sid in job_sids
-                                and spec.status == SpecimenStatus.CONSENSUS_DONE
+                        if (spec.status == SpecimenStatus.CONSENSUS_DONE
                                 and spec.clusters
                                 and not spec.identification):
                             self._submit_identification(sid)
@@ -546,11 +563,12 @@ class Pipeline:
                 self._drain_cmd_queue()
 
                 # Identify specimens that just completed consensus
-                # (consensus.completed sets CONSENSUS_DONE and clears identification)
+                # (consensus.completed sets CONSENSUS_DONE and clears
+                # identification). Not limited to this round's jobs — heals
+                # specimens stranded by an interrupted earlier session too.
                 if self.identify:
                     for sid, spec in self.state.specimens.items():
-                        if (sid in job_sids
-                                and spec.status == SpecimenStatus.CONSENSUS_DONE
+                        if (spec.status == SpecimenStatus.CONSENSUS_DONE
                                 and spec.clusters
                                 and not spec.identification):
                             self._submit_identification(sid)
