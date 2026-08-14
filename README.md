@@ -9,6 +9,12 @@ Orchestration and real-time dashboard for the [Mycomap](https://mycomap.org) fun
 Requires Python 3.11+.
 
 ```bash
+pip install specimux-suite
+```
+
+Or, for development, from a source checkout:
+
+```bash
 pip install -e '.[dev]'
 ```
 

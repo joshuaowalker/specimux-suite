@@ -12,6 +12,18 @@ authors = [
     { name = "Josh Walker", email = "joshowalker@yahoo.com" },
 ]
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+keywords = ["bioinformatics", "nanopore", "sequencing", "barcoding", "pipeline", "dashboard"]
 dependencies = [
     "specimux>=0.7.2",          # Profiles + progress protocol
     "speconsense>=0.7.0",       # Profiles
@@ -33,6 +45,7 @@ Issues = "https://github.com/joshuaowalker/specimux-suite/issues"
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
 ]
 
 [project.scripts]
@@ -44,6 +57,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "specimux_suite.profiles" = ["*.yaml"]
+# The dashboard is served from package data — dropping these breaks the web UI
+"specimux_suite.web" = ["static/*.html", "static/vendor/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
