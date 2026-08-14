@@ -38,7 +38,7 @@ class PipelineConfig:
     reference_db: Optional[Path] = None
 
     # Scheduler tuning
-    min_reads: int = 30
+    min_reads: int = 10
     reprocess_ratio: float = 0.5
     workers: int = 0  # 0 = auto (total cores / 2)
 

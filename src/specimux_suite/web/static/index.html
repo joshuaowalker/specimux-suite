@@ -645,7 +645,7 @@ const tabState = {
   summary:    { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set() },
   forecast:   { threshold: null },  // null = follow configured min_reads
 };
-let minReads = 30;
+let minReads = 10;
 let reprocessRatio = 0.5;
 let renderTimer = null;
 
@@ -1005,12 +1005,15 @@ function reprocessBand(s) {
 }
 
 // Mirror of the scheduler's reprocess eligibility: uncertain results
-// (bands 1-3) re-enter the queue at half the configured reprocess_ratio.
+// (bands 1-3) re-enter the queue at half the configured reprocess_ratio,
+// and reprocessing always needs >=5 new reads (MIN_NEW_READS_FOR_REPROCESS
+// in scheduler.py — keep in sync).
 function isReprocessCandidate(s) {
   if ((s.consensus_version || 0) === 0) return false;
   if (s.status === 'consensus_running') return false;
   const base = s.reads_at_last_consensus || 0;
   const newReads = s.total_reads - base;
+  if (newReads < 5) return false;
   const ratio = base > 0 ? newReads / base : (newReads > 0 ? Infinity : 0);
   if (!(s.clusters || []).length) return ratio > reprocessRatio;
   const b = reprocessBand(s);

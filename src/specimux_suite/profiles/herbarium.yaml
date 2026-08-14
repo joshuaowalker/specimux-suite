@@ -3,7 +3,7 @@ specimux-suite-version: "0.1.*"
 description: "Herbarium specimens with relaxed consensus thresholds"
 
 suite:
-  min-reads: 20
+  min-reads: 10
   reprocess-ratio: 0.3
 
 speconsense:

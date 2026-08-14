@@ -200,8 +200,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Output directory (default: specimux-suite-output)")
     parser.add_argument("--reference-db", type=Path, default=None,
                         help="Reference FASTA for identification")
-    parser.add_argument("--min-reads", type=int, default=30,
-                        help="Minimum reads before consensus (default: 30)")
+    parser.add_argument("--min-reads", type=int, default=10,
+                        help="Minimum reads before consensus (default: 10)")
     parser.add_argument("--reprocess-ratio", type=float, default=0.5,
                         help="New/old reads ratio to trigger reprocessing (default: 0.5)")
     parser.add_argument("--workers", type=int, default=0,

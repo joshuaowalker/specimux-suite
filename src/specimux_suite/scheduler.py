@@ -17,6 +17,11 @@ _BAND_BASES = {1: 400_000, 2: 300_000, 3: 200_000, 4: 100_000, 5: 0}
 # Uncertain results (bands 1-3) re-enter the reprocess queue at half the
 # configured reprocess_ratio, so additional depth reaches them sooner.
 _UNCERTAIN_BANDS = {1, 2, 3}
+# Reprocessing additionally requires this many new reads. The ratio gate
+# alone thrashes on small denominators (a 10-read specimen would re-consense
+# on 3 new reads every demux round); irrelevant for larger specimens, and
+# finalization ignores it. Mirrored in the dashboard's isReprocessCandidate.
+MIN_NEW_READS_FOR_REPROCESS = 5
 
 
 def _hit_genus(hit: dict) -> str:
@@ -152,6 +157,8 @@ class Scheduler:
             else:
                 # Previously processed — check if enough new reads
                 new_reads = spec.total_reads - spec.reads_at_last_consensus
+                if new_reads < MIN_NEW_READS_FOR_REPROCESS:
+                    continue
                 if spec.reads_at_last_consensus > 0:
                     ratio = new_reads / spec.reads_at_last_consensus
                 else:

@@ -320,3 +320,32 @@ def test_chimera_dominant_cluster_is_marginal(tmp_path):
     state = PipelineState()
     state.rebuild(log)
     assert confidence_band(state.specimens["CHIM"]) == (4, "marginal")
+
+
+def test_reprocess_requires_min_new_reads(tmp_path):
+    """Ratio alone thrashes on small denominators: a 10-read specimen must
+    not re-consense for 3 new reads even though the ratio gate passes."""
+    config = _make_config(tmp_path, min_reads=10, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+    c1 = [{"name": "c1", "size": 8}]
+
+    # No-match specimen (softened gate 0.25): 3 new reads on a 10-read base
+    # is ratio 0.3 > 0.25 — but below the 5-new-reads floor
+    _processed(log, "TINY", clusters=c1, reads_before=10, reads_after=13,
+               matches=[{"cluster": "c1", "top_hits": []}])
+
+    state = PipelineState()
+    state.rebuild(log)
+    scheduler = Scheduler(config, state)
+    assert scheduler.get_ready_jobs() == []
+
+    # Finalization is unaffected by the floor — any new reads count
+    eligible = scheduler.get_all_eligible_jobs()
+    assert [j.specimen_id for j in eligible] == ["TINY"]
+
+    # At 5 new reads it becomes eligible
+    log.emit("specimen.updated", {"specimen_id": "TINY", "pool": "p1", "total_reads": 15})
+    state = PipelineState()
+    state.rebuild(log)
+    jobs = Scheduler(config, state).get_ready_jobs()
+    assert [j.specimen_id for j in jobs] == ["TINY"]

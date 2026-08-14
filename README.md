@@ -104,7 +104,7 @@ TGCATGCA...
 | `--list-profiles` | — | List available profiles and exit |
 | `-o, --output-dir` | `specimux-suite-output` | Output directory |
 | `--reference-db` | — | Reference FASTA for identification |
-| `--min-reads` | `30` | Minimum reads before running consensus |
+| `--min-reads` | `10` | Minimum reads before running consensus |
 | `--reprocess-ratio` | `0.5` | Ratio of new/previous reads to trigger reprocessing |
 | `--workers` | half of CPU cores | Number of worker threads |
 | `--identify-min-coverage` | `0.5` | Minimum query/target coverage for identification hits |
@@ -147,7 +147,7 @@ FASTQ reads
 The scheduler uses two-tier prioritization:
 
 1. **Never-processed specimens** — prioritized by read count (highest first), processed once they reach `--min-reads`
-2. **Reprocessing candidates** — specimens with enough new reads since last consensus (controlled by `--reprocess-ratio`)
+2. **Reprocessing candidates** — specimens with enough new reads since last consensus (controlled by `--reprocess-ratio`, and always at least 5 new reads so small specimens don't re-run on every file)
 
 In live mode, watched specimens (starred in the dashboard) receive a priority boost and are processed first.
 

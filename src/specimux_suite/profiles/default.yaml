@@ -3,5 +3,5 @@ specimux-suite-version: "0.1.*"
 description: "Default pipeline settings"
 
 suite:
-  min-reads: 30
+  min-reads: 10
   reprocess-ratio: 0.5
