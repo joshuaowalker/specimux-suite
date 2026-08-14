@@ -565,7 +565,10 @@ class Pipeline:
         if slots <= 0:
             return
         jobs = self.scheduler.get_ready_jobs(max_jobs=slots)
-        logger.info(f"Scheduler: {len(jobs)} specimens ready for consensus ({slots} slots available)")
+        # This runs every orchestrator tick; an idle queue is the steady state
+        # and only worth a DEBUG line
+        level = logging.INFO if jobs else logging.DEBUG
+        logger.log(level, f"Scheduler: {len(jobs)} specimens ready for consensus ({slots} slots available)")
         for job in jobs:
             self._submit_consensus(job.specimen_id, presample=self.config.live_presample, reason=job.reason)
 
