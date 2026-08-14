@@ -73,12 +73,16 @@ class IdentifyRunner:
         ref = self.config.reference_db
         if not ref or not ref.exists():
             return
-        # Greedy on purpose: name="..." is the last field on the header line
-        # (both MycoMap and iNaturalist DBs), and real iNaturalist headers
-        # contain unescaped embedded quotes (name="= Gymnopilus "sp-IN03"").
-        # Matching to the last quote on the line handles both embedded and
-        # backslash-escaped quotes; a non-greedy match truncates such names.
-        name_re = re.compile(rb'name="(.+)"')
+        # The name value ends at a quote followed by either another key="
+        # field or end-of-line. This handles both header generations:
+        # - legacy MycoMap/iNaturalist DBs: name= is the terminal field and
+        #   values contain unescaped embedded quotes (name="Gymnopilus
+        #   "sp-IN03""), so a plain non-greedy match would truncate them;
+        # - mm-to-ref DBs: name= is followed by mycomap="..." geo="..." etc.,
+        #   so a plain greedy match would swallow every later field.
+        # The lazy match with the lookahead skips embedded quotes (the text
+        # after them isn't ` key="` or EOL) yet stops at the field boundary.
+        name_re = re.compile(rb'name="(.+?)"(?=\s+\w+="|\s*$)')
         offset = 0
         with open(ref, "rb") as f:
             for line in f:

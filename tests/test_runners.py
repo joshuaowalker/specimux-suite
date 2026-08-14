@@ -179,11 +179,37 @@ def test_name_lookup_from_fasta(tmp_path):
 
     assert runner._name_lookup["iNaturalist_28125417_Coprinellus_sp"] == "Coprinellus sp. 'radians IN02'"
     assert "iNaturalist_99999_Russula_emetica" not in runner._name_lookup
-    # Embedded double quotes: greedy match captures from first " to last " on line
+    # Embedded double quotes in a terminal name= (legacy DBs) are kept whole
     assert runner._name_lookup["iNaturalist_189757404_Gymnopilus_sp_IN03"] == '= Gymnopilus "sp-IN03"'
     assert runner._name_lookup["iNaturalist_30000660_thompsonii_IN01"] == '"thompsonii-IN01"'
     # Backslash-escaped quotes are unescaped
     assert runner._name_lookup["MycoMap_106681_Agaricus_sp_IN02"] == 'Agaricus "sp-IN02"'
+
+
+def test_name_lookup_mm_to_ref_format(tmp_path):
+    """mm-to-ref headers carry fields AFTER name= — the match must stop at
+    the field boundary instead of swallowing mycomap=/geo=/sintax_*."""
+    from specimux_suite.runners.identify_runner import IdentifyRunner
+
+    ref = tmp_path / "refs.fasta"
+    ref.write_text(
+        '>MushroomObserver_111126 name="Amanita cruentilemurum" mycomap="Amanita cruentilemurum" geo="Mexico City, MX" locus="ITS" sintax_family="Amanitaceae" sintax_genus="Amanita"\n'
+        "ACGTACGT\n"
+        '>MushroomObserver_230929 name="Conocybe sp. \'semiglobata-clade04\'" mycomap="Conocybe sp. \'semiglobata-clade-4\'" geo="Fort Bragg, California, US" locus="ITS"\n'
+        "TGCATGCA\n"
+        # Embedded quotes AND trailing fields: skip the inner quote, stop at the boundary
+        '>MushroomObserver_555 name="Boletus "sp-BOL02" OTU-A" mycomap="Boletus" geo="US"\n'
+        "GGGGAAAA\n"
+    )
+
+    config = _make_config(tmp_path, reference_db=ref)
+    log = EventLog(tmp_path / "events.jsonl")
+    runner = IdentifyRunner(config, log)
+    runner._load_name_lookup()
+
+    assert runner._name_lookup["MushroomObserver_111126"] == "Amanita cruentilemurum"
+    assert runner._name_lookup["MushroomObserver_230929"] == "Conocybe sp. 'semiglobata-clade04'"
+    assert runner._name_lookup["MushroomObserver_555"] == 'Boletus "sp-BOL02" OTU-A'
 
 
 def test_parse_clusters_from_fasta(tmp_path):
