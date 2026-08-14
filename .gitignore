@@ -7,3 +7,5 @@ build/
 .idea/
 *.udb
 .playwright-mcp/
+
+.coverage
