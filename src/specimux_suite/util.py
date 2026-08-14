@@ -24,9 +24,19 @@ def count_fastq_reads(path: Path) -> int:
 
 
 def count_fastq_reads_fast(path: Path) -> int:
-    """Fast read count — counts lines and divides by 4."""
+    """Fast read count — counts lines and divides by 4.
+
+    Transparently decompresses .gz input (MinKNOW commonly emits
+    .fastq.gz); counting raw lines of a compressed stream would return
+    a meaningless number.
+    """
     line_count = 0
-    with open(path, "rb") as f:
+    if path.name.endswith(".gz"):
+        import gzip
+        opener = gzip.open(path, "rb")
+    else:
+        opener = open(path, "rb")
+    with opener as f:
         for _ in f:
             line_count += 1
     return line_count // 4

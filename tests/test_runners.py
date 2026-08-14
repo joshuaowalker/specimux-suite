@@ -407,3 +407,20 @@ def test_cluster_header_chimera_flag():
     # Absent on non-flagged clusters
     c2 = parse_cluster_header(">sample-1.v1 size=200 ric=100 gid=1 vid=1")
     assert "chimera" not in c2
+
+
+def test_count_fastq_reads_fast_gzip(tmp_path):
+    """Read counting must decompress .gz input (MinKNOW emits .fastq.gz) —
+    counting raw lines of the compressed stream returns garbage."""
+    import gzip
+    from specimux_suite.util import count_fastq_reads_fast
+
+    records = b"".join(b"@r%d\nACGTACGT\n+\nIIIIIIII\n" % i for i in range(250))
+    plain = tmp_path / "reads.fastq"
+    plain.write_bytes(records)
+    gz = tmp_path / "reads.fastq.gz"
+    with gzip.open(gz, "wb") as f:
+        f.write(records)
+
+    assert count_fastq_reads_fast(plain) == 250
+    assert count_fastq_reads_fast(gz) == 250
