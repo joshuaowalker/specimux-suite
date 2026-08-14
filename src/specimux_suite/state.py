@@ -32,6 +32,8 @@ class ClusterInfo:
     err_factor: Optional[float] = None
     gid: Optional[int] = None
     vid: Optional[int] = None
+    # 0.8.6+ two-parent recombinant flag: "v{a}+v{b}" naming the parent vids
+    chimera: Optional[str] = None
 
 
 @dataclass
@@ -81,8 +83,8 @@ class PipelineState:
         self.total_input_reads: int = 0
         self.total_matched_reads: int = 0
         self.specimux_runs: int = 0
-        # Effective speconsense-summarize routing thresholds (from pipeline.started);
-        # the dashboard uses these to preview .ns/.lq routing per cluster.
+        # Effective speconsense-summarize routing settings (from pipeline.started);
+        # the dashboard uses these to preview .ns/.lq/.chimera routing per cluster.
         self.summarize_filter: dict = {}
         # Per-demux snapshots for the dashboard's Forecast tab:
         # {ts, input_cum, matched_cum, counts: {sid: cumulative reads}}.
@@ -237,6 +239,7 @@ class PipelineState:
                 err_factor=c.get("err_factor"),
                 gid=c.get("gid"),
                 vid=c.get("vid"),
+                chimera=c.get("chimera"),
             ))
         spec.clusters = clusters
 
@@ -321,7 +324,7 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
                 "name": c.name, "size": c.size, "ric": c.ric, "rid": c.rid,
                 "rid_min": c.rid_min, "primers": c.primers, "ambig": c.ambig,
                 "cer_factor": c.cer_factor, "err_factor": c.err_factor,
-                "gid": c.gid, "vid": c.vid,
+                "gid": c.gid, "vid": c.vid, "chimera": c.chimera,
             }
             for c in s.clusters
         ],

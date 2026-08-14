@@ -396,3 +396,14 @@ def test_run_group_single_vsearch_per_batch(tmp_path, monkeypatch):
     assert (config.identification_output_dir / "specB.tsv").exists()
     # Combined temp file cleaned up
     assert not list(config.identification_output_dir.glob("_batch-*"))
+
+
+def test_cluster_header_chimera_flag():
+    """0.8.6+ chimera= recombinant flag is captured as a string."""
+    c = parse_cluster_header(
+        ">sample-1.v2 size=40 ric=38 gid=1 vid=2 chimera=v0+v1"
+    )
+    assert c["chimera"] == "v0+v1"
+    # Absent on non-flagged clusters
+    c2 = parse_cluster_header(">sample-1.v1 size=200 ric=100 gid=1 vid=1")
+    assert "chimera" not in c2

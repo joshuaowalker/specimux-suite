@@ -303,3 +303,20 @@ def test_new_specimens_and_watched_outrank_bands(tmp_path):
     jobs = Scheduler(config, state).get_ready_jobs()
 
     assert [j.specimen_id for j in jobs] == ["STARRED", "NEW", "NOMATCH"]
+
+
+def test_chimera_dominant_cluster_is_marginal(tmp_path):
+    """A chimera-flagged dominant cluster demotes an otherwise-confident specimen to marginal."""
+    from specimux_suite.scheduler import confidence_band
+
+    config = _make_config(tmp_path, reprocess_ratio=0.5)
+    log = EventLog(tmp_path / "events.jsonl")
+
+    _processed(log, "CHIM",
+               clusters=[{"name": "c1", "size": 80, "chimera": "v0+v1"}],
+               matches=[{"cluster": "c1", "top_hits": [_hit("Amanita muscaria", 0.995)]}],
+               taxon="Amanita muscaria")
+
+    state = PipelineState()
+    state.rebuild(log)
+    assert confidence_band(state.specimens["CHIM"]) == (4, "marginal")

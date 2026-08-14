@@ -358,3 +358,23 @@ def test_demux_history_decimation(tmp_output):
     assert len(h) <= PipelineState._DEMUX_HISTORY_MAX
     assert h[-1]["matched_cum"] == n  # newest always retained
     assert h[0]["matched_cum"] == 1
+
+
+def test_cluster_chimera_captured(tmp_path):
+    """chimera= flag flows from consensus.completed into state and to_dict."""
+    from specimux_suite.events import EventLog
+
+    log = EventLog(tmp_path / "events.jsonl")
+    log.emit("consensus.started", {"specimen_id": "A", "job_id": "j1", "read_count": 50})
+    log.emit("consensus.completed", {"specimen_id": "A", "job_id": "j1", "clusters": [
+        {"name": "A-1.v1", "size": 40, "ric": 38},
+        {"name": "A-1.v2", "size": 10, "ric": 9, "chimera": "v0+v1"},
+    ]})
+
+    state = PipelineState()
+    state.rebuild(log)
+    clusters = state.specimens["A"].clusters
+    assert clusters[0].chimera is None
+    assert clusters[1].chimera == "v0+v1"
+    d = state.to_dict()["specimens"]["A"]["clusters"]
+    assert d[1]["chimera"] == "v0+v1"

@@ -92,3 +92,16 @@ def test_summarize_thresholds_unknown_profile_falls_back(tmp_path):
     t = cfg.resolve_summarize_thresholds()
     assert t["min_cer_factor"] == SUMMARIZE_DEFAULT_MIN_CER_FACTOR
     assert t["max_err_factor"] == SUMMARIZE_DEFAULT_MAX_ERR_FACTOR
+
+
+def test_filter_chimeras_default_off(tmp_path):
+    cfg = _make_config(tmp_path)
+    assert cfg.resolve_summarize_thresholds()["filter_chimeras"] is False
+
+
+def test_filter_chimeras_from_overrides_and_args(tmp_path):
+    cfg = _make_config(tmp_path, summarize_overrides={"filter-chimeras": True})
+    assert cfg.resolve_summarize_thresholds()["filter_chimeras"] is True
+
+    cfg = _make_config(tmp_path, summarize_args=["--filter-chimeras"])
+    assert cfg.resolve_summarize_thresholds()["filter_chimeras"] is True

@@ -89,7 +89,8 @@ def confidence_band(spec: SpecimenState) -> tuple[int, str]:
         if dominant_hit is not None and _hit_genus(dominant_hit) != community_genus:
             return 3, "minority_on_target"
     dominant_cluster = max(spec.clusters, key=lambda c: c.size, default=None)
-    if identity < 0.98 or (dominant_cluster and (dominant_cluster.ambig or 0) > 0):
+    if identity < 0.98 or (dominant_cluster and (
+            (dominant_cluster.ambig or 0) > 0 or dominant_cluster.chimera)):
         return 4, "marginal"
     return 5, "confident"
 

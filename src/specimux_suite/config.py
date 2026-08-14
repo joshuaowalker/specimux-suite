@@ -125,12 +125,16 @@ class PipelineConfig:
         summarize CLI applies (lowest to highest): tool defaults < ``-p``
         profile < ``summarize.*`` overrides < ``--summarize-args`` escape hatch.
 
-        Returns ``{"min_cer_factor": float, "max_err_factor": float}``.
+        Returns ``{"min_cer_factor": float, "max_err_factor": float,
+        "filter_chimeras": bool}``. ``filter_chimeras`` mirrors summarize's
+        ``--filter-chimeras`` store-true flag (default off: chimera-flagged
+        clusters ride the pass track for review).
         Profile resolution is best-effort: an unreadable/unknown profile leaves
         the lower-precedence value in place (debug-logged), never raising.
         """
         min_cer = SUMMARIZE_DEFAULT_MIN_CER_FACTOR
         max_err = SUMMARIZE_DEFAULT_MAX_ERR_FACTOR
+        filter_chimeras = False
 
         # 1. Named summarize profile (best-effort YAML read).
         if self.summarize_profile:
@@ -139,6 +143,8 @@ class PipelineConfig:
                 min_cer = _as_float(prof["min-cer-factor"], min_cer)
             if "max-err-factor" in prof:
                 max_err = _as_float(prof["max-err-factor"], max_err)
+            if "filter-chimeras" in prof:
+                filter_chimeras = bool(prof["filter-chimeras"])
 
         # 2. summarize.* overrides from the suite profile.
         for key in ("min-cer-factor", "min_cer_factor"):
@@ -147,12 +153,21 @@ class PipelineConfig:
         for key in ("max-err-factor", "max_err_factor"):
             if key in self.summarize_overrides:
                 max_err = _as_float(self.summarize_overrides[key], max_err)
+        for key in ("filter-chimeras", "filter_chimeras"):
+            if key in self.summarize_overrides:
+                filter_chimeras = bool(self.summarize_overrides[key])
 
         # 3. --summarize-args escape hatch (highest precedence).
         min_cer = _scan_flag_value(self.summarize_args, "--min-cer-factor", min_cer)
         max_err = _scan_flag_value(self.summarize_args, "--max-err-factor", max_err)
+        if "--filter-chimeras" in self.summarize_args:
+            filter_chimeras = True
 
-        return {"min_cer_factor": min_cer, "max_err_factor": max_err}
+        return {
+            "min_cer_factor": min_cer,
+            "max_err_factor": max_err,
+            "filter_chimeras": filter_chimeras,
+        }
 
     def summary(self) -> dict:
         """Return a JSON-serializable config summary for events."""

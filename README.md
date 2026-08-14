@@ -179,6 +179,7 @@ The built-in dashboard provides a real-time view of pipeline progress, streamed 
 - On-target/off-target indicators when community taxa are available
 - Identity warnings for low-confidence matches (<98% or <90%)
 - Expandable cluster-level detail with per-cluster identification and sequence viewer
+- Cluster quality badges: NS/LQ routing preview and CHIMERA (speconsense 0.8.6+ two-parent recombinant flag; routed to the `.chimera` track when summarize runs with `--filter-chimeras`, otherwise kept in Summary and badged for review)
 - Search, sort, and filter (novel, on-target, off-target, no-match, watched)
 
 ### Summary tab

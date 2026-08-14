@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 # defensively; anything that fails conversion is dropped rather than raising.
 _INT_FIELDS = ("size", "ric", "ambig", "gid", "vid")
 _FLOAT_FIELDS = ("rid", "rid_min", "cer_factor", "err_factor")
-_STR_FIELDS = ("primers",)
+# chimera (0.8.6+) is "v{a}+v{b}" naming the two parent vids of a suspected
+# PCR recombinant (uchime-style two-parent test in speconsense core)
+_STR_FIELDS = ("primers", "chimera")
 
 
 def parse_cluster_header(line: str) -> dict | None:
