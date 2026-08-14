@@ -50,7 +50,7 @@ async def index():
     static_dir = Path(__file__).parent / "static"
     index_file = static_dir / "index.html"
     if index_file.exists():
-        return HTMLResponse(index_file.read_text())
+        return HTMLResponse(index_file.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>specimux-suite dashboard</h1><p>Static files not found.</p>")
 
 
@@ -141,7 +141,7 @@ async def event_stream(request: Request, after_version: int = 0):
 def _parse_fasta_entry(path: Path, entry_name: str) -> str | None:
     """Find a sequence by header ID in a FASTA file."""
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except (OSError, IOError):
         return None
     current_id = None
@@ -162,7 +162,7 @@ def _parse_fasta_entry(path: Path, entry_name: str) -> str | None:
 def _read_single_fasta(path: Path) -> str | None:
     """Read the first sequence from a single-sequence FASTA file."""
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except (OSError, IOError):
         return None
     seq_lines = []

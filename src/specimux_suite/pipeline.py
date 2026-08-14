@@ -714,14 +714,14 @@ class Pipeline:
         combined = summary_dir / f"{specimen_id}-variants-combined.fasta"
         found_any = False
 
-        with open(combined, "w") as out:
+        with open(combined, "w", encoding="utf-8") as out:
             for variant in spec.variants:
                 vname = variant.get("name")
                 if not vname:
                     continue
                 matches = list(summary_dir.glob(f"{vname}-RiC*.fasta"))
                 for fasta_path in matches:
-                    out.write(fasta_path.read_text())
+                    out.write(fasta_path.read_text(encoding="utf-8"))
                     found_any = True
 
         if not found_any:

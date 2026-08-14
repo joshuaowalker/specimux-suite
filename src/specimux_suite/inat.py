@@ -115,7 +115,7 @@ def fetch_community_taxa(
     cache_file = cache_dir / "inat_taxon_cache.json" if cache_dir else None
     if cache_file and cache_file.exists():
         try:
-            raw = json.loads(cache_file.read_text())
+            raw = json.loads(cache_file.read_text(encoding="utf-8"))
             for obs_id, val in raw.items():
                 if isinstance(val, dict) and val.get("genus") and "iconic_taxon" in val:
                     cache[obs_id] = val
@@ -214,7 +214,7 @@ def fetch_community_taxa(
     if cache_file:
         try:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(cache))
+            cache_file.write_text(json.dumps(cache), encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to save iNat cache: {e}")
 

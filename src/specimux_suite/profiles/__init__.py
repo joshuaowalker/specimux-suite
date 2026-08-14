@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 import logging
+import os
 import re
 
 try:
@@ -39,8 +40,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# XDG-compliant config path
-XDG_CONFIG_HOME = Path.home() / ".config"
+# XDG-compliant config path ($XDG_CONFIG_HOME honored, ~/.config default)
+XDG_CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 PROFILES_DIR = XDG_CONFIG_HOME / "specimux-suite" / "profiles"
 
 VALID_SUITE_KEYS = {

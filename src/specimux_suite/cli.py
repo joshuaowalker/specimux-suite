@@ -151,9 +151,21 @@ def main():
         from .web.server import start_web_server
         start_web_server(pipeline.event_log, pipeline.state, config)
         if not args.no_open:
-            import webbrowser
             url = f"http://localhost:{config.web_port}"
-            webbrowser.open(url)
+            # Only auto-open in a graphical session, and never on the main
+            # thread: on headless Linux webbrowser falls back to text-mode
+            # browsers (www-browser/lynx) whose open() blocks until the user
+            # quits — and that browser would own the TTY the console needs.
+            import os
+            if sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+                import threading
+                import webbrowser
+                threading.Thread(
+                    target=webbrowser.open, args=(url,),
+                    name="browser-open", daemon=True,
+                ).start()
+            else:
+                logging.getLogger(__name__).info(f"Dashboard available at {url}")
 
     if args.command == "batch":
         pipeline.run_batch()

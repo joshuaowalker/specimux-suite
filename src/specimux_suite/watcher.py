@@ -132,8 +132,21 @@ class FileWatcher:
         handler = _FastqHandler(
             on_new_file=self._handle_file,
         )
-        self._observer.schedule(handler, str(self.watch_dir), recursive=False)
-        self._observer.start()
+        # On Linux, inotify watch registration happens synchronously inside
+        # start() and raises OSError (ENOSPC) when the per-user watch limit
+        # is exhausted (fs.inotify.max_user_watches — common in containers).
+        # The polling loop below is a complete substitute, so degrade to it
+        # instead of aborting live mode.
+        self._observer_started = False
+        try:
+            self._observer.schedule(handler, str(self.watch_dir), recursive=False)
+            self._observer.start()
+            self._observer_started = True
+        except OSError as e:
+            logger.warning(
+                f"Filesystem watcher unavailable ({e}); falling back to "
+                f"polling every {self._checker.check_interval}s"
+            )
 
         # Start a polling thread as fallback for platforms where FSEvents
         # may coalesce or delay notifications (e.g. macOS)
@@ -157,8 +170,9 @@ class FileWatcher:
     def stop(self) -> None:
         """Stop watching."""
         self._stop_event.set()
-        self._observer.stop()
-        self._observer.join()
+        if getattr(self, "_observer_started", False):
+            self._observer.stop()
+            self._observer.join()
         for t in self._threads:
             t.join(timeout=5.0)
 

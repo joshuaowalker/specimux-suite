@@ -104,7 +104,7 @@ def parse_specimens_file(path: Path) -> list[dict]:
     specimens = []
     if not path.exists():
         return specimens
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         header = f.readline().strip().split("\t")
         try:
             id_col = header.index("SampleID")
@@ -147,9 +147,15 @@ def clone_or_copy(src: Path, dst: Path) -> None:
         cmd = None
 
     if cmd is not None:
-        result = subprocess.run(cmd, capture_output=True)
-        if result.returncode == 0:
-            return
-        logger.debug(f"clone copy failed ({result.stderr!r}), falling back to plain copy")
+        # OSError (e.g. cp missing from PATH on minimal images) must fall
+        # through to the portable copy — if it escaped, the caller would fall
+        # back to reading the live file, defeating the snapshot's purpose.
+        try:
+            result = subprocess.run(cmd, capture_output=True)
+            if result.returncode == 0:
+                return
+            logger.debug(f"clone copy failed ({result.stderr!r}), falling back to plain copy")
+        except OSError as e:
+            logger.debug(f"clone copy unavailable ({e}), falling back to plain copy")
 
     shutil.copy2(src, dst)

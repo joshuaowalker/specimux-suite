@@ -55,7 +55,7 @@ class EventLog:
 
         # Recover version and populate buffer from existing log
         for log_path in self._all_log_paths():
-            for line in log_path.read_text().splitlines():
+            for line in log_path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line:
                     self._version += 1
@@ -84,7 +84,7 @@ class EventLog:
                 data=data or {},
             )
             self._maybe_rotate()
-            with open(self.path, "a") as f:
+            with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(_event_to_dict(event)) + "\n")
             self._buffer.append(event)
             for listener in self._listeners:
@@ -98,7 +98,7 @@ class EventLog:
     def replay(self) -> Generator[Event, None, None]:
         """Yield all events from all log files (archived + current) in order."""
         for log_path in self._all_log_paths():
-            with open(log_path) as f:
+            with open(log_path, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line:

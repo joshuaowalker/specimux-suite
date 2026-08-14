@@ -154,9 +154,9 @@ class IdentifyRunner:
             fd, tmp_name = tempfile.mkstemp(
                 suffix=".fasta", prefix="_batch-", dir=out_dir)
             combined = Path(tmp_name)
-            with os.fdopen(fd, "w") as out:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
                 for _sid, fasta, _cv, _name in requests:
-                    out.write(fasta.read_text())
+                    out.write(fasta.read_text(encoding="utf-8"))
                     out.write("\n")
             query_fasta = combined
             threads = max(1, self.config.workers // 2)
@@ -196,7 +196,7 @@ class IdentifyRunner:
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             path = out_dir / f"{name}.tsv"
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write("cluster\tref_id\tname\tidentity\tadjusted_identity\tcoverage\n")
                 for m in matches:
                     for hit in m["top_hits"]:
@@ -381,7 +381,7 @@ def _read_fasta(path: Path) -> dict[str, str]:
     seqs = {}
     current_id = None
     current_seq = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if line.startswith(">"):
                 if current_id:

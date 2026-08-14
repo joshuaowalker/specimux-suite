@@ -92,7 +92,13 @@ class PipelineConfig:
         if self.event_log_path is None:
             self.event_log_path = self.output_dir / "events.jsonl"
         if self.workers <= 0:
-            self.workers = max(1, os.cpu_count() // 2)
+            # sched_getaffinity respects cgroup/taskset/SLURM CPU limits on
+            # Linux; os.cpu_count() reports host cores (macOS has no affinity).
+            try:
+                available = len(os.sched_getaffinity(0))
+            except AttributeError:
+                available = os.cpu_count() or 2
+            self.workers = max(1, available // 2)
 
     @property
     def specimux_output_dir(self) -> Path:
@@ -204,7 +210,7 @@ def _read_summarize_profile_filters(name: str) -> dict:
         try:
             if not path.is_file():
                 continue
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             return data.get("speconsense-summarize", {}) or {}
         except (OSError, yaml.YAMLError) as e:
