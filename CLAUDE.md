@@ -42,7 +42,7 @@ watcher (live) or CLI (batch)
 
 ## Event types
 
-All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `specimens.taxa`, `file.detected`, `file.stable`, `specimux.started`, `specimux.progress`, `specimux.completed`, `specimen.updated`, `specimen.watched`, `consensus.started`, `consensus.completed`, `identification.completed`, `summarize.started`, `summarize.completed`, `summarize.aggregate_completed`, `finalization.started`, `finalization.completed`, `pipeline.error`.
+All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `specimens.taxa`, `taxa.lineage`, `file.detected`, `file.stable`, `specimux.started`, `specimux.progress`, `specimux.completed`, `specimen.updated`, `specimen.watched`, `consensus.started`, `consensus.completed`, `identification.completed`, `summarize.started`, `summarize.completed`, `summarize.aggregate_completed`, `finalization.started`, `finalization.completed`, `pipeline.error`.
 
 Specimen status transitions:
 ```
@@ -60,12 +60,16 @@ WAITING → CONSENSUS_RUNNING → CONSENSUS_DONE → IDENTIFIED → SUMMARIZED
 
 ## Adding a new event type
 
-When adding a new event type, there are **four places** that must be updated:
+When adding a new event type, there are **four places** that must be updated (six if the highlights screen consumes it):
 
 1. **Emit the event** — call `event_log.emit("new.event", {...})` from the appropriate place (pipeline, runner, etc.)
 2. **State handler** — add `_on_new_event` method to `PipelineState` in `state.py` and register it in the `_handlers` dict
 3. **Dashboard `applyEvent()`** — add a `case` in the `switch` in `index.html` to apply the event to client-side state
 4. **Dashboard SSE listener list** — add the event type string to the `for (const type of [...])` array in `connect()` (`index.html`). The `EventSource` only delivers named SSE events to explicitly registered listeners — missing this step silently drops the event.
+5. **(if relevant) `/present` `applyEvent()`** — `present.html` keeps its own state mirror with the same switch pattern
+6. **(if relevant) `/present` SSE listener list** — same silent-drop gotcha as the dashboard
+
+Clients bootstrap from `/api/state` and subscribe SSE at the snapshot version, so `applyEvent` never sees historical events — any state a new event builds must also ride the snapshot (`PipelineState.to_dict`).
 
 ## Key design decisions
 
@@ -75,3 +79,4 @@ When adding a new event type, there are **four places** that must be updated:
 - `adjusted-identity` library is used for homopolymer-aware scoring of vsearch hits.
 - The Summary tab strictly shows variant-level identification results — no fallback to raw cluster identifications.
 - iNaturalist community taxa are fetched asynchronously at startup and cached to `inat_taxon_cache.json`. On-target/off-target detection compares the top hit genus against the community taxon genus.
+- The reference-DB contract is deliberately minimal — a FASTA with `name="..."` headers — so users can mint their own references. Never consume other header fields (e.g. `sintax_*`). Taxonomy for a hit comes from its name's first token (the genus) resolved against iNat taxonomy (`fetch_genus_lineages`, cached in `inat_lineage_cache.json`, emitted as `taxa.lineage` events); taxonomy-level field-ID agreement (`agreementRank` in both `index.html` and `present.html`) compares the observation's `ancestor_ids` against the genus lineage. Display-only — scheduler confidence banding stays genus-based.

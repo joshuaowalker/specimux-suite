@@ -199,6 +199,7 @@ tr:hover { background: rgba(255,255,255,0.03); }
 }
 .target-on { color: var(--done); }
 .target-off { color: var(--error); }
+.target-near { color: var(--processing); }
 
 .identity-warning {
   margin-left: 0.3rem;
@@ -530,7 +531,7 @@ col.col-sum-reads { width: 12%; }
   <details class="legend">
     <summary>What do the symbols mean?</summary>
     <div class="legend-body">
-      <span><b>✓ / ✗</b> — the best database match is in the same genus as the iNaturalist community ID (✓ on-target) or a different genus (✗ off-target). Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
+      <span><b>✓ / ≈ / ✗</b> — how the best database match relates to the iNaturalist community ID: same genus or species (✓ on-target), a different genus in the same family or order (≈ partial), or unrelated (✗ off-target). Hover the symbol for the exact shared rank. The On-target filter shows ✓ specimens; the Off-target filter shows ≈ and ✗. Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
       <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species) and red ⚠ below 90% (likely undescribed or a poor sequence).</span>
       <span><b>★</b> — watched: the operator starred this specimen so it gets processed first. Click to star.</span>
       <span><b>Status</b> — waiting → queued → processing → consensus built → identified / no match → summarized (final).</span>
@@ -594,7 +595,7 @@ col.col-sum-reads { width: 12%; }
   <details class="legend">
     <summary>What do the symbols mean?</summary>
     <div class="legend-body">
-      <span><b>✓ / ✗</b> — the best database match is in the same genus as the iNaturalist community ID (✓ on-target) or a different genus (✗ off-target). Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
+      <span><b>✓ / ≈ / ✗</b> — how the best database match relates to the iNaturalist community ID: same genus or species (✓ on-target), a different genus in the same family or order (≈ partial), or unrelated (✗ off-target). Hover the symbol for the exact shared rank. The On-target filter shows ✓ specimens; the Off-target filter shows ≈ and ✗. Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
       <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species) and red ⚠ below 90% (likely undescribed or a poor sequence).</span>
       <span><b>Variants</b> — distinct sequence versions recovered for the specimen (a specimen can carry several ITS variants or several organisms).</span>
     </div>
@@ -638,7 +639,7 @@ col.col-sum-reads { width: 12%; }
 <button id="scroll-top" aria-label="Scroll to top">▲</button>
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, summarizeFilter: {}, demuxHistory: [] };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, summarizeFilter: {}, demuxHistory: [], genusLineages: {} };
 let activeTab = 'processing';
 const tabState = {
   processing: { sortKey: 'specimen_id', sortAsc: true, searchTerm: '', expanded: new Set(), filters: new Set(), hideFiltered: false },
@@ -693,7 +694,7 @@ function connect() {
 
   // Listen for specific event types too
   for (const type of [
-    'pipeline.started', 'specimens.loaded', 'specimens.taxa', 'specimux.started', 'specimux.progress', 'specimux.completed', 'specimen.updated',
+    'pipeline.started', 'specimens.loaded', 'specimens.taxa', 'taxa.lineage', 'specimux.started', 'specimux.progress', 'specimux.completed', 'specimen.updated',
     'consensus.started', 'consensus.completed',
     'identification.completed',
     'summarize.started', 'summarize.completed',
@@ -736,11 +737,17 @@ function applyEvent(event) {
             state.specimens[sid].community_taxon = taxon.name || '';
             state.specimens[sid].community_genus = taxon.genus || '';
             state.specimens[sid].community_iconic_taxon = taxon.iconic_taxon || '';
+            state.specimens[sid].inat_ancestors = taxon.ancestors || [];
           } else {
             state.specimens[sid].community_taxon = taxon;
             state.specimens[sid].community_genus = (taxon || '').split(/\s+/)[0];
           }
         }
+      }
+      break;
+    case 'taxa.lineage':
+      for (const [genus, lineage] of Object.entries(d.lineages || {})) {
+        state.genusLineages[genus.toLowerCase()] = lineage;
       }
       break;
     case 'specimux.started':
@@ -872,12 +879,45 @@ function statusLabelFor(displayStatus) {
   return STATUS_LABELS[displayStatus] || displayStatus.replace('_', ' ');
 }
 
-function targetIndicatorHtml(targetStatus) {
-  if (targetStatus === 'on-target') {
-    return '<span class="target-indicator target-on" title="On-target: best match is in the same genus as the iNaturalist community ID" aria-label="on-target">✓</span>';
+// Ranks at or below genus: agreement here is effectively on-target even
+// when the name strings differ (iNat's tree often nests an outdated
+// binomial under the current genus). Ranks between order and genus are
+// "near": a different genus in the same family/tribe — often a taxonomy
+// split (Cortinarius→Phlegmacium) rather than a wrong specimen.
+const GENUS_OR_DEEPER_RANKS = new Set(['genus', 'subgenus', 'section', 'subsection', 'complex', 'species', 'subspecies', 'variety', 'form', 'hybrid']);
+const NEAR_RANKS = new Set(['order', 'suborder', 'infraorder', 'superfamily', 'epifamily', 'family', 'subfamily', 'supertribe', 'tribe', 'subtribe']);
+
+// The one place genus-string on/off-target is upgraded with taxonomy-level
+// agreement. Both the ✓/≈/✗ indicator and the On-/Off-target filter chips
+// consume this, so a specimen can never show ✓ yet sit in the Off-target
+// filter. Returns 'on-target' | 'on-target-taxonomy' | 'near' | 'off-target'
+// | null. (Scheduler banding — reprocessBand — stays genus-based.)
+function effectiveTargetStatus(s, context) {
+  const t = getTargetStatus(s, context);
+  if (t !== 'off-target') return t;
+  const a = agreementRank(s, getTopHit(s, context));
+  if (a && GENUS_OR_DEEPER_RANKS.has(a.level)) return 'on-target-taxonomy';
+  if (a && NEAR_RANKS.has(a.level)) return 'near';
+  return 'off-target';
+}
+
+function targetIndicatorHtml(effStatus, agreement) {
+  if (effStatus === 'on-target') {
+    const level = agreement && agreement.level === 'species' ? 'species' : 'genus';
+    return `<span class="target-indicator target-on" title="On-target: best match agrees with the iNaturalist community ID at ${level} level" aria-label="on-target">✓</span>`;
   }
-  if (targetStatus === 'off-target') {
-    return '<span class="target-indicator target-off" title="Off-target: best match is a different genus than the iNaturalist community ID — could be a mycoparasite, contaminant, or misidentification" aria-label="off-target">✗</span>';
+  if (effStatus === 'on-target-taxonomy') {
+    return `<span class="target-indicator target-on" title="On-target in iNaturalist taxonomy: the names differ but share the ${esc(agreement.level)} ${esc(agreement.name)}" aria-label="on-target">✓</span>`;
+  }
+  if (effStatus === 'near') {
+    return `<span class="target-indicator target-near" title="Partial: best match is a different genus but shares the ${esc(agreement.level)} ${esc(agreement.name)} with the iNaturalist community ID" aria-label="partial agreement">≈</span>`;
+  }
+  if (effStatus === 'off-target') {
+    let title = 'Off-target: best match is a different genus than the iNaturalist community ID — could be a mycoparasite, contaminant, or misidentification';
+    if (agreement && agreement.name) {
+      title += ` (nearest shared rank: ${agreement.level} ${agreement.name})`;
+    }
+    return `<span class="target-indicator target-off" title="${esc(title)}" aria-label="off-target">✗</span>`;
   }
   return '';
 }
@@ -920,12 +960,18 @@ function matchesFilters(s, filters, context) {
         if (!h || (h.adjusted_identity || h.identity || 1) >= 0.98) return false;
         break;
       }
-      case 'on-target':
-        if (!hasIdentification(s) || getTargetStatus(s, context) !== 'on-target') return false;
+      case 'on-target': {
+        const eff = hasIdentification(s) && effectiveTargetStatus(s, context);
+        if (eff !== 'on-target' && eff !== 'on-target-taxonomy') return false;
         break;
-      case 'off-target':
-        if (!hasIdentification(s) || getTargetStatus(s, context) !== 'off-target') return false;
+      }
+      case 'off-target': {
+        // ≈ (near) stays in this filter: it is still a different genus,
+        // which is the review pile this chip exists for.
+        const eff = hasIdentification(s) && effectiveTargetStatus(s, context);
+        if (eff !== 'off-target' && eff !== 'near') return false;
         break;
+      }
       case 'no-match':
         if (getIdResult(s) !== 'no_match') return false;
         break;
@@ -1041,6 +1087,30 @@ function isHitOnTarget(hit, communityGenus) {
   if (!communityGenus || !hit) return false;
   const hitGenus = (hit.name || hit.ref_id || '').split(/\s+/)[0].toLowerCase();
   return hitGenus === communityGenus;
+}
+
+// Deepest taxonomic level at which the field ID and the displayed top hit
+// agree: {level: 'species'|'genus'|<iNat rank>, name} or null when unknown
+// (no field ID, no hit, or lineage data not yet fetched). Display-only —
+// scheduler banding stays genus-based.
+function agreementRank(s, hit) {
+  if (!hit || !s.community_taxon) return null;
+  const hitName = (hit.name || hit.ref_id || '').trim();
+  if (hitName.toLowerCase() === s.community_taxon.trim().toLowerCase()) {
+    return { level: 'species', name: hitName };
+  }
+  const communityGenus = (s.community_genus || s.community_taxon.split(/\s+/)[0]).toLowerCase();
+  const hitGenus = hitName.split(/\s+/)[0];
+  if (hitGenus.toLowerCase() === communityGenus) {
+    return { level: 'genus', name: hitGenus };
+  }
+  const lineage = state.genusLineages[hitGenus.toLowerCase()];
+  if (!lineage || !lineage.length || !(s.inat_ancestors || []).length) return null;
+  const anc = new Set(s.inat_ancestors);
+  for (let i = lineage.length - 1; i >= 0; i--) {
+    if (anc.has(lineage[i].id)) return { level: lineage[i].rank, name: lineage[i].name };
+  }
+  return null;
 }
 
 // Preview which summarize track a cluster would be routed to, replicating
@@ -1606,7 +1676,7 @@ function renderProcessing() {
     const hasClusters = (s.clusters || []).length > 0;
 
     // Target indicator
-    const targetHtml = targetIndicatorHtml(getTargetStatus(s));
+    const targetHtml = targetIndicatorHtml(effectiveTargetStatus(s), agreementRank(s, getTopHit(s)));
 
     // Low-identity warning
     const warningHtml = topHit ? identityWarningHtml(identity) : '';
@@ -1814,7 +1884,7 @@ function renderSummary() {
     const topMatchCell = topHit ? linkedName(topHit.name || topHit.ref_id || '') : '—';
 
     // Identity cell
-    const targetHtml = targetIndicatorHtml(getTargetStatus(s, 'variants'));
+    const targetHtml = targetIndicatorHtml(effectiveTargetStatus(s, 'variants'), agreementRank(s, getTopHit(s, 'variants')));
     const warningHtml = topHit ? identityWarningHtml(identity) : '';
     const organismsBadge = getOrganismsBadge(s, 'variants');
     const identityCell = topHit ? `${targetHtml}<span class="hit-pct">${pct}%</span>${warningHtml}${organismsBadge ? ' ' + organismsBadge : ''}` : '';
@@ -2117,6 +2187,7 @@ fetch('/api/state').then(r => r.json()).then(data => {
   state.demuxHistory = (data.demux_history || []).map(h => ({
     ts: h.ts, inputCum: h.input_cum, matchedCum: h.matched_cum, counts: h.counts || {},
   }));
+  state.genusLineages = data.genus_lineages || {};
   if (data.summarize_filter) state.summarizeFilter = data.summarize_filter;
   if (data.config_summary) {
     if (data.config_summary.min_reads) minReads = data.config_summary.min_reads;

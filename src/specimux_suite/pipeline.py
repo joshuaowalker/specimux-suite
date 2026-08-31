@@ -14,7 +14,7 @@ from .console import ConsoleUI
 from .events import EventLog
 from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
-from .inat import extract_inat_ids, fetch_community_taxa
+from .inat import extract_inat_ids, fetch_community_taxa, fetch_genus_lineages
 from .photos import photo_cache_dir, prefetch_photos
 from .util import clone_or_copy, parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
@@ -68,7 +68,25 @@ class Pipeline:
                 name="identify-batcher", daemon=True,
             )
             self._id_batcher_thread.start()
+
         self._shutdown = threading.Event()
+
+        # Genus lineage fetcher: identifications surface new genera over the
+        # run; a listener queues them (queue.put only — listeners run under
+        # the emit lock) and a daemon thread resolves lineages via iNat
+        # taxonomy, emitting taxa.lineage events. Seeded from replayed state
+        # so a restart backfills genera whose lineages were never fetched.
+        self._lineage_queue: queue.Queue = queue.Queue()
+        self._lineage_seen: set[str] = set(self.state.genus_lineages)
+        if self.identify:
+            for spec in self.state.specimens.values():
+                for m in spec.identification:
+                    for h in m.top_hits:
+                        self._queue_lineage_genus(h.get("name") or h.get("ref_id") or "")
+            self.event_log.add_listener(self._on_event_queue_lineages)
+            threading.Thread(
+                target=self._lineage_fetcher, name="lineage-fetch", daemon=True,
+            ).start()
         self._draining = False  # True while waiting for specimux to run
         self.cmd_queue: queue.Queue = queue.Queue()
         self._file_queue: queue.Queue[Path] = queue.Queue()
@@ -116,6 +134,52 @@ class Pipeline:
             )
         except Exception as e:
             logger.warning(f"iNaturalist photo prefetch failed: {e}")
+
+    def _queue_lineage_genus(self, hit_name: str) -> None:
+        """Queue a hit name's genus (first token) for lineage resolution."""
+        genus = hit_name.split()[0] if hit_name.strip() else ""
+        key = genus.lower()
+        if genus and key not in self._lineage_seen:
+            self._lineage_seen.add(key)
+            self._lineage_queue.put(genus)
+
+    def _on_event_queue_lineages(self, event) -> None:
+        if event.type != "identification.completed":
+            return
+        for m in event.data.get("matches", []):
+            for h in m.get("top_hits", []):
+                self._queue_lineage_genus(h.get("name") or h.get("ref_id") or "")
+
+    def _lineage_fetcher(self) -> None:
+        """Resolve queued genera in waves and emit taxa.lineage (daemon thread)."""
+        while not self._shutdown.is_set():
+            try:
+                wave = [self._lineage_queue.get(timeout=1.0)]
+            except queue.Empty:
+                continue
+            # Let a burst of identifications settle so one wave covers it
+            time.sleep(2.0)
+            while True:
+                try:
+                    wave.append(self._lineage_queue.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                lineages = fetch_genus_lineages(
+                    wave, cache_dir=self.config.output_dir, abort=self._shutdown,
+                )
+                if lineages:
+                    self.event_log.emit("taxa.lineage", {"lineages": lineages})
+                    logger.info(f"Resolved lineage for {len(lineages)} genera")
+                # A transient failure leaves a genus out of the result;
+                # forget it so its next identification re-queues it.
+                for genus in wave:
+                    if genus not in lineages:
+                        self._lineage_seen.discard(genus.lower())
+            except Exception as e:
+                logger.warning(f"Genus lineage fetch failed: {e}")
+                for genus in wave:
+                    self._lineage_seen.discard(genus.lower())
 
     def validate_tools(self) -> list[str]:
         """Check that required external tools are on PATH. Returns list of missing tools."""

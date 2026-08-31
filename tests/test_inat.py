@@ -59,11 +59,12 @@ def test_cache_accepts_new_entries_and_discards_legacy(tmp_path):
     # cached, fetch_community_taxa returns without touching the network.
     cache = {
         "111": {"name": "Lactarius peckii", "genus": "Lactarius",
-                "iconic_taxon": "Fungi", "photos": [], "observer": {}},
+                "iconic_taxon": "Fungi", "photos": [], "observer": {},
+                "ancestors": [47170, 48627]},
         "222": {"name": "Russula", "genus": "Russula", "iconic_taxon": "Fungi"},  # legacy
         "333": {"name": "", "genus": "", "iconic_taxon": "",
                 "photos": [{"id": 9, "url": "u", "license_code": None, "attribution": ""}],
-                "observer": {"login": "x", "name": ""}},
+                "observer": {"login": "x", "name": ""}, "ancestors": []},
     }
     (tmp_path / "inat_taxon_cache.json").write_text(json.dumps(cache), encoding="utf-8")
 
@@ -136,3 +137,78 @@ def test_prefetch_aborts_between_downloads(tmp_path, monkeypatch):
             for i in range(4)}
     n = prefetch_photos(taxa, tmp_path / "photos", abort=AbortAfterFirst())
     assert n == 1
+
+
+# --- genus lineages ---
+
+from specimux_suite.inat import _pick_genus_match, fetch_genus_lineages
+
+
+def _taxon(id, name, rank="genus", iconic="Fungi", obs=100, active=True, ancestors=None):
+    return {"id": id, "name": name, "rank": rank, "iconic_taxon_name": iconic,
+            "observations_count": obs, "is_active": active,
+            "ancestor_ids": ancestors or []}
+
+
+def test_pick_genus_match_exact_fungi_most_observed():
+    results = [
+        _taxon(1, "Morus", iconic="Plantae", obs=200000),
+        _taxon(2, "Morus", iconic="Aves", obs=32000),
+        _taxon(3, "Fatoua", iconic="Plantae", obs=12000),  # fuzzy hit
+        _taxon(4, "Morus", iconic="Fungi", obs=5),
+    ]
+    assert _pick_genus_match(results, "Morus")["id"] == 4  # Fungi preferred
+    assert _pick_genus_match(results[:3], "Morus")["id"] == 1  # else most observed
+    assert _pick_genus_match(results, "Nonexistent") is None
+    inactive = [_taxon(9, "Russula", active=False)]
+    assert _pick_genus_match(inactive, "Russula") is None
+
+
+def test_fetch_genus_lineages(tmp_path, monkeypatch):
+    search_payload = {"results": [
+        _taxon(48339, "Russula", ancestors=[48460, 47170, 50814, 48339]),
+    ]}
+    details_payload = {"results": [
+        {"id": 48460, "rank": "stateofmatter", "name": "Life"},
+        {"id": 47170, "rank": "kingdom", "name": "Fungi"},
+        {"id": 50814, "rank": "family", "name": "Russulaceae"},
+        {"id": 48339, "rank": "genus", "name": "Russula"},
+    ]}
+
+    class FakeResponse:
+        def __init__(self, payload): self.payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(self.payload).encode()
+
+    def fake_urlopen(req, timeout=None):
+        return FakeResponse(search_payload if "q=" in req.full_url else details_payload)
+
+    monkeypatch.setattr("specimux_suite.inat.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("specimux_suite.inat.time.sleep", lambda s: None)
+
+    result = fetch_genus_lineages(["Russula"], cache_dir=tmp_path)
+    assert [e["name"] for e in result["Russula"]] == ["Life", "Fungi", "Russulaceae", "Russula"]
+    assert result["Russula"][-1]["rank"] == "genus"
+
+    # Cached now: a second call must not hit the network
+    monkeypatch.setattr("specimux_suite.inat.urllib.request.urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("network hit")))
+    again = fetch_genus_lineages(["Russula"], cache_dir=tmp_path)
+    assert again["Russula"] == result["Russula"]
+
+
+def test_fetch_genus_lineages_unresolved_cached_as_empty(tmp_path, monkeypatch):
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps({"results": []}).encode()
+
+    monkeypatch.setattr("specimux_suite.inat.urllib.request.urlopen",
+                        lambda req, timeout=None: FakeResponse())
+    monkeypatch.setattr("specimux_suite.inat.time.sleep", lambda s: None)
+
+    result = fetch_genus_lineages(["Notagenus"], cache_dir=tmp_path)
+    assert result["Notagenus"] == []
+    cached = json.loads((tmp_path / "inat_lineage_cache.json").read_text())
+    assert cached["notagenus"] == []

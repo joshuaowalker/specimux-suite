@@ -54,6 +54,9 @@ class SpecimenState:
     # {login, name} — used by the /present highlights screen.
     inat_photos: list = field(default_factory=list)
     inat_observer: dict = field(default_factory=dict)
+    # The observation taxon's ancestor ids (root→self, self included);
+    # compared against genus_lineages for taxonomy-level agreement.
+    inat_ancestors: list = field(default_factory=list)
     total_reads: int = 0
     reads_at_last_consensus: int = 0
     consensus_version: int = 0
@@ -90,6 +93,9 @@ class PipelineState:
         # Effective speconsense-summarize routing settings (from pipeline.started);
         # the dashboard uses these to preview .ns/.lq/.chimera routing per cluster.
         self.summarize_filter: dict = {}
+        # Genus lineages from iNat taxonomy, {genus_lower: [{id, rank, name},
+        # ...] root→genus}: the sequence-ID side of taxonomy-level agreement.
+        self.genus_lineages: dict[str, list] = {}
         # Per-demux snapshots for the dashboard's Forecast tab:
         # {ts, input_cum, matched_cum, counts: {sid: cumulative reads}}.
         # Decimated by halving beyond _DEMUX_HISTORY_MAX entries.
@@ -132,6 +138,7 @@ class PipelineState:
                 "total_input_reads": self.total_input_reads,
                 "total_matched_reads": self.total_matched_reads,
                 "demux_history": [dict(h) for h in self.demux_history],
+                "genus_lineages": {g: list(l) for g, l in self.genus_lineages.items()},
                 "specimens": {
                     sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
                 },
@@ -162,10 +169,15 @@ class PipelineState:
                 spec.community_iconic_taxon = taxon.get("iconic_taxon", "")
                 spec.inat_photos = taxon.get("photos", [])
                 spec.inat_observer = taxon.get("observer", {})
+                spec.inat_ancestors = taxon.get("ancestors", [])
             else:
                 # Legacy string format
                 spec.community_taxon = taxon
                 spec.community_genus = taxon.split()[0] if taxon else ""
+
+    def _on_taxa_lineage(self, data: dict):
+        for genus, lineage in data.get("lineages", {}).items():
+            self.genus_lineages[genus.lower()] = lineage
 
     def _on_file_detected(self, data: dict):
         path = data["path"]
@@ -299,6 +311,7 @@ class PipelineState:
         "pipeline.started": _on_pipeline_started,
         "specimens.loaded": _on_specimens_loaded,
         "specimens.taxa": _on_specimens_taxa,
+        "taxa.lineage": _on_taxa_lineage,
         "file.detected": _on_file_detected,
         "file.stable": _on_file_stable,
         "specimux.started": _on_specimux_started,
@@ -323,6 +336,7 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
         "community_iconic_taxon": s.community_iconic_taxon,
         "inat_photos": list(s.inat_photos),
         "inat_observer": dict(s.inat_observer),
+        "inat_ancestors": list(s.inat_ancestors),
         "total_reads": s.total_reads,
         "reads_at_last_consensus": s.reads_at_last_consensus,
         "consensus_version": s.consensus_version,

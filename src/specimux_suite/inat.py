@@ -6,6 +6,7 @@ import re
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -149,8 +150,8 @@ def fetch_community_taxa(
         return {}
 
     # Load cache — handles both old (string) and new (dict) formats.
-    # Legacy entries missing genus, iconic_taxon, or photos are discarded for
-    # re-fetch. A genus-less entry is only valid when the observation had no
+    # Legacy entries missing genus, iconic_taxon, photos, or ancestors are
+    # discarded for re-fetch. A genus-less entry is only valid when the observation had no
     # community taxon at all (name empty) — otherwise it's a failed genus
     # resolution worth retrying.
     cache: dict[str, dict] = {}
@@ -160,7 +161,7 @@ def fetch_community_taxa(
             raw = json.loads(cache_file.read_text(encoding="utf-8"))
             for obs_id, val in raw.items():
                 if (isinstance(val, dict) and "iconic_taxon" in val
-                        and "photos" in val
+                        and "photos" in val and "ancestors" in val
                         and (val.get("genus") or not val.get("name"))):
                     cache[obs_id] = val
                 # else: discard — will be re-fetched
@@ -225,11 +226,18 @@ def fetch_community_taxa(
                                     if aid != taxon_id
                                 ]
 
+                # Ancestor taxon ids (root→self, self included): the raw
+                # material for taxonomy-level agreement with sequence IDs.
+                ancestors = [aid for aid in (taxon.get("ancestor_ids") or [])]
+                if taxon.get("id") and taxon["id"] not in ancestors:
+                    ancestors.append(taxon["id"])
+
                 iconic_taxon = taxon.get("iconic_taxon_name") or ""
                 entry = {
                     "name": taxon_name,
                     "genus": genus,
                     "iconic_taxon": iconic_taxon,
+                    "ancestors": ancestors,
                     "photos": _parse_observation_photos(obs),
                     "observer": _parse_observation_observer(obs),
                 }
@@ -266,5 +274,133 @@ def fetch_community_taxa(
             cache_file.write_text(json.dumps(cache), encoding="utf-8")
         except OSError as e:
             logger.warning(f"Failed to save iNat cache: {e}")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Genus lineages for taxonomy-level agreement between field IDs and sequence
+# IDs. The reference-DB contract is deliberately just `name="..."` (users
+# mint their own references), so the hit name's first token — the genus — is
+# resolved against iNaturalist taxonomy rather than trusting any lineage a
+# reference file might embed.
+# ---------------------------------------------------------------------------
+
+_LINEAGE_SEARCH_DELAY_S = 0.6
+
+
+def _pick_genus_match(results: list[dict], genus: str) -> dict | None:
+    """Choose the right taxon for a genus name from taxa-search results.
+
+    Search is fuzzy and genus names are homonymous across nomenclature codes
+    (e.g. Morus the mulberry vs Morus the gannet), so: exact name match and
+    active only, prefer Fungi, then the most-observed.
+    """
+    exact = [t for t in results
+             if (t.get("name") or "").lower() == genus.lower()
+             and t.get("rank") == "genus" and t.get("is_active", True)]
+    if not exact:
+        return None
+    exact.sort(key=lambda t: (
+        (t.get("iconic_taxon_name") or "") != "Fungi",
+        -(t.get("observations_count") or 0),
+    ))
+    return exact[0]
+
+
+def fetch_genus_lineages(
+    genera: list[str],
+    cache_dir: Path | None = None,
+    abort=None,
+) -> dict[str, list[dict]]:
+    """Resolve genus names to their iNaturalist lineages.
+
+    Returns {genus_as_given: [{id, rank, name}, ...]} ordered root→genus
+    (the genus itself is the last entry). A genus that can't be resolved
+    maps to [] — cached too, so it isn't retried every run.
+    """
+    cache: dict[str, list] = {}
+    cache_file = cache_dir / "inat_lineage_cache.json" if cache_dir else None
+    if cache_file and cache_file.exists():
+        try:
+            raw = json.loads(cache_file.read_text(encoding="utf-8"))
+            cache = {k: v for k, v in raw.items() if isinstance(v, list)}
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    result: dict[str, list[dict]] = {}
+    to_fetch: list[str] = []
+    for genus in genera:
+        key = genus.lower()
+        if key in cache:
+            result[genus] = cache[key]
+        elif genus:
+            to_fetch.append(genus)
+
+    if not to_fetch:
+        return result
+
+    # Pass 1: search each genus for its taxon and ancestor ids
+    ancestor_ids_by_genus: dict[str, list[int]] = {}
+    all_ancestor_ids: set[int] = set()
+    for genus in to_fetch:
+        if abort is not None and abort.is_set():
+            logger.info("iNaturalist lineage fetch aborted (shutdown)")
+            return result
+        url = f"{TAXA_API_URL}?q={urllib.parse.quote(genus)}&rank=genus&per_page=10"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            taxon = _pick_genus_match(data.get("results", []), genus)
+            if taxon:
+                aids = [aid for aid in (taxon.get("ancestor_ids") or [])]
+                if taxon["id"] not in aids:
+                    aids.append(taxon["id"])
+                ancestor_ids_by_genus[genus] = aids
+                all_ancestor_ids.update(aids)
+            else:
+                ancestor_ids_by_genus[genus] = []
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to search iNaturalist genus {genus}: {e}")
+            continue  # transient: leave uncached so it retries next wave
+        time.sleep(_LINEAGE_SEARCH_DELAY_S)
+
+    # Pass 2: batch-fetch rank+name for every ancestor id
+    details: dict[int, dict] = {}
+    ancestor_list = list(all_ancestor_ids)
+    for i in range(0, len(ancestor_list), MAX_BATCH_SIZE):
+        if abort is not None and abort.is_set():
+            return result
+        batch = ancestor_list[i : i + MAX_BATCH_SIZE]
+        ids_str = ",".join(str(tid) for tid in batch)
+        url = f"{TAXA_API_URL}?per_page={MAX_BATCH_SIZE}&id={ids_str}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            for t in data.get("results", []):
+                details[t["id"]] = {"rank": t.get("rank", ""), "name": t.get("name", "")}
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to fetch iNaturalist taxa batch: {e}")
+        if i + MAX_BATCH_SIZE < len(ancestor_list):
+            time.sleep(1)
+
+    for genus, aids in ancestor_ids_by_genus.items():
+        lineage = [
+            {"id": aid, **details[aid]} for aid in aids if aid in details
+        ]
+        # An unresolved search is final ([]); a resolved search whose detail
+        # fetch failed entirely stays uncached to retry later.
+        if lineage or not aids:
+            result[genus] = lineage
+            cache[genus.lower()] = lineage
+
+    if cache_file:
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps(cache), encoding="utf-8")
+        except OSError as e:
+            logger.warning(f"Failed to save iNat lineage cache: {e}")
 
     return result

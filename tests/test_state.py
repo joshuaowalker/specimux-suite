@@ -399,3 +399,27 @@ def test_specimens_taxa_carries_photos_and_observer(tmp_output):
     d = state.to_dict()["specimens"]["spec1"]
     assert d["inat_photos"][0]["url"] == "https://a/photos/7/square.jpg"
     assert d["inat_observer"]["login"] == "hsinger"
+
+
+def test_taxa_lineage_and_ancestors(tmp_output):
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("specimux.completed", {"exit_code": 0, "specimens": {"spec1": 10}})
+    log.emit("specimens.taxa", {"taxa": {"spec1": {
+        "name": "Lactarius peckii", "genus": "Lactarius", "iconic_taxon": "Fungi",
+        "ancestors": [48460, 47170, 50814, 48627],
+        "photos": [], "observer": {},
+    }}})
+    log.emit("taxa.lineage", {"lineages": {"Russula": [
+        {"id": 47170, "rank": "kingdom", "name": "Fungi"},
+        {"id": 50814, "rank": "family", "name": "Russulaceae"},
+        {"id": 48339, "rank": "genus", "name": "Russula"},
+    ]}})
+
+    state = PipelineState()
+    state.rebuild(log)
+    assert state.specimens["spec1"].inat_ancestors == [48460, 47170, 50814, 48627]
+    assert state.genus_lineages["russula"][-1]["name"] == "Russula"
+
+    d = state.to_dict()
+    assert d["specimens"]["spec1"]["inat_ancestors"][-1] == 48627
+    assert d["genus_lineages"]["russula"][1]["rank"] == "family"
