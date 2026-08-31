@@ -16,6 +16,7 @@ import glob as globmod
 
 from ..config import PipelineConfig
 from ..events import EventLog, _event_to_dict
+from ..photos import photo_cache_dir
 from ..state import PipelineState
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,13 @@ def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    # Local iNat photo cache (filled in the background by photos.prefetch_photos).
+    # The /present client falls back to iNat URLs for anything not cached yet.
+    if config is not None:
+        photos_dir = photo_cache_dir(config.output_dir)
+        photos_dir.mkdir(parents=True, exist_ok=True)
+        app.mount("/photos", StaticFiles(directory=str(photos_dir)), name="photos")
 
     return app
 

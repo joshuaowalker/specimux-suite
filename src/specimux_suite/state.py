@@ -50,6 +50,10 @@ class SpecimenState:
     community_taxon: str = ""
     community_genus: str = ""
     community_iconic_taxon: str = ""
+    # From the iNat observation: [{id, url, license_code, attribution}] and
+    # {login, name} — used by the /present highlights screen.
+    inat_photos: list = field(default_factory=list)
+    inat_observer: dict = field(default_factory=dict)
     total_reads: int = 0
     reads_at_last_consensus: int = 0
     consensus_version: int = 0
@@ -156,6 +160,8 @@ class PipelineState:
                 spec.community_taxon = taxon.get("name", "")
                 spec.community_genus = taxon.get("genus", "")
                 spec.community_iconic_taxon = taxon.get("iconic_taxon", "")
+                spec.inat_photos = taxon.get("photos", [])
+                spec.inat_observer = taxon.get("observer", {})
             else:
                 # Legacy string format
                 spec.community_taxon = taxon
@@ -315,6 +321,8 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
         "community_taxon": s.community_taxon,
         "community_genus": s.community_genus,
         "community_iconic_taxon": s.community_iconic_taxon,
+        "inat_photos": list(s.inat_photos),
+        "inat_observer": dict(s.inat_observer),
         "total_reads": s.total_reads,
         "reads_at_last_consensus": s.reads_at_last_consensus,
         "consensus_version": s.consensus_version,

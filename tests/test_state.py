@@ -378,3 +378,24 @@ def test_cluster_chimera_captured(tmp_path):
     assert clusters[1].chimera == "v0+v1"
     d = state.to_dict()["specimens"]["A"]["clusters"]
     assert d[1]["chimera"] == "v0+v1"
+
+
+def test_specimens_taxa_carries_photos_and_observer(tmp_output):
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("specimux.completed", {"exit_code": 0, "specimens": {"spec1": 10}})
+    log.emit("specimens.taxa", {"taxa": {"spec1": {
+        "name": "Lactarius peckii", "genus": "Lactarius", "iconic_taxon": "Fungi",
+        "photos": [{"id": 7, "url": "https://a/photos/7/square.jpg",
+                    "license_code": "cc-by-nc", "attribution": "(c) X (CC BY-NC)"}],
+        "observer": {"login": "hsinger", "name": "Harte Singer"},
+    }}})
+
+    state = PipelineState()
+    state.rebuild(log)
+    spec = state.specimens["spec1"]
+    assert spec.inat_photos[0]["id"] == 7
+    assert spec.inat_observer == {"login": "hsinger", "name": "Harte Singer"}
+
+    d = state.to_dict()["specimens"]["spec1"]
+    assert d["inat_photos"][0]["url"] == "https://a/photos/7/square.jpg"
+    assert d["inat_observer"]["login"] == "hsinger"

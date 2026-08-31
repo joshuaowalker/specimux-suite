@@ -19,6 +19,42 @@ _GENUS_IN_NAME_RANKS = frozenset({
     "species", "genus", "subspecies", "variety", "form", "hybrid",
 })
 
+# Photos kept per observation in the cache/event payload. The first photo is
+# usually the observer's best shot; more than a few just bloats the taxa event.
+MAX_PHOTOS_PER_OBSERVATION = 3
+
+
+def _parse_observation_photos(obs: dict) -> list[dict]:
+    """Extract display-ready photo records from an observations API result.
+
+    Each record: {id, url, license_code, attribution}. `url` is the square
+    thumbnail; other sizes (small/medium/large/original) are reachable by
+    substituting the size name in the URL — this works on both the open-data
+    S3 host (CC-licensed photos) and static.inaturalist.org (ARR photos).
+    """
+    photos = []
+    for p in obs.get("photos") or []:
+        if not p.get("id") or not p.get("url"):
+            continue
+        photos.append({
+            "id": p["id"],
+            "url": p["url"],
+            "license_code": p.get("license_code"),
+            "attribution": p.get("attribution") or "",
+        })
+        if len(photos) >= MAX_PHOTOS_PER_OBSERVATION:
+            break
+    return photos
+
+
+def _parse_observation_observer(obs: dict) -> dict:
+    """Extract the observer as {login, name} (name may be empty)."""
+    user = obs.get("user") or {}
+    login = user.get("login") or ""
+    if not login:
+        return {}
+    return {"login": login, "name": user.get("name") or ""}
+
 
 def extract_inat_ids(specimens: list[dict]) -> dict[str, str]:
     """Extract iNaturalist observation IDs from specimen IDs.
@@ -103,21 +139,29 @@ def fetch_community_taxa(
             shutting-down pipeline stops making network calls promptly
 
     Returns:
-        {specimen_id: {"name": taxon_name, "genus": genus_name}}
-        for observations that have a community taxon.
+        {specimen_id: {"name": taxon_name, "genus": genus_name,
+                       "iconic_taxon": ..., "photos": [...], "observer": {...}}}
+        for every observation found. `name`/`genus` are empty when the
+        observation has no community taxon yet — the entry still carries
+        photos and observer for display.
     """
     if not inat_ids:
         return {}
 
     # Load cache — handles both old (string) and new (dict) formats.
-    # Legacy entries missing genus or iconic_taxon are discarded for re-fetch.
+    # Legacy entries missing genus, iconic_taxon, or photos are discarded for
+    # re-fetch. A genus-less entry is only valid when the observation had no
+    # community taxon at all (name empty) — otherwise it's a failed genus
+    # resolution worth retrying.
     cache: dict[str, dict] = {}
     cache_file = cache_dir / "inat_taxon_cache.json" if cache_dir else None
     if cache_file and cache_file.exists():
         try:
             raw = json.loads(cache_file.read_text(encoding="utf-8"))
             for obs_id, val in raw.items():
-                if isinstance(val, dict) and val.get("genus") and "iconic_taxon" in val:
+                if (isinstance(val, dict) and "iconic_taxon" in val
+                        and "photos" in val
+                        and (val.get("genus") or not val.get("name"))):
                     cache[obs_id] = val
                 # else: discard — will be re-fetched
         except (json.JSONDecodeError, OSError):
@@ -164,26 +208,31 @@ def fetch_community_taxa(
             for obs in data.get("results", []):
                 obs_id = str(obs["id"])
                 taxon = obs.get("taxon") or {}
-                taxon_name = taxon.get("name")
-                if not taxon_name:
-                    continue
-                rank = taxon.get("rank", "")
-                if rank in _GENUS_IN_NAME_RANKS:
-                    genus = taxon_name.split()[0]
-                else:
-                    # Infrageneric rank — need to resolve genus via taxa API
-                    genus = ""
-                    taxon_id = taxon.get("id")
-                    if taxon_id:
-                        needs_genus_obs.setdefault(taxon_id, []).append(obs_id)
-                        if taxon_id not in ancestor_ids_by_taxon:
-                            ancestor_ids_by_taxon[taxon_id] = [
-                                aid for aid in (taxon.get("ancestor_ids") or [])
-                                if aid != taxon_id
-                            ]
+                taxon_name = taxon.get("name") or ""
+                genus = ""
+                if taxon_name:
+                    rank = taxon.get("rank", "")
+                    if rank in _GENUS_IN_NAME_RANKS:
+                        genus = taxon_name.split()[0]
+                    else:
+                        # Infrageneric rank — need to resolve genus via taxa API
+                        taxon_id = taxon.get("id")
+                        if taxon_id:
+                            needs_genus_obs.setdefault(taxon_id, []).append(obs_id)
+                            if taxon_id not in ancestor_ids_by_taxon:
+                                ancestor_ids_by_taxon[taxon_id] = [
+                                    aid for aid in (taxon.get("ancestor_ids") or [])
+                                    if aid != taxon_id
+                                ]
 
                 iconic_taxon = taxon.get("iconic_taxon_name") or ""
-                entry = {"name": taxon_name, "genus": genus, "iconic_taxon": iconic_taxon}
+                entry = {
+                    "name": taxon_name,
+                    "genus": genus,
+                    "iconic_taxon": iconic_taxon,
+                    "photos": _parse_observation_photos(obs),
+                    "observer": _parse_observation_observer(obs),
+                }
                 cache[obs_id] = entry
                 for specimen_id in obs_id_to_specimens.get(obs_id, []):
                     result[specimen_id] = entry

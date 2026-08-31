@@ -15,6 +15,7 @@ from .events import EventLog
 from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
 from .inat import extract_inat_ids, fetch_community_taxa
+from .photos import photo_cache_dir, prefetch_photos
 from .util import clone_or_copy, parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
 from .runners.speconsense_runner import SpeconsenseRunner
@@ -106,6 +107,15 @@ class Pipeline:
                 logger.info(f"Fetched community taxon for {len(taxa)} specimens")
         except Exception as e:
             logger.warning(f"Failed to fetch iNaturalist taxa: {e}")
+            return
+        # Photo prefetch rides the same daemon thread, after the taxa event is
+        # out — display names shouldn't wait on ~MBs of images.
+        try:
+            prefetch_photos(
+                taxa, photo_cache_dir(self.config.output_dir), abort=self._shutdown,
+            )
+        except Exception as e:
+            logger.warning(f"iNaturalist photo prefetch failed: {e}")
 
     def validate_tools(self) -> list[str]:
         """Check that required external tools are on PATH. Returns list of missing tools."""
