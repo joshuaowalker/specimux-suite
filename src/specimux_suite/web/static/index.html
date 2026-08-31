@@ -521,7 +521,7 @@ col.col-sum-reads { width: 12%; }
   </div>
   <div class="controls-row">
     <div class="filter-chips" id="filters-processing">
-      <button type="button" class="filter-chip" data-filter="novel">Novel (&lt;98%)</button>
+      <button type="button" class="filter-chip" data-filter="novel" title="Best match below 98% — a distant match may be undescribed, not yet sequenced, or a rough read">Below 98% match</button>
       <button type="button" class="filter-chip" data-filter="on-target">On-target</button>
       <button type="button" class="filter-chip" data-filter="off-target">Off-target</button>
       <button type="button" class="filter-chip" data-filter="no-match">No match</button>
@@ -534,7 +534,7 @@ col.col-sum-reads { width: 12%; }
     <summary>What do the symbols mean?</summary>
     <div class="legend-body">
       <span><b>✓ / ≈ / ✗</b> — how the best database match relates to the iNaturalist community ID: same genus or species (✓ on-target), a different genus in the same family or order (≈ partial), or unrelated (✗ off-target). Hover the symbol for the exact shared rank. The On-target filter shows ✓ specimens; the Off-target filter shows ≈ and ✗. Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
-      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species) and red ⚠ below 90% (likely undescribed or a poor sequence).</span>
+      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species than the match) and red ⚠ below 90% (no close reference — possibly undescribed, not yet sequenced, or a poor read).</span>
       <span><b>★</b> — watched: the operator starred this specimen so it gets processed first. Click to star.</span>
       <span><b>Status</b> — waiting → queued → processing → consensus built → identified / no match → summarized (final).</span>
       <span><b>NS / LQ / CHIMERA</b> — quality flags on individual sequences: not statistically significant, low quality, or a suspected PCR chimera. Flagged sequences are excluded from (or marked in) the final Summary.</span>
@@ -588,7 +588,7 @@ col.col-sum-reads { width: 12%; }
   </div>
   <div class="controls-row">
     <div class="filter-chips" id="filters-summary">
-      <button type="button" class="filter-chip" data-filter="novel">Novel (&lt;98%)</button>
+      <button type="button" class="filter-chip" data-filter="novel" title="Best match below 98% — a distant match may be undescribed, not yet sequenced, or a rough read">Below 98% match</button>
       <button type="button" class="filter-chip" data-filter="on-target">On-target</button>
       <button type="button" class="filter-chip" data-filter="off-target">Off-target</button>
       <button type="button" class="filter-chip" data-filter="watched">Watched</button>
@@ -598,7 +598,7 @@ col.col-sum-reads { width: 12%; }
     <summary>What do the symbols mean?</summary>
     <div class="legend-body">
       <span><b>✓ / ≈ / ✗</b> — how the best database match relates to the iNaturalist community ID: same genus or species (✓ on-target), a different genus in the same family or order (≈ partial), or unrelated (✗ off-target). Hover the symbol for the exact shared rank. The On-target filter shows ✓ specimens; the Off-target filter shows ≈ and ✗. Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
-      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species) and red ⚠ below 90% (likely undescribed or a poor sequence).</span>
+      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species than the match) and red ⚠ below 90% (no close reference — possibly undescribed, not yet sequenced, or a poor read).</span>
       <span><b>Variants</b> — distinct sequence versions recovered for the specimen (a specimen can carry several ITS variants or several organisms).</span>
     </div>
   </details>
@@ -926,7 +926,7 @@ function targetIndicatorHtml(effStatus, agreement) {
 
 function identityWarningHtml(identity) {
   if (identity < 0.90) {
-    return `<span class="identity-warning" style="color:var(--error)" title="Best match below 90% — likely undescribed, a poor sequence, or far from any reference" aria-label="identity below 90%">⚠</span>`;
+    return `<span class="identity-warning" style="color:var(--error)" title="Best match below 90% — no close reference: possibly undescribed, not yet sequenced, or a poor read" aria-label="identity below 90%">⚠</span>`;
   }
   if (identity < 0.98) {
     return `<span class="identity-warning" style="color:var(--processing)" title="Best match below 98% — possibly a different species than the match" aria-label="identity below 98%">⚠</span>`;
@@ -2015,25 +2015,45 @@ function getTopMatch(s, context) {
 
 function _findTopMatch(s, seqs, communityGenus) {
   const seqSizeMap = {};
-  for (const seq of seqs) seqSizeMap[seq.name] = seq.size || 0;
+  const seqByName = {};
+  for (const seq of seqs) { seqSizeMap[seq.name] = seq.size || 0; seqByName[seq.name] = seq; }
 
-  // Rank: on-target first, then by sequence size
+  // Candidate matches in the active sequence set, preferring unflagged
+  // sequences: an NS/LQ/chimera cluster's hit only represents the specimen
+  // when nothing clean has a hit. (Matters most under identity ranking —
+  // flagged clusters are small, so size ranking rarely surfaced them.)
+  let candidates = [];
+  const flagged = [];
+  for (const match of s.identification) {
+    if (!match.top_hits || !match.top_hits.length) continue;
+    if (seqs.length && !(match.cluster in seqSizeMap)) continue;
+    const seq = seqByName[match.cluster];
+    if (seq && clusterFilterRouting(seq)) flagged.push(match);
+    else candidates.push(match);
+  }
+  if (!candidates.length) candidates = flagged;
+
+  // Rank: on-target first; among on-target sequences show the best
+  // identity achieved (a small 100% cluster beats a large 96% one);
+  // among off-target-only, keep size so junk micro-clusters with a
+  // lucky match can't displace the dominant signal.
   let bestMatch = null;
   let bestOnTarget = false;
   let bestSize = -1;
-  for (const match of s.identification) {
-    if (!match.top_hits || !match.top_hits.length) continue;
-    // Skip identifications that don't belong to the active sequence set
-    if (seqs.length && !(match.cluster in seqSizeMap)) continue;
+  let bestIdentity = -1;
+  for (const match of candidates) {
     const top = match.top_hits[0];
     const onTarget = isHitOnTarget(top, communityGenus);
     const size = seqSizeMap[match.cluster] || 0;
+    const identity = top.adjusted_identity || top.identity || 0;
     if (bestMatch === null
         || (onTarget && !bestOnTarget)
-        || (onTarget === bestOnTarget && size > bestSize)) {
+        || (onTarget === bestOnTarget
+            && (onTarget ? identity > bestIdentity : size > bestSize))) {
       bestMatch = match;
       bestOnTarget = onTarget;
       bestSize = size;
+      bestIdentity = identity;
     }
   }
   return bestMatch;

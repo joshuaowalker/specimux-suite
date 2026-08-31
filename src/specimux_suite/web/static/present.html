@@ -300,7 +300,20 @@ const state = {
   specimens: {},   // sid -> {..._specimen_to_dict fields we use}
   totalMatched: 0,
   genusLineages: {},  // genus_lower -> [{id, rank, name}] root→genus
+  summarizeFilter: {},  // effective NS/LQ/chimera routing settings
 };
+
+// Preview which summarize track a cluster routes to (ported from
+// index.html clusterFilterRouting — keep in sync). Truthy = flagged.
+function clusterFlagged(cluster) {
+  const f = state.summarizeFilter || {};
+  const minCer = f.min_cer_factor != null ? f.min_cer_factor : 1.0;
+  const maxErr = f.max_err_factor != null ? f.max_err_factor : 1.5;
+  if (maxErr > 0 && cluster.err_factor != null && cluster.err_factor > maxErr) return 'lq';
+  if (f.filter_chimeras && cluster.chimera) return 'chimera';
+  if (minCer > 0 && cluster.cer_factor != null && cluster.cer_factor < minCer) return 'ns';
+  return null;
+}
 
 function getSpec(sid) {
   if (!state.specimens[sid]) {
@@ -309,7 +322,7 @@ function getSpec(sid) {
       clusters: [], identification: [], variants: [],
       consensus_version: 0,
       community_taxon: '', community_genus: '', community_iconic_taxon: '',
-      inat_photos: [], inat_observer: {}, inat_ancestors: [],
+      inat_photos: [], inat_observer: {}, inat_ancestors: [], inat_first_id: {},
     };
   }
   return state.specimens[sid];
@@ -331,6 +344,7 @@ function applyEvent(event) {
           s.inat_photos = taxon.photos || [];
           s.inat_observer = taxon.observer || {};
           s.inat_ancestors = taxon.ancestors || [];
+          s.inat_first_id = taxon.first_id || {};
         } else {
           s.community_taxon = taxon;
           s.community_genus = taxon ? taxon.split(/\s+/)[0] : '';
@@ -395,16 +409,29 @@ function getTopMatch(s) {
   if (!s.identification || !s.identification.length) return null;
   const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0]).toLowerCase();
   const seqs = s.clusters || [];
-  const sizeMap = {};
-  for (const seq of seqs) sizeMap[seq.name] = seq.size || 0;
-  let best = null, bestOn = false, bestSize = -1;
+  const sizeMap = {}, byName = {};
+  for (const seq of seqs) { sizeMap[seq.name] = seq.size || 0; byName[seq.name] = seq; }
+  // Prefer unflagged sequences; flagged (NS/LQ/chimera) only as fallback.
+  // Then on-target first; among on-target, best identity; among
+  // off-target-only, size (mirrors index.html's _findTopMatch — keep in sync)
+  let candidates = [];
+  const flaggedOnly = [];
   for (const m of s.identification) {
     if (!m.top_hits || !m.top_hits.length) continue;
     if (seqs.length && !(m.cluster in sizeMap)) continue;
+    const seq = byName[m.cluster];
+    if (seq && clusterFlagged(seq)) flaggedOnly.push(m);
+    else candidates.push(m);
+  }
+  if (!candidates.length) candidates = flaggedOnly;
+  let best = null, bestOn = false, bestSize = -1, bestIdentity = -1;
+  for (const m of candidates) {
     const on = isHitOnTarget(m.top_hits[0], communityGenus);
     const size = sizeMap[m.cluster] || 0;
-    if (best === null || (on && !bestOn) || (on === bestOn && size > bestSize)) {
-      best = m; bestOn = on; bestSize = size;
+    const identity = hitIdentity(m.top_hits[0]);
+    if (best === null || (on && !bestOn)
+        || (on === bestOn && (on ? identity > bestIdentity : size > bestSize))) {
+      best = m; bestOn = on; bestSize = size; bestIdentity = identity;
     }
   }
   return best;
@@ -451,6 +478,17 @@ function photoSources(photo) {
 // ============================================================
 const DWELL = { base: 12000, busy: 7000, slammed: 5000, stats: 9000 };
 const NOVEL_SOFT = 0.98, NOVEL_STRONG = 0.90;
+// Announcement gate: a low identity from a thin cluster is as likely noise
+// as novelty. The loud treatments (amber card, priority boost) require this
+// much read support behind the matched sequence; below it the card renders
+// as a plain identification.
+const NOVEL_MIN_CLUSTER_READS = 20;
+
+function novelSupported(s, match) {
+  if (!match) return false;
+  const cluster = (s.clusters || []).find(c => c.name === match.cluster);
+  return !!cluster && (cluster.size || 0) >= NOVEL_MIN_CLUSTER_READS;
+}
 
 const queue = [];              // [{key, type, priority, sid, at}]
 const announcedGenera = new Set();  // genera already seen this run
@@ -478,7 +516,7 @@ function onIdentification(s) {
   const genus = hitGenus(hit);
   const firstOfGenus = genus && !announcedGenera.has(genus.toLowerCase());
   let priority = 3;
-  if (identity < NOVEL_STRONG) priority = 1;
+  if (identity < NOVEL_STRONG && novelSupported(s, getTopMatch(s))) priority = 1;
   else if (firstOfGenus) priority = 2;
   enqueue({ key: s.specimen_id, type: 'identification', priority, sid: s.specimen_id, at: Date.now(), firstOfGenus });
 }
@@ -491,7 +529,7 @@ function nextDwell(type) {
 }
 
 function pickFiller() {
-  const rotation = ['highlight', 'stats', 'highlight', 'leaderboard'];
+  const rotation = ['highlight', 'stats', 'highlight', 'leaderboard', 'highlight', 'fieldids'];
   for (let i = 0; i < rotation.length; i++) {
     const type = rotation[(fillerIdx + i) % rotation.length];
     if (type === 'highlight') {
@@ -499,6 +537,8 @@ function pickFiller() {
       if (sid) { fillerIdx += i + 1; return { type: 'identification', sid, recycled: true }; }
     } else if (type === 'leaderboard') {
       if (leaderboardRows().length >= 2) { fillerIdx += i + 1; return { type: 'leaderboard' }; }
+    } else if (type === 'fieldids') {
+      if (fieldIdRows().length >= 2) { fillerIdx += i + 1; return { type: 'fieldids' }; }
     } else {
       fillerIdx += i + 1; return { type: 'stats' };
     }
@@ -512,8 +552,8 @@ function pickHighlight() {
     .filter(s => hasIdentification(s) && (s.inat_photos || []).length);
   if (!candidates.length) return null;
   candidates.sort((a, b) => {
-    const an = hitIdentity(getTopHit(a)) < NOVEL_SOFT ? 0 : 1;
-    const bn = hitIdentity(getTopHit(b)) < NOVEL_SOFT ? 0 : 1;
+    const an = (hitIdentity(getTopHit(a)) < NOVEL_SOFT && novelSupported(a, getTopMatch(a))) ? 0 : 1;
+    const bn = (hitIdentity(getTopHit(b)) < NOVEL_SOFT && novelSupported(b, getTopMatch(b))) ? 0 : 1;
     if (an !== bn) return an - bn;
     return (lastShown[a.specimen_id] || 0) - (lastShown[b.specimen_id] || 0);
   });
@@ -537,6 +577,8 @@ function showNext() {
     if (g) announcedGenera.add(g.toLowerCase());
   } else if (type === 'leaderboard') {
     el = renderLeaderboard();
+  } else if (type === 'fieldids') {
+    el = renderFieldIds();
   } else {
     el = renderStats();
   }
@@ -604,14 +646,18 @@ function renderIdentification(s, hit, card) {
   const el = document.createElement('div');
   el.className = 'card';
   const identity = hitIdentity(hit);
-  const strong = identity < NOVEL_STRONG;
-  const soft = identity < NOVEL_SOFT;
+  const supported = novelSupported(s, getTopMatch(s));
+  const strong = identity < NOVEL_STRONG && supported;
+  const soft = identity < NOVEL_SOFT && supported;
   if (strong) el.classList.add('novel');
   else if (soft) el.classList.add('novel-soft');
 
+  // Precision matters to mycologists: distance from the reference library
+  // is not the same claim as "undescribed species" — a distant sequence may
+  // be undescribed, described-but-unsequenced, or just a rough read.
   let eyebrow;
-  if (strong) eyebrow = 'Possible novel taxon';
-  else if (soft) eyebrow = 'Novel candidate';
+  if (strong) eyebrow = 'Beyond the reference library';
+  else if (soft) eyebrow = 'No close reference match';
   else if (card.firstOfGenus) eyebrow = `First ${esc(hitGenus(hit))} of the run`;
   else if (card.recycled) eyebrow = 'From this run';
   else eyebrow = 'Just identified';
@@ -627,7 +673,7 @@ function renderIdentification(s, hit, card) {
   let nameHtml;
   if (strong) {
     nameHtml = `<span class="genus">${esc(name.genus)}</span>
-      <span class="epithet"><span class="undescribed">undescribed species?</span></span>`;
+      <span class="epithet"><span class="undescribed">unmatched sequence</span></span>`;
   } else if (soft && /^[a-z][a-z-]*$/.test(name.rest)) {
     nameHtml = `<span class="genus">${esc(name.genus)}</span>
       <span class="epithet"><span class="aff">aff.</span> ${esc(name.rest)}</span>`;
@@ -647,8 +693,17 @@ function renderIdentification(s, hit, card) {
   if (strong) {
     fieldHtml = `Closest match: <span class="fieldname">${esc(hit.name || hit.ref_id || '')}</span>`;
     if (s.community_taxon) fieldHtml += ` · Field ID: <span class="fieldname">${esc(s.community_taxon)}</span>`;
+    fieldHtml += `<br>Could be undescribed, described but never sequenced, or a rough read — one to watch.`;
   } else if (s.community_taxon) {
-    fieldHtml = `Field ID: <span class="fieldname">${esc(s.community_taxon)}</span>`;
+    // The true field ID is the observation's first identification; when a
+    // later ID refined it (the display-table experts), show the journey.
+    const firstName = (s.inat_first_id || {}).name || '';
+    if (firstName && firstName !== s.community_taxon) {
+      fieldHtml = `Field ID: <span class="fieldname">${esc(firstName)}</span>` +
+        ` → <span class="fieldname">${esc(s.community_taxon)}</span>`;
+    } else {
+      fieldHtml = `Field ID: <span class="fieldname">${esc(s.community_taxon)}</span>`;
+    }
     const GENUS_OR_DEEPER = new Set(['genus', 'subgenus', 'section', 'subsection', 'complex', 'species', 'subspecies', 'variety', 'form', 'hybrid']);
     const NEAR = new Set(['order', 'suborder', 'infraorder', 'superfamily', 'epifamily', 'family', 'subfamily', 'supertribe', 'tribe', 'subtribe']);
     if ((onTarget || (agreement && GENUS_OR_DEEPER.has(agreement.level))) && !soft) {
@@ -737,6 +792,51 @@ function renderStats() {
   return el;
 }
 
+// Field IDs confirmed by sequencing: for each person whose FIRST
+// identification on an observation names the genus the sequence later
+// confirmed, count their hits. Login → display name via the observer map.
+function fieldIdRows() {
+  const names = {};
+  for (const s of Object.values(state.specimens)) {
+    const o = s.inat_observer || {};
+    if (o.login) names[o.login] = o.name || o.login;
+  }
+  const byIdentifier = {};
+  for (const s of Object.values(state.specimens)) {
+    const first = s.inat_first_id || {};
+    if (!first.login || !first.name || !hasIdentification(s)) continue;
+    const hit = getTopHit(s);
+    if (!hit) continue;
+    const entry = byIdentifier[first.login] ||= { name: names[first.login] || first.login, confirmed: 0, sequenced: 0 };
+    entry.sequenced++;
+    const firstGenus = first.name.split(/\s+/)[0].toLowerCase();
+    if (firstGenus === hitGenus(hit).toLowerCase()) entry.confirmed++;
+  }
+  return Object.values(byIdentifier)
+    .filter(r => r.confirmed > 0)
+    .sort((a, b) => b.confirmed - a.confirmed)
+    .slice(0, 5);
+}
+
+function renderFieldIds() {
+  const rows = fieldIdRows();
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="stat-pane">
+      <div class="eyebrow">Field IDs confirmed by DNA</div>
+      <div class="board">
+        ${rows.map((r, i) => `
+          <div class="board-row">
+            <span class="rank">${i + 1}</span>
+            <span class="who">${esc(r.name)}</span>
+            <span class="count">${r.confirmed}<span style="color:var(--faint);font-size:0.6em"> of ${r.sequenced} sequenced</span></span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  return el;
+}
+
 function leaderboardRows() {
   const byObserver = {};
   for (const s of Object.values(state.specimens)) {
@@ -812,6 +912,7 @@ async function bootstrap() {
     state.version = snap.version || 0;
     state.totalMatched = snap.total_matched_reads || 0;
     state.genusLineages = snap.genus_lineages || {};
+    state.summarizeFilter = snap.summarize_filter || {};
     for (const [sid, s] of Object.entries(snap.specimens || {})) state.specimens[sid] = s;
     // Everything in the snapshot is history: seed the genera set so only
     // genuinely new genera get the first-of-genus eyebrow.
