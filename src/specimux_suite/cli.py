@@ -141,6 +141,7 @@ def main():
         share_max_clients=share_max_clients,
         settle_time=getattr(args, "settle_time", 30.0),
         live_presample=getattr(args, "presample", 100),
+        incremental_summarize=not args.no_incremental_summarize,
     )
 
     from .pipeline import Pipeline
@@ -220,6 +221,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Share dashboard on LAN with QR code (default max: 20 clients)")
     parser.add_argument("--no-web", action="store_true",
                         help="Disable the web dashboard")
+    parser.add_argument("--no-incremental-summarize", action="store_true",
+                        help="Only summarize in the final round instead of per specimen as identifications land")
     parser.add_argument("--identify-min-coverage", type=float, default=0.5,
                         help="Minimum coverage (max of query/target) for identification hits (default: 0.5)")
     parser.add_argument("--no-open", action="store_true",

@@ -423,3 +423,35 @@ def test_taxa_lineage_and_ancestors(tmp_output):
     d = state.to_dict()
     assert d["specimens"]["spec1"]["inat_ancestors"][-1] == 48627
     assert d["genus_lineages"]["russula"][1]["rank"] == "family"
+
+
+def test_stale_summarize_completed_is_dropped(tmp_output):
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("consensus.completed", {"specimen_id": "spec1",
+                                     "clusters": [{"name": "c0", "size": 10}]})
+    log.emit("summarize.completed", {"specimen_id": "spec1", "consensus_version": 1,
+                                     "variants": [{"name": "v-current"}]})
+    # A straggler from generation 0 lands late: must not clobber anything
+    log.emit("summarize.completed", {"specimen_id": "spec1", "consensus_version": 0,
+                                     "variants": [{"name": "v-stale"}]})
+
+    state = PipelineState()
+    state.rebuild(log)
+    spec = state.specimens["spec1"]
+    assert spec.variants == [{"name": "v-current"}]
+    assert spec.summarize_version == 1
+    assert spec.summarize_consensus_version == 1
+    assert state.to_dict()["specimens"]["spec1"]["summarize_consensus_version"] == 1
+
+
+def test_unversioned_summarize_completed_still_applies(tmp_output):
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("consensus.completed", {"specimen_id": "spec1",
+                                     "clusters": [{"name": "c0", "size": 10}]})
+    log.emit("summarize.completed", {"specimen_id": "spec1",
+                                     "variants": [{"name": "v0"}]})
+    state = PipelineState()
+    state.rebuild(log)
+    spec = state.specimens["spec1"]
+    assert spec.status == SpecimenStatus.SUMMARIZED
+    assert spec.summarize_consensus_version == 1  # adopted current generation

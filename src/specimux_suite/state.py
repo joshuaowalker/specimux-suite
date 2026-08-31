@@ -67,6 +67,10 @@ class SpecimenState:
     clusters: list[ClusterInfo] = field(default_factory=list)
     identification: list[IdentificationMatch] = field(default_factory=list)
     summarize_version: int = 0
+    # Consensus generation the last summarize ran against (None until the
+    # first versioned summarize) — a mismatch with consensus_version means
+    # the summary is stale and finalization must redo it.
+    summarize_consensus_version: Optional[int] = None
     variants: list[dict] = field(default_factory=list)
     active_job_id: Optional[str] = None
     watched: bool = False
@@ -314,9 +318,18 @@ class PipelineState:
 
     def _on_summarize_completed(self, data: dict):
         spec = self.get_specimen(data["specimen_id"])
+        # Drop results from a superseded consensus generation — an
+        # incremental summarize can land after the specimen was
+        # re-consensused (same race as identification).
+        event_cv = data.get("consensus_version")
+        if event_cv is not None and event_cv != spec.consensus_version:
+            return
         spec.status = SpecimenStatus.SUMMARIZED
         spec.active_job_id = None
         spec.summarize_version += 1
+        spec.summarize_consensus_version = (
+            event_cv if event_cv is not None else spec.consensus_version
+        )
         spec.variants = data.get("variants", [])
 
     def _on_specimen_watched(self, data: dict):
@@ -383,6 +396,7 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
             for m in s.identification
         ],
         "summarize_version": s.summarize_version,
+        "summarize_consensus_version": s.summarize_consensus_version,
         "variants": s.variants,
         "watched": s.watched,
     }

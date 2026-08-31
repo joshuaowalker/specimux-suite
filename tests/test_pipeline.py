@@ -161,9 +161,11 @@ def test_summarize_round_waits_for_inflight_identification(tmp_path):
 
     summarized = []
     pipeline.summarize = MagicMock()
-    pipeline.summarize.run.side_effect = lambda sid: (
+    pipeline.summarize.run.side_effect = lambda sid, consensus_version=None: (
         summarized.append(sid),
-        log.emit("summarize.completed", {"specimen_id": sid, "variants": []}),
+        log.emit("summarize.completed", {"specimen_id": sid,
+                                         "consensus_version": consensus_version,
+                                         "variants": []}),
     ) and []
 
     pipeline._run_summarize_round()
@@ -448,3 +450,94 @@ def test_finalize_identifies_consensus_inflight_at_start(tmp_path):
     fin = [e for e in events if e.type == "finalization.started"]
     assert fin and "B" in fin[0].data["specimen_ids"]
     pipeline._executor.shutdown(wait=True)
+
+
+def test_incremental_summarize_trigger_and_gating(tmp_path):
+    """Identification completion queues eligible specimens for the lane;
+    ineligible ones (wrong status, no clusters) are skipped."""
+    config = _make_config(tmp_path, incremental_summarize=True)
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+    pipeline.summarize = MagicMock()  # lane must never see a real runner
+
+    log = pipeline.event_log
+    log.emit("consensus.completed", {"specimen_id": "specA",
+                                     "clusters": [{"name": "specA-c0", "size": 30}]})
+    log.emit("identification.completed", {"specimen_id": "specA", "consensus_version": 1,
+                                          "matches": [{"cluster": "specA-c0",
+                                                       "top_hits": [{"name": "Russula", "identity": 0.99}]}]})
+    log.emit("consensus.completed", {"specimen_id": "specB", "clusters": []})  # no clusters
+
+    pipeline._maybe_queue_incremental_summarize("specA")
+    pipeline._maybe_queue_incremental_summarize("specB")   # CONSENSUS_DONE, no clusters
+    pipeline._maybe_queue_incremental_summarize("specC")   # WAITING
+
+    import queue as _q
+    items = []
+    try:
+        while True:
+            items.append(pipeline._summarize_queue.get_nowait())
+    except _q.Empty:
+        pass
+    assert items == [("specA", 1)]
+
+
+def test_summarize_lane_skips_superseded_and_runs_current(tmp_path):
+    """The lane drops a queued job whose consensus generation was superseded
+    and runs a current one with the version passed through."""
+    import time as _time
+    config = _make_config(tmp_path, incremental_summarize=True)
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+    pipeline.summarize = MagicMock()
+    pipeline.summarize.run.return_value = []
+
+    log = pipeline.event_log
+    log.emit("consensus.completed", {"specimen_id": "specA",
+                                     "clusters": [{"name": "c0", "size": 30}]})
+    log.emit("consensus.completed", {"specimen_id": "specA",
+                                     "clusters": [{"name": "c0", "size": 60}]})
+    # Queued against generation 1, but state is at generation 2: dropped
+    pipeline._summarize_queue.put(("specA", 1))
+    # Queued against the current generation: runs
+    pipeline._summarize_queue.put(("specA", 2))
+
+    # Generous deadline: the lane polls its queue on a 1s timeout and this
+    # box is sometimes heavily loaded during validation runs
+    deadline = _time.time() + 20
+    while _time.time() < deadline and not pipeline.summarize.run.called:
+        _time.sleep(0.1)
+    pipeline._shutdown.set()
+    pipeline.summarize.run.assert_called_once_with("specA", consensus_version=2)
+
+
+def test_finalize_round_includes_stale_summarized(tmp_path):
+    """A specimen summarized against a superseded consensus generation is
+    re-summarized by the final round (the stranded-restart shape)."""
+    config = _make_config(tmp_path, incremental_summarize=False, workers=1)
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+    pipeline.summarize = MagicMock()
+    pipeline.summarize.run.return_value = []
+
+    log = pipeline.event_log
+    # specA: summarized at generation 1, then the generation moved to 2
+    # without a new consensus event (restart-heal shape) — stale.
+    log.emit("consensus.completed", {"specimen_id": "specA",
+                                     "clusters": [{"name": "c0", "size": 30}]})
+    log.emit("summarize.completed", {"specimen_id": "specA", "consensus_version": 1,
+                                     "variants": [{"name": "v0"}]})
+    log.emit("specimen.updated", {"specimen_id": "specA", "consensus_version": 2})
+    # specB: summarized and current — must be skipped.
+    log.emit("consensus.completed", {"specimen_id": "specB",
+                                     "clusters": [{"name": "c0", "size": 30}]})
+    log.emit("summarize.completed", {"specimen_id": "specB", "consensus_version": 1,
+                                     "variants": []})
+
+    submitted = []
+    with patch.object(pipeline, "_submit_summarize", side_effect=lambda sid: submitted.append(sid)):
+        pipeline._run_summarize_round()
+    assert submitted == ["specA"]

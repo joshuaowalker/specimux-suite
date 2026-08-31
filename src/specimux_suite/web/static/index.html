@@ -831,9 +831,13 @@ function applyEvent(event) {
       break;
     case 'summarize.completed':
       if (state.specimens[d.specimen_id]) {
-        state.specimens[d.specimen_id].status = 'summarized';
-        state.specimens[d.specimen_id].variants = d.variants || [];
-        state.specimens[d.specimen_id].summarize_version = (state.specimens[d.specimen_id].summarize_version || 0) + 1;
+        const s = state.specimens[d.specimen_id];
+        // Drop results from a superseded consensus generation (mirrors
+        // state.py — an incremental summarize can be overtaken by a reprocess)
+        if (d.consensus_version != null && d.consensus_version !== s.consensus_version) break;
+        s.status = 'summarized';
+        s.variants = d.variants || [];
+        s.summarize_version = (s.summarize_version || 0) + 1;
       }
       break;
     case 'specimen.watched':

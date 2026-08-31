@@ -58,6 +58,9 @@ class PipelineConfig:
     speconsense_args: list[str] = field(default_factory=list)
 
     # Summarize settings
+    # Incremental: summarize each specimen right after its identification
+    # lands (dedicated serial lane) instead of only in the final round.
+    incremental_summarize: bool = True
     summarize_profile: Optional[str] = None
     summarize_overrides: dict = field(default_factory=dict)
     summarize_args: list[str] = field(default_factory=list)

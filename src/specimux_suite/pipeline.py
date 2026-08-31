@@ -89,6 +89,20 @@ class Pipeline:
                 target=self._lineage_fetcher, name="lineage-fetch", daemon=True,
             ).start()
 
+        # Incremental summarization: a dedicated serial lane summarizes each
+        # specimen as its identification lands, so the Summary tab fills
+        # during the run and finalization only handles stragglers. Serial by
+        # design — one thread can absorb consensus output many times over
+        # (~2.5s/specimen), can never starve the consensus pool, and never
+        # writes the shared summary dir concurrently.
+        self._summarize_queue: queue.Queue = queue.Queue()
+        self._summarize_lane_active: str | None = None
+        self._variant_futures: dict[str, Future] = {}
+        if self.config.incremental_summarize:
+            threading.Thread(
+                target=self._summarize_worker, name="summarize-lane", daemon=True,
+            ).start()
+
         # Admin-accepted iNat ID corrections heal the run: a listener queues
         # each inat.correction (emitted by the web admin page) and a daemon
         # thread re-fetches the corrected observation's taxon/photos so the
@@ -832,6 +846,97 @@ class Pipeline:
                 "specimen_id": specimen_id,
                 "message": str(exc),
             })
+            return
+        # Identification landed (events applied before the future resolves):
+        # hand the specimen to the incremental summarize lane. Only cluster
+        # identifications carry this callback, so summarize→variant-identify
+        # can't re-trigger it.
+        self._maybe_queue_incremental_summarize(specimen_id)
+
+    def _maybe_queue_incremental_summarize(self, specimen_id: str) -> None:
+        if not self.config.incremental_summarize or self._shutdown.is_set():
+            return
+        spec = self.state.get_specimen(specimen_id)
+        if spec.status not in (SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH):
+            return
+        if not spec.clusters:
+            return
+        self._summarize_queue.put((specimen_id, spec.consensus_version))
+
+    def _summarize_worker(self) -> None:
+        """Serial incremental-summarize lane (daemon thread)."""
+        while not self._shutdown.is_set():
+            try:
+                sid, cv = self._summarize_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            self._summarize_lane_active = sid
+            try:
+                spec = self.state.get_specimen(sid)
+                # Superseded or about to be — the newer consensus's own
+                # identify→summarize chain re-queues this specimen.
+                if (spec.consensus_version != cv
+                        or sid in self._futures or sid in self._id_futures):
+                    continue
+                variants = self.summarize.run(sid, consensus_version=cv)
+                if variants and self.identify and spec.consensus_version == cv:
+                    self._submit_variant_identification_async(sid, cv)
+            except Exception as e:
+                logger.warning(f"Incremental summarize failed for {sid}: {e}")
+            finally:
+                self._summarize_lane_active = None
+
+    def _submit_variant_identification_async(self, sid: str, cv: int) -> None:
+        """Variant identification for an incremental summarize (tracked
+        separately from _futures so the scheduler's slot math is untouched)."""
+        combined = self._build_variant_fasta(sid)
+        if not combined:
+            return
+        logger.info(f"Identifying variants for {sid}")
+        try:
+            fut = self._executor.submit(
+                self.identify.run, sid, combined,
+                consensus_version=cv, output_name=f"{sid}-variants",
+            )
+        except RuntimeError:
+            return  # executor shut down
+        self._variant_futures[sid] = fut
+        fut.add_done_callback(lambda f, sid=sid: self._on_variant_id_done(sid, f))
+
+    def _on_variant_id_done(self, sid: str, fut: Future) -> None:
+        self._variant_futures.pop(sid, None)
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.error(f"Variant identification failed for {sid}: {exc}")
+            self.event_log.emit("pipeline.error", {
+                "component": "identify",
+                "specimen_id": sid,
+                "message": str(exc),
+            })
+
+    def _drain_incremental_summaries(self) -> None:
+        """Stop feeding the lane and wait for it (and its variant
+        identifications) to go quiet — the final round must never summarize
+        a specimen the lane is mid-write on."""
+        try:
+            while True:
+                self._summarize_queue.get_nowait()
+        except queue.Empty:
+            pass
+        # One tick's grace: the worker marks itself active a few instructions
+        # after dequeuing, so an instant check could miss a just-started job.
+        time.sleep(self._TICK)
+        if self._summarize_lane_active is None and not self._variant_futures:
+            return
+        logger.info("Waiting for incremental summarize lane to drain")
+        deadline = time.monotonic() + self.config.job_timeout + 60
+        while ((self._summarize_lane_active is not None or self._variant_futures)
+               and not self._shutdown.is_set()
+               and time.monotonic() < deadline):
+            time.sleep(self._TICK)
+            self._drain_cmd_queue()
 
     def _drain_identifications(self) -> None:
         """Wait for all in-flight identification jobs to finish.
@@ -895,7 +1000,8 @@ class Pipeline:
             logger.debug(f"Skipping summarize for {specimen_id}: already in-flight")
             return
         logger.info(f"Submitting summarize job for {specimen_id}")
-        future = self._executor.submit(self.summarize.run, specimen_id)
+        cv = self.state.get_specimen(specimen_id).consensus_version
+        future = self._executor.submit(self.summarize.run, specimen_id, cv)
         self._futures[specimen_id] = future
 
     def _run_summarize_round(self) -> None:
@@ -908,11 +1014,17 @@ class Pipeline:
         # those specimens are still CONSENSUS_DONE until identification lands.
         # Computing eligibility before that would silently skip them.
         self._drain_identifications()
+        self._drain_incremental_summaries()
 
+        # Never summarized, or summarized against a superseded consensus
+        # generation. With the incremental lane on, this is just stragglers.
         eligible = [
             sid for sid, spec in self.state.specimens.items()
-            if spec.status in (SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH)
-            and spec.clusters  # must have consensus output
+            if spec.clusters  # must have consensus output
+            and (spec.status in (SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH)
+                 or (spec.status == SpecimenStatus.SUMMARIZED
+                     and spec.summarize_consensus_version is not None
+                     and spec.summarize_consensus_version != spec.consensus_version))
         ]
 
         if not eligible:

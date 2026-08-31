@@ -390,6 +390,8 @@ function applyEvent(event) {
     }
     case 'summarize.completed': {
       const s = getSpec(d.specimen_id);
+      // Drop superseded generations (mirrors state.py)
+      if (d.consensus_version != null && d.consensus_version !== s.consensus_version) break;
       s.status = 'summarized';
       s.variants = d.variants || [];
       break;

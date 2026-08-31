@@ -19,8 +19,13 @@ class SummarizeRunner:
         self.config = config
         self.event_log = event_log
 
-    def run(self, specimen_id: str) -> list[dict]:
+    def run(self, specimen_id: str, consensus_version: int | None = None) -> list[dict]:
         """Run speconsense-summarize in single-specimen mode.
+
+        consensus_version tags the events so a result landing after the
+        specimen was re-consensused is dropped by state (an incremental
+        summarize can be overtaken by a reprocess, exactly like an
+        in-flight identification).
 
         Returns list of variant dicts from stdout JSON.
         """
@@ -29,6 +34,7 @@ class SummarizeRunner:
         self.event_log.emit("summarize.started", {
             "specimen_id": specimen_id,
             "job_id": job_id,
+            "consensus_version": consensus_version,
         })
 
         source_dir = self.config.consensus_output_dir / specimen_id
@@ -62,6 +68,7 @@ class SummarizeRunner:
             self.event_log.emit("summarize.completed", {
                 "specimen_id": specimen_id,
                 "job_id": job_id,
+                "consensus_version": consensus_version,
                 "variant_count": len(variants),
                 "variants": variants,
             })
