@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -51,6 +52,16 @@ def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig
         app.mount("/photos", StaticFiles(directory=str(photos_dir)), name="photos")
 
     return app
+
+
+@app.middleware("http")
+async def photo_cache_headers(request: Request, call_next):
+    """Cached photos are keyed by immutable iNat photo id — let every
+    browser fetch each one exactly once."""
+    response = await call_next(request)
+    if request.url.path.startswith("/photos/") and response.status_code == 200:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
 
 
 @app.get("/")
@@ -240,6 +251,53 @@ async def get_specimens():
     return list(_state.to_dict()["specimens"].values())
 
 
+# --- SSE fan-out ---
+#
+# One broadcaster thread tails the event log and pushes to per-client
+# asyncio queues, so a connected viewer costs a queue rather than a thread.
+# (The previous design parked one executor thread per client in a blocking
+# tail(); with the default pool of ~cpu+4 threads, a roomful of --share
+# viewers would starve event delivery for everyone.)
+_subscribers: list[dict] = []
+_broadcaster_started = False
+_SUBSCRIBER_QUEUE_MAX = 1000
+
+
+def _ensure_broadcaster():
+    global _broadcaster_started
+    with _sse_lock:
+        if _broadcaster_started or _event_log is None:
+            return
+        _broadcaster_started = True
+    threading.Thread(target=_broadcast_loop, name="sse-broadcast", daemon=True).start()
+
+
+def _broadcast_loop():
+    version = _state.version if _state else 0
+    while True:
+        try:
+            for event in _event_log.tail(after_version=version, timeout=5.0):
+                version = event.version
+                with _sse_lock:
+                    subs = list(_subscribers)
+                for sub in subs:
+                    def push(sub=sub, event=event):
+                        try:
+                            sub["queue"].put_nowait(event)
+                        except asyncio.QueueFull:
+                            # Too slow to drain: mark it; the generator closes
+                            # and the client reconnects + catches up from its
+                            # version via the backlog path.
+                            sub["overflow"] = True
+                    try:
+                        sub["loop"].call_soon_threadsafe(push)
+                    except RuntimeError:
+                        pass  # client's loop already closed
+        except Exception:
+            logger.exception("SSE broadcaster error")
+            time.sleep(1)
+
+
 @app.get("/events")
 async def event_stream(request: Request, after_version: int = 0):
     """SSE endpoint — streams events as they arrive."""
@@ -255,34 +313,50 @@ async def event_stream(request: Request, after_version: int = 0):
                              "max_clients": _config.share_max_clients},
                 )
 
+    _ensure_broadcaster()
+
     async def generate():
         global _sse_clients
+        sub = {
+            "queue": asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAX),
+            "loop": asyncio.get_running_loop(),
+            "overflow": False,
+        }
+        # Subscribe before reading the backlog so no event can fall between;
+        # the version check below dedupes the overlap.
         with _sse_lock:
             _sse_clients += 1
+            _subscribers.append(sub)
         try:
             version = after_version
-            loop = asyncio.get_event_loop()
+            for event in _event_log.tail(after_version=version, timeout=0):
+                version = event.version
+                yield {
+                    "event": event.type,
+                    "id": str(event.version),
+                    "data": json.dumps(_event_to_dict(event)),
+                }
             while True:
-                if await request.is_disconnected():
+                if sub["overflow"]:
                     return
                 try:
-                    events = await loop.run_in_executor(
-                        None,
-                        lambda: list(_event_log.tail(after_version=version, timeout=5.0))
-                    )
-                except RuntimeError:
-                    # Executor shut down during server exit
-                    return
-                for event in events:
-                    version = event.version
-                    yield {
-                        "event": event.type,
-                        "id": str(event.version),
-                        "data": json.dumps(_event_to_dict(event)),
-                    }
+                    event = await asyncio.wait_for(sub["queue"].get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        return
+                    continue
+                if event.version <= version:
+                    continue
+                version = event.version
+                yield {
+                    "event": event.type,
+                    "id": str(event.version),
+                    "data": json.dumps(_event_to_dict(event)),
+                }
         finally:
             with _sse_lock:
                 _sse_clients -= 1
+                _subscribers.remove(sub)
 
     return EventSourceResponse(generate())
 
