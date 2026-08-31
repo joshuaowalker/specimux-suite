@@ -57,6 +57,25 @@ def _parse_observation_observer(obs: dict) -> dict:
     return {"login": login, "name": user.get("name") or ""}
 
 
+def _parse_first_identification(obs: dict) -> dict:
+    """The observation's earliest identification — the true field ID.
+
+    At a foray the first iNat ID is made in the field; later ones are
+    refinements at the display tables. Returns {name, login} or {}.
+    """
+    idents = obs.get("identifications") or []
+    if not idents:
+        return {}
+    first = min(idents, key=lambda i: i.get("created_at") or "~")
+    taxon = first.get("taxon") or {}
+    if not taxon.get("name"):
+        return {}
+    return {
+        "name": taxon["name"],
+        "login": (first.get("user") or {}).get("login") or "",
+    }
+
+
 def extract_inat_ids(specimens: list[dict]) -> dict[str, str]:
     """Extract iNaturalist observation IDs from specimen IDs.
 
@@ -162,6 +181,7 @@ def fetch_community_taxa(
             for obs_id, val in raw.items():
                 if (isinstance(val, dict) and "iconic_taxon" in val
                         and "photos" in val and "ancestors" in val
+                        and "first_id" in val
                         and (val.get("genus") or not val.get("name"))):
                     cache[obs_id] = val
                 # else: discard — will be re-fetched
@@ -240,6 +260,7 @@ def fetch_community_taxa(
                     "ancestors": ancestors,
                     "photos": _parse_observation_photos(obs),
                     "observer": _parse_observation_observer(obs),
+                    "first_id": _parse_first_identification(obs),
                 }
                 cache[obs_id] = entry
                 for specimen_id in obs_id_to_specimens.get(obs_id, []):

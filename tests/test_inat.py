@@ -60,11 +60,13 @@ def test_cache_accepts_new_entries_and_discards_legacy(tmp_path):
     cache = {
         "111": {"name": "Lactarius peckii", "genus": "Lactarius",
                 "iconic_taxon": "Fungi", "photos": [], "observer": {},
-                "ancestors": [47170, 48627]},
+                "ancestors": [47170, 48627],
+                "first_id": {"name": "Lactarius", "login": "x"}},
         "222": {"name": "Russula", "genus": "Russula", "iconic_taxon": "Fungi"},  # legacy
         "333": {"name": "", "genus": "", "iconic_taxon": "",
                 "photos": [{"id": 9, "url": "u", "license_code": None, "attribution": ""}],
-                "observer": {"login": "x", "name": ""}, "ancestors": []},
+                "observer": {"login": "x", "name": ""}, "ancestors": [],
+                "first_id": {}},
     }
     (tmp_path / "inat_taxon_cache.json").write_text(json.dumps(cache), encoding="utf-8")
 
@@ -212,3 +214,16 @@ def test_fetch_genus_lineages_unresolved_cached_as_empty(tmp_path, monkeypatch):
     assert result["Notagenus"] == []
     cached = json.loads((tmp_path / "inat_lineage_cache.json").read_text())
     assert cached["notagenus"] == []
+
+
+def test_parse_first_identification():
+    from specimux_suite.inat import _parse_first_identification
+    obs = {"identifications": [
+        {"created_at": "2026-08-30T10:00:00", "taxon": {"name": "Amanita elliptosperma"},
+         "user": {"login": "expert"}},
+        {"created_at": "2026-08-29T14:00:00", "taxon": {"name": "Amanita"},
+         "user": {"login": "forayer"}},
+    ]}
+    assert _parse_first_identification(obs) == {"name": "Amanita", "login": "forayer"}
+    assert _parse_first_identification({"identifications": []}) == {}
+    assert _parse_first_identification({}) == {}

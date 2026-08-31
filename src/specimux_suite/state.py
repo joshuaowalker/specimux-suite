@@ -57,6 +57,9 @@ class SpecimenState:
     # The observation taxon's ancestor ids (root→self, self included);
     # compared against genus_lineages for taxonomy-level agreement.
     inat_ancestors: list = field(default_factory=list)
+    # The observation's earliest identification {name, login} — the true
+    # field ID, as opposed to the community/refined taxon above.
+    inat_first_id: dict = field(default_factory=dict)
     total_reads: int = 0
     reads_at_last_consensus: int = 0
     consensus_version: int = 0
@@ -178,6 +181,7 @@ class PipelineState:
                 spec.inat_photos = taxon.get("photos", [])
                 spec.inat_observer = taxon.get("observer", {})
                 spec.inat_ancestors = taxon.get("ancestors", [])
+                spec.inat_first_id = taxon.get("first_id", {})
             else:
                 # Legacy string format
                 spec.community_taxon = taxon
@@ -360,6 +364,7 @@ def _specimen_to_dict(s: SpecimenState) -> dict:
         "inat_photos": list(s.inat_photos),
         "inat_observer": dict(s.inat_observer),
         "inat_ancestors": list(s.inat_ancestors),
+        "inat_first_id": dict(s.inat_first_id),
         "total_reads": s.total_reads,
         "reads_at_last_consensus": s.reads_at_last_consensus,
         "consensus_version": s.consensus_version,
