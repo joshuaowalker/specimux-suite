@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>specimux-suite · highlights</title>
+<style>
+  /* Projector mode: warm brown-black ground (a dark room, not a terminal),
+     spore-print cream text, chanterelle amber accent. All system faces —
+     no webfonts, the venue network can't be a dependency. */
+  :root {
+    --bg: #100d0b;
+    --surface: #1a1512;
+    --text: #efe7da;
+    --muted: #9a8c7a;
+    --faint: #5c5248;
+    --amber: #e8a33d;
+    --amber-dim: #8a6224;
+    --base-a: #7fa65a;
+    --base-c: #5a8fa6;
+    --base-g: #a67f5a;
+    --base-t: #a65a6b;
+    --serif: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    overflow: hidden;
+    cursor: none;
+  }
+  body.show-cursor { cursor: default; }
+
+  #stage { position: absolute; inset: 0 0 3.2rem 0; }
+
+  .card {
+    position: absolute; inset: 0;
+    display: flex;
+    opacity: 0;
+    transition: opacity 0.9s ease;
+  }
+  .card.visible { opacity: 1; }
+
+  /* ---- identification card ---- */
+  .card .text-pane {
+    flex: 1 1 55%;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 4vw 3vw 6vh 5vw;
+    min-width: 0;
+    position: relative; z-index: 2;
+  }
+  .card .photo-pane {
+    flex: 1 1 45%;
+    position: relative;
+    overflow: hidden;
+  }
+  .card .photo-pane img {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+  }
+  /* photo bleeds into the dark ground rather than ending at a seam */
+  .card .photo-pane::before {
+    content: ''; position: absolute; inset: 0; z-index: 1;
+    background: linear-gradient(90deg, var(--bg) 0%, transparent 22%),
+                linear-gradient(0deg, var(--bg) 0%, transparent 18%);
+  }
+  .card.no-photo .photo-pane { display: none; }
+  .card.no-photo .text-pane { padding-right: 8vw; }
+
+  .eyebrow {
+    font-size: clamp(0.9rem, 1.6vw, 1.4rem);
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 2.2vh;
+    animation: rise 0.9s ease both;
+  }
+  .eyebrow .flag { color: var(--muted); }
+
+  .binomial {
+    font-family: var(--serif);
+    font-style: italic;
+    font-weight: 400;
+    line-height: 0.98;
+    font-size: clamp(3rem, 7.5vw, 8rem);
+    animation: rise 0.9s 0.15s ease both;
+  }
+  .binomial .epithet { display: block; color: var(--text); }
+  .binomial .genus { display: block; }
+  /* "aff." qualifier and open questions are set roman, as in print floras */
+  .binomial .aff { font-style: normal; color: var(--amber); font-size: 0.55em; margin-right: 0.12em; }
+  .binomial .undescribed { font-style: normal; color: var(--amber); font-size: 0.5em; letter-spacing: 0.02em; }
+
+  .datarow {
+    font-family: var(--mono);
+    font-size: clamp(1rem, 1.9vw, 1.7rem);
+    color: var(--muted);
+    margin-top: 3.5vh;
+    display: flex; flex-wrap: wrap; gap: 0.4em 1.6em;
+    animation: rise 0.9s 0.3s ease both;
+  }
+  .datarow .identity { color: var(--text); }
+  .datarow .identity.novel { color: var(--amber); }
+
+  .fieldrow {
+    font-size: clamp(0.95rem, 1.6vw, 1.35rem);
+    color: var(--muted);
+    margin-top: 1.6vh;
+    animation: rise 0.9s 0.45s ease both;
+  }
+  .fieldrow .ok { color: var(--base-a); }
+  .fieldrow .fieldname { font-style: italic; font-family: var(--serif); }
+
+  .creditrow {
+    font-size: clamp(0.85rem, 1.3vw, 1.1rem);
+    color: var(--faint);
+    margin-top: 4vh;
+    animation: rise 0.9s 0.6s ease both;
+  }
+  .creditrow b { color: var(--muted); font-weight: 500; }
+
+  /* novel variants: the one loud moment. Soft (<98%) gets a steady amber
+     bar; strong (<90%) pulses. */
+  .card.novel .text-pane::before,
+  .card.novel-soft .text-pane::before {
+    content: ''; position: absolute; left: 0; top: 10%; bottom: 10%;
+    width: 4px; background: var(--amber);
+  }
+  .card.novel .text-pane::before { animation: glowbar 2.4s ease-in-out infinite; }
+  .card.novel-soft .text-pane::before { opacity: 0.55; }
+  @keyframes glowbar {
+    0%, 100% { opacity: 0.5; } 50% { opacity: 1; }
+  }
+
+  /* similarity gauge: how far this sequence sits from anything known */
+  .gauge { margin-top: 3.5vh; max-width: 40vw; animation: rise 0.9s 0.3s ease both; }
+  .card.no-photo .gauge { max-width: 60vw; }
+  .gauge-label {
+    font-family: var(--mono);
+    font-size: clamp(0.95rem, 1.6vw, 1.4rem);
+    color: var(--muted); margin-bottom: 1.4vh;
+  }
+  .gauge-label b { color: var(--amber); font-weight: 600; }
+  .gauge-track {
+    position: relative; height: 6px; border-radius: 3px;
+    background: #2a231d;
+  }
+  .gauge-zone {
+    position: absolute; top: 0; bottom: 0; right: 0; border-radius: 0 3px 3px 0;
+    background: #3d4a33;
+  }
+  .gauge-marker {
+    position: absolute; top: 50%; transform: translate(-50%, -50%);
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 14px rgba(232, 163, 61, 0.55);
+  }
+  .card.novel .gauge-marker { animation: glowbar 2.4s ease-in-out infinite; }
+  .gauge-ticks {
+    position: relative; height: 1.6em; margin-top: 0.9vh;
+    font-family: var(--mono);
+    font-size: clamp(0.75rem, 1.1vw, 1rem);
+    color: var(--faint);
+  }
+  .gauge-ticks .zone-tick { position: absolute; right: 0; white-space: nowrap; }
+
+  /* ---- sequence ribbon: the specimen's actual consensus bases ---- */
+  .ribbon {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    height: 2.1rem; line-height: 2.1rem;
+    font-family: var(--mono);
+    font-size: 1.05rem;
+    letter-spacing: 0.35em;
+    white-space: nowrap;
+    overflow: hidden;
+    opacity: 0.5;
+    z-index: 3;
+    mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+  }
+  .ribbon .scroll { display: inline-block; animation: ribbonscroll 80s linear infinite; }
+  @keyframes ribbonscroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+  .ribbon .A { color: var(--base-a); } .ribbon .C { color: var(--base-c); }
+  .ribbon .G { color: var(--base-g); } .ribbon .T { color: var(--base-t); }
+
+  /* ---- stats + leaderboard cards ---- */
+  .card .stat-pane {
+    flex: 1;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 0 6vw;
+  }
+  .stat-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 3vw; margin-top: 5vh;
+  }
+  .stat .num {
+    font-family: var(--mono);
+    font-size: clamp(2.6rem, 6.5vw, 6.5rem);
+    color: var(--text);
+    animation: rise 0.9s ease both;
+  }
+  .stat:nth-child(2) .num { animation-delay: 0.15s; }
+  .stat:nth-child(3) .num { animation-delay: 0.3s; }
+  .stat .lbl {
+    font-size: clamp(0.9rem, 1.5vw, 1.3rem);
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--muted); margin-top: 1vh;
+  }
+
+  .board { margin-top: 4vh; }
+  .board-row {
+    display: flex; align-items: baseline; gap: 2vw;
+    font-size: clamp(1.3rem, 2.6vw, 2.6rem);
+    padding: 1.4vh 0;
+    border-bottom: 1px solid #2a231d;
+    animation: rise 0.7s ease both;
+  }
+  .board-row:nth-child(2) { animation-delay: 0.1s; }
+  .board-row:nth-child(3) { animation-delay: 0.2s; }
+  .board-row:nth-child(4) { animation-delay: 0.3s; }
+  .board-row:nth-child(5) { animation-delay: 0.4s; }
+  .board-row .rank { font-family: var(--mono); color: var(--faint); min-width: 2ch; }
+  .board-row .who { flex: 1; }
+  .board-row .count { font-family: var(--mono); color: var(--amber); }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(1.2vh); }
+    to { opacity: 1; transform: none; }
+  }
+
+  /* ---- footer: ambient proof of life ---- */
+  #footer {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    height: 3.2rem;
+    display: flex; align-items: center;
+    padding: 0 1.6rem;
+    gap: 2rem;
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    color: var(--faint);
+    border-top: 1px solid #221c17;
+    background: var(--bg);
+    z-index: 5;
+  }
+  #footer .wordmark { color: var(--muted); letter-spacing: 0.12em; }
+  #footer .counters { display: flex; gap: 2rem; margin-left: auto; }
+  #footer .counters b { color: var(--muted); font-weight: 500; }
+  #conn-dot {
+    width: 0.55rem; height: 0.55rem; border-radius: 50%;
+    background: var(--base-a); flex: none;
+  }
+  #conn-dot.down { background: var(--base-t); animation: glowbar 1.2s infinite; }
+  #paused-tag { color: var(--amber); display: none; }
+
+  @media (max-width: 720px) {
+    .card { flex-direction: column-reverse; }
+    .card .photo-pane { flex: 1 1 40%; }
+    .card .photo-pane::before {
+      background: linear-gradient(0deg, transparent 60%, var(--bg) 100%);
+    }
+    .card .text-pane { flex: 1 1 60%; padding: 2vh 6vw 5vh 6vw; justify-content: flex-start; }
+    .gauge, .card.no-photo .gauge { max-width: 88vw; }
+    .stat-grid { grid-template-columns: 1fr; gap: 2vh; }
+    #footer .counters { gap: 1rem; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ribbon .scroll { animation: none; }
+    .eyebrow, .binomial, .datarow, .fieldrow, .creditrow, .stat .num, .board-row { animation: none; }
+    .card { transition: opacity 0.2s ease; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="footer">
+  <div id="conn-dot"></div>
+  <span class="wordmark">specimux-suite · live</span>
+  <span id="paused-tag">paused — space to resume</span>
+  <div class="counters">
+    <span><b id="ct-reads">0</b> reads matched</span>
+    <span><b id="ct-identified">0</b> identified</span>
+    <span><b id="ct-genera">0</b> genera</span>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ============================================================
+// Minimal state mirror (same event semantics as index.html /
+// state.py — keep the top-match logic in sync with index.html)
+// ============================================================
+const state = {
+  version: 0,
+  specimens: {},   // sid -> {..._specimen_to_dict fields we use}
+  totalMatched: 0,
+};
+
+function getSpec(sid) {
+  if (!state.specimens[sid]) {
+    state.specimens[sid] = {
+      specimen_id: sid, total_reads: 0, status: 'waiting',
+      clusters: [], identification: [], variants: [],
+      consensus_version: 0,
+      community_taxon: '', community_genus: '', community_iconic_taxon: '',
+      inat_photos: [], inat_observer: {},
+    };
+  }
+  return state.specimens[sid];
+}
+
+function applyEvent(event) {
+  const d = event.data;
+  switch (event.type) {
+    case 'specimens.loaded':
+      for (const s of (d.specimens || [])) getSpec(s.specimen_id);
+      break;
+    case 'specimens.taxa':
+      for (const [sid, taxon] of Object.entries(d.taxa || {})) {
+        const s = getSpec(sid);
+        if (typeof taxon === 'object') {
+          s.community_taxon = taxon.name || '';
+          s.community_genus = taxon.genus || '';
+          s.community_iconic_taxon = taxon.iconic_taxon || '';
+          s.inat_photos = taxon.photos || [];
+          s.inat_observer = taxon.observer || {};
+        } else {
+          s.community_taxon = taxon;
+          s.community_genus = taxon ? taxon.split(/\s+/)[0] : '';
+        }
+      }
+      break;
+    case 'specimux.completed':
+      for (const [sid, count] of Object.entries(d.specimens || {})) {
+        getSpec(sid).total_reads = count;
+      }
+      state.totalMatched = Object.values(state.specimens)
+        .reduce((a, s) => a + (s.total_reads || 0), 0);
+      break;
+    case 'specimen.updated': {
+      const s = getSpec(d.specimen_id);
+      if (d.total_reads != null) s.total_reads = d.total_reads;
+      if (d.consensus_version != null) s.consensus_version = d.consensus_version;
+      break;
+    }
+    case 'consensus.completed': {
+      const s = getSpec(d.specimen_id);
+      s.status = 'consensus_done';
+      s.consensus_version = (s.consensus_version || 0) + 1;
+      s.identification = [];
+      s.clusters = d.clusters || [];
+      break;
+    }
+    case 'identification.completed': {
+      const s = getSpec(d.specimen_id);
+      if (d.consensus_version != null && d.consensus_version !== s.consensus_version) break;
+      const matches = d.matches || [];
+      const newClusters = new Set(matches.map(m => m.cluster));
+      s.identification = s.identification.filter(m => !newClusters.has(m.cluster)).concat(matches);
+      const hasHits = matches.some(m => (m.top_hits || []).length > 0);
+      if (s.status !== 'summarized') s.status = hasHits ? 'identified' : 'no_match';
+      if (hasHits) onIdentification(s);
+      break;
+    }
+    case 'summarize.completed': {
+      const s = getSpec(d.specimen_id);
+      s.status = 'summarized';
+      s.variants = d.variants || [];
+      break;
+    }
+  }
+}
+
+// --- top-match selection, ported from index.html (keep in sync) ---
+function hasIdentification(s) {
+  return (s.identification || []).some(m => m.top_hits && m.top_hits.length > 0);
+}
+function isHitOnTarget(hit, communityGenus) {
+  if (!communityGenus || !hit) return false;
+  return (hit.name || hit.ref_id || '').split(/\s+/)[0].toLowerCase() === communityGenus;
+}
+function getTopMatch(s) {
+  if (!s.identification || !s.identification.length) return null;
+  const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0]).toLowerCase();
+  const seqs = s.clusters || [];
+  const sizeMap = {};
+  for (const seq of seqs) sizeMap[seq.name] = seq.size || 0;
+  let best = null, bestOn = false, bestSize = -1;
+  for (const m of s.identification) {
+    if (!m.top_hits || !m.top_hits.length) continue;
+    if (seqs.length && !(m.cluster in sizeMap)) continue;
+    const on = isHitOnTarget(m.top_hits[0], communityGenus);
+    const size = sizeMap[m.cluster] || 0;
+    if (best === null || (on && !bestOn) || (on === bestOn && size > bestSize)) {
+      best = m; bestOn = on; bestSize = size;
+    }
+  }
+  return best;
+}
+function getTopHit(s) { const m = getTopMatch(s); return m ? m.top_hits[0] : null; }
+function hitIdentity(h) { return h ? (h.adjusted_identity || h.identity || 0) : 0; }
+function hitGenus(h) { return h ? (h.name || h.ref_id || '').split(/\s+/)[0] : ''; }
+
+function esc(t) { const d = document.createElement('div'); d.textContent = t == null ? '' : t; return d.innerHTML; }
+function fmt(n) { return (n || 0).toLocaleString('en-US'); }
+
+// Local photo cache first; fall back to the iNat host if not prefetched yet.
+function photoSources(photo) {
+  return {
+    local: `/photos/${photo.id}_large.jpg`,
+    remote: (photo.url || '').replace('/square.', '/large.'),
+  };
+}
+
+// ============================================================
+// Card engine: priority queue + rate-adaptive dwell + filler
+// ============================================================
+const DWELL = { base: 12000, busy: 7000, slammed: 5000, stats: 9000 };
+const NOVEL_SOFT = 0.98, NOVEL_STRONG = 0.90;
+
+const queue = [];              // [{key, type, priority, sid, at}]
+const announcedGenera = new Set();  // genera already seen this run
+const lastShown = {};          // sid -> timestamp (for highlight recycling)
+let fillerIdx = 0;
+let paused = false;
+let dwellTimer = null;
+let currentCardEl = null;
+let bootstrapped = false;
+
+function enqueue(card) {
+  const i = queue.findIndex(c => c.key === card.key);
+  if (i >= 0) queue.splice(i, 1);
+  queue.push(card);
+  queue.sort((a, b) => a.priority - b.priority || a.at - b.at);
+}
+
+// Called from applyEvent when a specimen gains/refreshes hits. During
+// bootstrap-replay nothing fires (the snapshot is history, not news).
+function onIdentification(s) {
+  if (!bootstrapped) return;
+  const hit = getTopHit(s);
+  if (!hit) return;
+  const identity = hitIdentity(hit);
+  const genus = hitGenus(hit);
+  const firstOfGenus = genus && !announcedGenera.has(genus.toLowerCase());
+  let priority = 3;
+  if (identity < NOVEL_STRONG) priority = 1;
+  else if (firstOfGenus) priority = 2;
+  enqueue({ key: s.specimen_id, type: 'identification', priority, sid: s.specimen_id, at: Date.now(), firstOfGenus });
+}
+
+function nextDwell(type) {
+  if (type === 'stats' || type === 'leaderboard') return DWELL.stats;
+  if (queue.length > 15) return DWELL.slammed;
+  if (queue.length > 5) return DWELL.busy;
+  return DWELL.base;
+}
+
+function pickFiller() {
+  const rotation = ['highlight', 'stats', 'highlight', 'leaderboard'];
+  for (let i = 0; i < rotation.length; i++) {
+    const type = rotation[(fillerIdx + i) % rotation.length];
+    if (type === 'highlight') {
+      const sid = pickHighlight();
+      if (sid) { fillerIdx += i + 1; return { type: 'identification', sid, recycled: true }; }
+    } else if (type === 'leaderboard') {
+      if (leaderboardRows().length >= 2) { fillerIdx += i + 1; return { type: 'leaderboard' }; }
+    } else {
+      fillerIdx += i + 1; return { type: 'stats' };
+    }
+  }
+  return { type: 'stats' };
+}
+
+// Least-recently-shown identified specimen with a photo; novel ones first.
+function pickHighlight() {
+  const candidates = Object.values(state.specimens)
+    .filter(s => hasIdentification(s) && (s.inat_photos || []).length);
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => {
+    const an = hitIdentity(getTopHit(a)) < NOVEL_SOFT ? 0 : 1;
+    const bn = hitIdentity(getTopHit(b)) < NOVEL_SOFT ? 0 : 1;
+    if (an !== bn) return an - bn;
+    return (lastShown[a.specimen_id] || 0) - (lastShown[b.specimen_id] || 0);
+  });
+  // Small pool at the top so it doesn't loop the same order forever
+  const pool = candidates.slice(0, Math.min(8, candidates.length));
+  return pool[Math.floor(Math.random() * pool.length)].specimen_id;
+}
+
+function showNext() {
+  clearTimeout(dwellTimer);
+  if (paused) return;
+  const card = queue.length ? queue.shift() : pickFiller();
+  let el = null, type = card.type;
+  if (type === 'identification') {
+    const s = state.specimens[card.sid];
+    const hit = s && getTopHit(s);
+    if (!hit) { dwellTimer = setTimeout(showNext, 50); return; }
+    el = renderIdentification(s, hit, card);
+    lastShown[card.sid] = Date.now();
+    const g = hitGenus(hit);
+    if (g) announcedGenera.add(g.toLowerCase());
+  } else if (type === 'leaderboard') {
+    el = renderLeaderboard();
+  } else {
+    el = renderStats();
+  }
+  swapCard(el);
+  dwellTimer = setTimeout(showNext, nextDwell(type));
+}
+
+// Shrink the display name until no word overflows its line — a long epithet
+// or provisional OTU name must never hyphenate mid-word on the big screen.
+function fitBinomial(el) {
+  if (!el) return;
+  let size = parseFloat(getComputedStyle(el).fontSize);
+  const min = 30;
+  for (let i = 0; i < 8 && size > min && el.scrollWidth > el.clientWidth + 1; i++) {
+    size = Math.max(min, size * Math.min(0.92, el.clientWidth / el.scrollWidth));
+    el.style.fontSize = size + 'px';
+  }
+}
+
+function swapCard(el) {
+  const stage = document.getElementById('stage');
+  const old = currentCardEl;
+  stage.appendChild(el);
+  fitBinomial(el.querySelector('.binomial'));
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    el.classList.add('visible');
+    if (old) {
+      old.classList.remove('visible');
+      setTimeout(() => old.remove(), 1000);
+    }
+  }));
+  currentCardEl = el;
+}
+
+// ============================================================
+// Card renderers
+// ============================================================
+function splitBinomial(name) {
+  const parts = (name || '').split(/\s+/);
+  return { genus: parts[0] || '', rest: parts.slice(1).join(' ') };
+}
+
+// Similarity gauge: where this sequence sits relative to anything in the
+// reference DB. The ≥98% zone reads as "a known species"; a marker outside
+// it is the visual argument for novelty.
+function gaugeHtml(identity) {
+  const MIN = 85;
+  const pct = identity * 100;
+  const x = Math.max(0, (pct - MIN) / (100 - MIN) * 100);
+  const zoneX = (98 - MIN) / (100 - MIN) * 100;
+  return `
+    <div class="gauge">
+      <div class="gauge-label">closest known sequence · <b>${pct.toFixed(1)}%</b> similar</div>
+      <div class="gauge-track">
+        <div class="gauge-zone" style="left:${zoneX}%"></div>
+        <div class="gauge-marker" style="left:${x}%"></div>
+      </div>
+      <div class="gauge-ticks">
+        <span class="zone-tick">98–100% · known species</span>
+      </div>
+    </div>`;
+}
+
+function renderIdentification(s, hit, card) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  const identity = hitIdentity(hit);
+  const strong = identity < NOVEL_STRONG;
+  const soft = identity < NOVEL_SOFT;
+  if (strong) el.classList.add('novel');
+  else if (soft) el.classList.add('novel-soft');
+
+  let eyebrow;
+  if (strong) eyebrow = 'Possible novel taxon';
+  else if (soft) eyebrow = 'Novel candidate';
+  else if (card.firstOfGenus) eyebrow = `First ${esc(hitGenus(hit))} of the run`;
+  else if (card.recycled) eyebrow = 'From this run';
+  else eyebrow = 'Just identified';
+
+  const name = splitBinomial(hit.name || hit.ref_id || '');
+  const photo = (s.inat_photos || [])[0];
+  if (!photo) el.classList.add('no-photo');
+
+  // Novel headlines never present the closest match as the answer. Strong:
+  // the genus with an open question. Soft: "aff." — near this species but
+  // probably not it — when the epithet is a plain word ("aff. sp. 'XX01'"
+  // reads badly, so provisional names keep their form).
+  let nameHtml;
+  if (strong) {
+    nameHtml = `<span class="genus">${esc(name.genus)}</span>
+      <span class="epithet"><span class="undescribed">undescribed species?</span></span>`;
+  } else if (soft && /^[a-z][a-z-]*$/.test(name.rest)) {
+    nameHtml = `<span class="genus">${esc(name.genus)}</span>
+      <span class="epithet"><span class="aff">aff.</span> ${esc(name.rest)}</span>`;
+  } else {
+    nameHtml = `<span class="genus">${esc(name.genus)}</span>
+      ${name.rest ? `<span class="epithet">${esc(name.rest)}</span>` : ''}`;
+  }
+
+  const clusters = (s.clusters || []).length;
+  const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0] || '');
+  const onTarget = communityGenus && isHitOnTarget(hit, communityGenus.toLowerCase());
+  const observer = s.inat_observer || {};
+  const obsId = (s.specimen_id.match(/iNat(\d+)/) || [])[1];
+
+  let fieldHtml = '';
+  if (strong) {
+    fieldHtml = `Closest match: <span class="fieldname">${esc(hit.name || hit.ref_id || '')}</span>`;
+    if (s.community_taxon) fieldHtml += ` · Field ID: <span class="fieldname">${esc(s.community_taxon)}</span>`;
+  } else if (s.community_taxon) {
+    fieldHtml = `Field ID: <span class="fieldname">${esc(s.community_taxon)}</span>` +
+      (onTarget && !soft ? ' <span class="ok">— sequence agrees</span>' : '');
+  }
+  let creditHtml = '';
+  if (observer.login) {
+    creditHtml += `Collected by <b>${esc(observer.name || observer.login)}</b>`;
+  }
+  if (obsId) creditHtml += `${creditHtml ? ' · ' : ''}iNat observation ${esc(obsId)}`;
+  if (photo && photo.attribution) creditHtml += `<br>Photo ${esc(photo.attribution)}`;
+
+  const dataHtml = soft
+    ? `<span>${fmt(s.total_reads)} reads</span>
+       ${clusters ? `<span>${clusters} sequence${clusters > 1 ? 's' : ''}</span>` : ''}`
+    : `<span class="identity">${(identity * 100).toFixed(1)}% identity</span>
+       <span>${fmt(s.total_reads)} reads</span>
+       ${clusters ? `<span>${clusters} sequence${clusters > 1 ? 's' : ''}</span>` : ''}`;
+
+  el.innerHTML = `
+    <div class="text-pane">
+      <div class="eyebrow">${eyebrow}</div>
+      <div class="binomial">${nameHtml}</div>
+      ${soft ? gaugeHtml(identity) : ''}
+      <div class="datarow">${dataHtml}</div>
+      ${fieldHtml ? `<div class="fieldrow">${fieldHtml}</div>` : ''}
+      ${creditHtml ? `<div class="creditrow">${creditHtml}</div>` : ''}
+    </div>
+    <div class="photo-pane"></div>
+    <div class="ribbon"></div>`;
+
+  if (photo) {
+    const img = document.createElement('img');
+    const src = photoSources(photo);
+    img.alt = '';
+    img.onerror = () => { if (img.src !== src.remote && src.remote) img.src = src.remote; else el.classList.add('no-photo'); };
+    img.src = src.local;
+    el.querySelector('.photo-pane').appendChild(img);
+  }
+  loadRibbon(el.querySelector('.ribbon'), s, getTopMatch(s));
+  return el;
+}
+
+// The signature: the specimen's actual consensus bases drifting under the name.
+async function loadRibbon(ribbonEl, s, match) {
+  if (!ribbonEl || !match) return;
+  try {
+    const resp = await fetch(`/api/sequence/${encodeURIComponent(s.specimen_id)}/${encodeURIComponent(match.cluster)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const seq = (data.sequence || '').slice(0, 400);
+    if (!seq || !ribbonEl.isConnected) return;
+    const colored = seq.replace(/[ACGT]/g, b => `<span class="${b}">${b}</span>`);
+    ribbonEl.innerHTML = `<span class="scroll">${colored}&nbsp;&nbsp;${colored}</span>`;
+  } catch (e) { /* ribbon is decoration; never let it break the card */ }
+}
+
+function runStats() {
+  const all = Object.values(state.specimens);
+  const identified = all.filter(hasIdentification);
+  const genera = new Set();
+  for (const s of identified) {
+    const g = hitGenus(getTopHit(s));
+    if (g) genera.add(g.toLowerCase());
+  }
+  return { matched: state.totalMatched, identified: identified.length, genera: genera.size, total: all.length };
+}
+
+function renderStats() {
+  const st = runStats();
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="stat-pane">
+      <div class="eyebrow">Sequencing live</div>
+      <div class="stat-grid">
+        <div class="stat"><div class="num" data-stat="matched">${fmt(st.matched)}</div><div class="lbl">reads matched</div></div>
+        <div class="stat"><div class="num"><span data-stat="identified">${fmt(st.identified)}</span><span style="color:var(--faint)">/${fmt(st.total)}</span></div><div class="lbl">specimens identified</div></div>
+        <div class="stat"><div class="num" data-stat="genera">${fmt(st.genera)}</div><div class="lbl">genera so far</div></div>
+      </div>
+    </div>`;
+  return el;
+}
+
+function leaderboardRows() {
+  const byObserver = {};
+  for (const s of Object.values(state.specimens)) {
+    if (!hasIdentification(s)) continue;
+    const o = s.inat_observer || {};
+    if (!o.login) continue;
+    if (!byObserver[o.login]) byObserver[o.login] = { name: o.name || o.login, count: 0 };
+    byObserver[o.login].count++;
+  }
+  return Object.values(byObserver).sort((a, b) => b.count - a.count).slice(0, 5);
+}
+
+function renderLeaderboard() {
+  const rows = leaderboardRows();
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="stat-pane">
+      <div class="eyebrow">Most specimens sequenced</div>
+      <div class="board">
+        ${rows.map((r, i) => `
+          <div class="board-row">
+            <span class="rank">${i + 1}</span>
+            <span class="who">${esc(r.name)}</span>
+            <span class="count">${r.count}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  return el;
+}
+
+// ============================================================
+// Footer counters + bootstrap + SSE
+// ============================================================
+function renderFooter() {
+  const st = runStats();
+  document.getElementById('ct-reads').textContent = fmt(st.matched);
+  document.getElementById('ct-identified').textContent = fmt(st.identified);
+  document.getElementById('ct-genera').textContent = fmt(st.genera);
+  // A stats card on stage ticks live during its dwell — it must never
+  // disagree with the footer counters.
+  if (currentCardEl) {
+    for (const [key, val] of [['matched', st.matched], ['identified', st.identified], ['genera', st.genera]]) {
+      const el = currentCardEl.querySelector(`[data-stat="${key}"]`);
+      if (el) el.textContent = fmt(val);
+    }
+  }
+}
+
+function connect() {
+  const dot = document.getElementById('conn-dot');
+  const es = new EventSource(`/events?after_version=${state.version}`);
+  es.onopen = () => dot.classList.remove('down');
+  es.onerror = () => { dot.classList.add('down'); es.close(); setTimeout(connect, 3000); };
+  // EventSource only delivers named SSE events to registered listeners
+  for (const type of [
+    'specimens.loaded', 'specimens.taxa', 'specimux.completed', 'specimen.updated',
+    'consensus.completed', 'identification.completed', 'summarize.completed',
+  ]) {
+    es.addEventListener(type, (e) => {
+      const event = JSON.parse(e.data);
+      state.version = Math.max(state.version, event.version);
+      applyEvent(event);
+      renderFooter();
+    });
+  }
+}
+
+async function bootstrap() {
+  try {
+    const resp = await fetch('/api/state');
+    const snap = await resp.json();
+    state.version = snap.version || 0;
+    state.totalMatched = snap.total_matched_reads || 0;
+    for (const [sid, s] of Object.entries(snap.specimens || {})) state.specimens[sid] = s;
+    // Everything in the snapshot is history: seed the genera set so only
+    // genuinely new genera get the first-of-genus eyebrow.
+    for (const s of Object.values(state.specimens)) {
+      const g = hitGenus(getTopHit(s));
+      if (g && hasIdentification(s)) announcedGenera.add(g.toLowerCase());
+    }
+  } catch (e) { /* server not up yet; SSE reconnect will heal */ }
+  bootstrapped = true;
+  renderFooter();
+  connect();
+  showNext();
+}
+
+// ============================================================
+// Operator keys: space = pause, → = next, f = fullscreen
+// ============================================================
+document.addEventListener('keydown', (e) => {
+  if (e.key === ' ') {
+    e.preventDefault();
+    paused = !paused;
+    document.getElementById('paused-tag').style.display = paused ? 'inline' : 'none';
+    if (!paused) showNext();
+  } else if (e.key === 'ArrowRight') {
+    showNext();
+  } else if (e.key === 'f') {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  }
+});
+
+// Cursor hides during the show, reappears on movement
+let cursorTimer = null;
+document.addEventListener('mousemove', () => {
+  document.body.classList.add('show-cursor');
+  clearTimeout(cursorTimer);
+  cursorTimer = setTimeout(() => document.body.classList.remove('show-cursor'), 2500);
+});
+
+bootstrap();
+</script>
+</body>
+</html>

@@ -62,6 +62,16 @@ async def index():
     return HTMLResponse("<h1>specimux-suite dashboard</h1><p>Static files not found.</p>")
 
 
+@app.get("/present")
+async def present():
+    """Serve the audience highlights screen (projector mode)."""
+    static_dir = Path(__file__).parent / "static"
+    present_file = static_dir / "present.html"
+    if present_file.exists():
+        return HTMLResponse(present_file.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>present.html not found</h1>", status_code=404)
+
+
 @app.get("/api/state")
 async def get_state():
     """Full state snapshot.
