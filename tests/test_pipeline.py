@@ -541,3 +541,56 @@ def test_finalize_round_includes_stale_summarized(tmp_path):
     with patch.object(pipeline, "_submit_summarize", side_effect=lambda sid: submitted.append(sid)):
         pipeline._run_summarize_round()
     assert submitted == ["specA"]
+
+
+def test_startup_taxa_fetch_uses_corrected_obs_ids(tmp_path):
+    """A restart's taxa fetch must query the admin-corrected observation,
+    not the mistyped id embedded in the specimen name — otherwise it
+    resurrects the wrong taxon and clobbers the healed field ID."""
+    config = _make_config(tmp_path)
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+    pipeline.event_log.emit("inat.correction", {
+        "specimen_id": "specA--iNat111", "old_obs_id": "111", "new_obs_id": "999"})
+
+    seen = {}
+    def fake_fetch(inat_ids, cache_dir=None, abort=None):
+        seen.update(inat_ids)
+        return {}
+    with patch("specimux_suite.pipeline.fetch_community_taxa", side_effect=fake_fetch), \
+         patch("specimux_suite.pipeline.run_inat_check"), \
+         patch("specimux_suite.pipeline.prefetch_photos"):
+        pipeline._fetch_inat_taxa({"specA--iNat111": "111", "specB--iNat222": "222"})
+    assert seen == {"specA--iNat111": "999", "specB--iNat222": "222"}
+
+
+def test_finalize_runs_aggregate_when_lane_summarized_everything(tmp_path):
+    """When the incremental lane already summarized every specimen, the final
+    round has nothing eligible — but the aggregate (summary.fasta) and
+    post-aggregate steps must still run (regression: early return skipped
+    them, so the likeliest real finalization produced no summary.fasta)."""
+    config = _make_config(tmp_path, incremental_summarize=False)
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline = Pipeline(config)
+    pipeline.summarize = MagicMock()
+
+    log = pipeline.event_log
+    log.emit("consensus.completed", {"specimen_id": "specA",
+                                     "clusters": [{"name": "c0", "size": 30}]})
+    log.emit("summarize.completed", {"specimen_id": "specA", "consensus_version": 1,
+                                     "variants": [{"name": "v0"}]})
+
+    pipeline._run_summarize_round()
+    pipeline.summarize.run.assert_not_called()          # nothing eligible
+    pipeline.summarize.run_aggregate.assert_called_once()  # but aggregate ran
+
+    # And with truly nothing summarized, the round still returns early
+    pipeline2_config = _make_config(tmp_path / "empty", incremental_summarize=False)
+    with patch("specimux_suite.pipeline._check_tool_on_path", return_value=True):
+        from specimux_suite.pipeline import Pipeline
+        pipeline2 = Pipeline(pipeline2_config)
+    pipeline2.summarize = MagicMock()
+    pipeline2._run_summarize_round()
+    pipeline2.summarize.run_aggregate.assert_not_called()

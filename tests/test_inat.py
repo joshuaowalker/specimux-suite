@@ -227,3 +227,12 @@ def test_parse_first_identification():
     assert _parse_first_identification(obs) == {"name": "Amanita", "login": "forayer"}
     assert _parse_first_identification({"identifications": []}) == {}
     assert _parse_first_identification({}) == {}
+
+
+def test_apply_corrections_overrides_name_derived_ids():
+    from specimux_suite.inat import apply_corrections
+    ids = {"specA--iNat111": "111", "specB--iNat222": "222"}
+    corrections = {"specA--iNat111": {"old": "111", "new": "999"}}
+    assert apply_corrections(ids, corrections) == {"specA--iNat111": "999",
+                                                   "specB--iNat222": "222"}
+    assert apply_corrections(ids, {}) is ids  # no copy when nothing to do

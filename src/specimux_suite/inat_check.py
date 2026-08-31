@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .inat import API_URL, MAX_BATCH_SIZE, extract_inat_ids
+from .inat import API_URL, MAX_BATCH_SIZE, apply_corrections, extract_inat_ids
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +261,10 @@ def run_inat_check(state, event_log, out_dir: Path, abort=None) -> bool:
         logger.info("iNat ID check already running; skipping")
         return False
     try:
-        inat_ids = extract_inat_ids([{"specimen_id": sid} for sid in state.specimens])
+        inat_ids = apply_corrections(
+            extract_inat_ids([{"specimen_id": sid} for sid in state.specimens]),
+            state.inat_corrections,
+        )
         if not inat_ids:
             return True
         specimens_info = {}

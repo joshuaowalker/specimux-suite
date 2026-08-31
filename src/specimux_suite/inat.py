@@ -89,6 +89,22 @@ def extract_inat_ids(specimens: list[dict]) -> dict[str, str]:
     return result
 
 
+def apply_corrections(inat_ids: dict[str, str], corrections: dict[str, dict]) -> dict[str, str]:
+    """Override name-derived observation IDs with admin-accepted corrections.
+
+    A specimen's name permanently embeds its (possibly mistyped) obs id, so
+    every consumer that extracts IDs from names must remap through the
+    accepted corrections — otherwise a restart's taxa fetch resurrects the
+    wrong observation and clobbers the healed field ID.
+    """
+    if not corrections:
+        return inat_ids
+    return {
+        sid: (corrections.get(sid) or {}).get("new") or obs_id
+        for sid, obs_id in inat_ids.items()
+    }
+
+
 def _resolve_genera(ancestor_ids_by_taxon: dict[int, list[int]]) -> dict[int, str]:
     """Resolve genus names for infrageneric taxa using their ancestor IDs.
 

@@ -14,7 +14,7 @@ from .console import ConsoleUI
 from .events import EventLog
 from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
-from .inat import extract_inat_ids, fetch_community_taxa, fetch_genus_lineages
+from .inat import apply_corrections, extract_inat_ids, fetch_community_taxa, fetch_genus_lineages
 from .inat_check import run_inat_check, write_corrections_tsv
 from .photos import photo_cache_dir, prefetch_photos
 from .util import clone_or_copy, parse_specimens_file
@@ -142,6 +142,10 @@ class Pipeline:
     def _fetch_inat_taxa(self, inat_ids: dict[str, str]) -> None:
         """Fetch community taxon from iNaturalist and emit event (daemon thread)."""
         try:
+            # Replayed admin corrections win over the obs id embedded in the
+            # specimen name — without this, a restart's fetch would emit the
+            # mistyped observation's taxon and clobber the healed field ID.
+            inat_ids = apply_corrections(inat_ids, self.state.inat_corrections)
             taxa = fetch_community_taxa(
                 inat_ids, cache_dir=self.config.output_dir, abort=self._shutdown,
             )
@@ -1027,11 +1031,21 @@ class Pipeline:
                      and spec.summarize_consensus_version != spec.consensus_version))
         ]
 
-        if not eligible:
+        # With the incremental lane on, "nothing eligible" is the EXPECTED
+        # final state — everything was summarized during the run — and the
+        # aggregate below must still happen. Return only when there is truly
+        # nothing summarized at all.
+        any_summarized = any(
+            spec.status == SpecimenStatus.SUMMARIZED
+            for spec in self.state.specimens.values()
+        )
+        if not eligible and not any_summarized:
             logger.info("No specimens eligible for summarization")
             return
-
-        logger.info(f"Running summarize for {len(eligible)} specimens")
+        if not eligible:
+            logger.info("All specimens already summarized incrementally")
+        else:
+            logger.info(f"Running summarize for {len(eligible)} specimens")
 
         pending = list(eligible)
         eligible_set = set(eligible)
