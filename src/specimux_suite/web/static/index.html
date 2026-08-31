@@ -342,6 +342,18 @@ a.hit-name:hover { text-decoration: underline; }
 }
 .tab-btn:hover { color: var(--text); }
 .tab-btn.active { color: var(--text); border-bottom-color: var(--done); }
+/* Links to separate pages sharing the nav bar: same rhythm as tabs, but
+   right-aligned and never carrying the active underline */
+.tab-link {
+  margin-left: auto;
+  align-self: center;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+}
+.tab-link + .tab-link { margin-left: 0; }
+.tab-link:hover { color: var(--text); }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
@@ -494,8 +506,6 @@ col.col-sum-reads { width: 12%; }
     <h1>specimux-suite</h1>
     <div id="status-badge">connecting…</div>
     <span id="viewer-count" style="font-size:0.8rem;color:var(--text-dim);display:none"></span>
-    <a href="/present" target="_blank" rel="noopener" title="Open the audience highlights screen — full-bleed cards for a projector" style="font-size:0.8rem;color:var(--text-dim);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:0.15rem 0.5rem">highlights ↗</a>
-    <a id="admin-link" href="/admin" hidden title="Admin actions — available only on the machine running the pipeline" style="font-size:0.8rem;color:var(--text-dim);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:0.15rem 0.5rem">admin</a>
   </div>
   <div id="qr-panel" style="display:none;text-align:center;cursor:pointer" title="Click to toggle QR code">
     <canvas id="qr-canvas" width="100" height="100" style="image-rendering:pixelated;width:100px;height:100px;border-radius:4px"></canvas>
@@ -507,6 +517,9 @@ col.col-sum-reads { width: 12%; }
   <button class="tab-btn active" data-tab="processing">Processing</button>
   <button class="tab-btn" data-tab="summary">Summary</button>
   <button class="tab-btn" data-tab="forecast">Forecast</button>
+  <!-- Destinations, not views: same nav bar, right-aligned, never underlined -->
+  <a class="tab-link" href="/present" target="_blank" rel="noopener" title="Open the audience highlights screen — full-bleed cards for a projector">Highlights ↗</a>
+  <a class="tab-link" id="admin-link" href="/admin" hidden title="Admin actions — available only on the machine running the pipeline">Admin</a>
 </div>
 
 <script src="/static/vendor/qrcode.min.js"></script>
