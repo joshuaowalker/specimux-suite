@@ -15,6 +15,7 @@ from .events import EventLog
 from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
 from .inat import extract_inat_ids, fetch_community_taxa, fetch_genus_lineages
+from .inat_check import run_inat_check, write_corrections_tsv
 from .photos import photo_cache_dir, prefetch_photos
 from .util import clone_or_copy, parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
@@ -87,6 +88,16 @@ class Pipeline:
             threading.Thread(
                 target=self._lineage_fetcher, name="lineage-fetch", daemon=True,
             ).start()
+
+        # Admin-accepted iNat ID corrections heal the run: a listener queues
+        # each inat.correction (emitted by the web admin page) and a daemon
+        # thread re-fetches the corrected observation's taxon/photos so the
+        # specimen's field ID, agreement, and display recover live.
+        self._correction_queue: queue.Queue = queue.Queue()
+        self.event_log.add_listener(self._on_event_correction)
+        threading.Thread(
+            target=self._correction_worker, name="inat-correction", daemon=True,
+        ).start()
         self._draining = False  # True while waiting for specimux to run
         self.cmd_queue: queue.Queue = queue.Queue()
         self._file_queue: queue.Queue[Path] = queue.Queue()
@@ -126,6 +137,13 @@ class Pipeline:
         except Exception as e:
             logger.warning(f"Failed to fetch iNaturalist taxa: {e}")
             return
+        # With taxa in hand, audit the iNat IDs right away so the admin page
+        # has suggestions during the run, not just at the end. Sequence
+        # evidence is thin this early; the post-aggregate check refreshes it.
+        try:
+            self._run_inat_id_check()
+        except Exception as e:
+            logger.warning(f"iNat ID check failed: {e}")
         # Photo prefetch rides the same daemon thread, after the taxa event is
         # out — display names shouldn't wait on ~MBs of images.
         try:
@@ -180,6 +198,39 @@ class Pipeline:
                 logger.warning(f"Genus lineage fetch failed: {e}")
                 for genus in wave:
                     self._lineage_seen.discard(genus.lower())
+
+    def _on_event_correction(self, event) -> None:
+        if event.type != "inat.correction":
+            return
+        self._correction_queue.put((event.data["specimen_id"], event.data["new_obs_id"]))
+
+    def _correction_worker(self) -> None:
+        """Apply accepted iNat ID corrections (daemon thread, network)."""
+        while not self._shutdown.is_set():
+            try:
+                sid, new_obs = self._correction_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                taxa = fetch_community_taxa(
+                    {sid: new_obs}, cache_dir=self.config.output_dir,
+                    abort=self._shutdown,
+                )
+                if taxa:
+                    self.event_log.emit("specimens.taxa", {"taxa": taxa})
+                    logger.info(f"Applied iNat correction for {sid} -> {new_obs}")
+                    prefetch_photos(
+                        taxa, photo_cache_dir(self.config.output_dir),
+                        abort=self._shutdown,
+                    )
+                else:
+                    logger.warning(f"Corrected observation {new_obs} for {sid} "
+                                   "not found on iNaturalist")
+                write_corrections_tsv(
+                    self.state.inat_corrections, self.config.summarize_output_dir,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to apply iNat correction for {sid}: {e}")
 
     def validate_tools(self) -> list[str]:
         """Check that required external tools are on PATH. Returns list of missing tools."""
@@ -902,6 +953,21 @@ class Pipeline:
             return
         logger.info("Running summarize aggregate")
         self.summarize.run_aggregate()
+
+        # With sequences and the aggregate in hand, audit the iNat IDs for
+        # digit typos and drop the suggested-correction mapping next to the
+        # summary so it can be patched before upload.
+        try:
+            self._run_inat_id_check()
+        except Exception as e:
+            logger.warning(f"iNat ID check failed: {e}")
+
+    def _run_inat_id_check(self) -> None:
+        """Audit specimen iNat IDs and publish correction suggestions (network)."""
+        run_inat_check(
+            self.state, self.event_log, self.config.summarize_output_dir,
+            abort=self._shutdown,
+        )
 
     def _find_specimen_fastq(self, specimen_id: str, pool: str) -> Path | None:
         """Find the accumulated FASTQ for a specimen in specimux output."""

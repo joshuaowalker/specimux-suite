@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>specimux-suite · admin</title>
+<style>
+  /* Same palette as the dashboard — this is the operator's console. */
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --border: #0f3460;
+    --text: #e0e0e0;
+    --text-dim: #8888aa;
+    --processing: #c4a000;
+    --done: #4e9a06;
+    --error: #cc0000;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+  }
+  header {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.8rem 1.2rem; border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 1.1rem; margin: 0; }
+  .admin-tag {
+    font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--processing); border: 1px solid var(--processing);
+    border-radius: 4px; padding: 0.1rem 0.4rem;
+  }
+  header a { color: var(--text-dim); font-size: 0.8rem; text-decoration: none; }
+  #conn { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--done); margin-left: auto; }
+  #conn.down { background: var(--error); }
+
+  main { padding: 1rem 1.2rem; max-width: 1200px; }
+  section { margin-bottom: 2rem; }
+  .section-head { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.6rem; }
+  .section-head h2 { font-size: 1rem; margin: 0; }
+  .section-head .meta { color: var(--text-dim); font-size: 0.8rem; }
+  .section-head button { margin-left: auto; }
+  .section-note { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 0.8rem; }
+
+  button {
+    background: var(--accent, #0f3460); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.3rem 0.7rem; cursor: pointer; font-size: 0.8rem;
+  }
+  button:hover { filter: brightness(1.3); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: #1f5c2d; border-color: #2e7d32; }
+  button.subtle { background: transparent; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-dim); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { font-size: 0.85rem; }
+  .sid { font-family: ui-monospace, Menlo, monospace; font-size: 0.75rem; word-break: break-all; }
+  .taxon { font-style: italic; }
+  .dim { color: var(--text-dim); }
+  a { color: #6ea8d8; }
+
+  .chip {
+    display: inline-block; border-radius: 3px; padding: 0.05rem 0.35rem;
+    font-size: 0.7rem; margin: 0 0.2rem 0.15rem 0; white-space: nowrap;
+  }
+  .chip.problem { background: #5c2020; color: #f0b0b0; }
+  .chip.evidence { background: #1a3a52; color: #a8cbe8; }
+  .chip.evidence.strong { background: #1f4a2a; color: #a8e8b8; }
+  .chip.status-accepted { background: #1f5c2d; color: #c0f0c8; }
+  .chip.status-dismissed { background: #333; color: var(--text-dim); }
+
+  .alts { font-size: 0.75rem; color: var(--text-dim); }
+  .alts a.accept-alt { margin-left: 0.3rem; }
+  .manual { display: flex; gap: 0.3rem; margin-top: 0.35rem; }
+  .manual input {
+    width: 8.5rem; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.4rem;
+    font-family: ui-monospace, Menlo, monospace; font-size: 0.75rem;
+  }
+  .empty { color: var(--text-dim); padding: 1.2rem 0; }
+  #toast {
+    position: fixed; bottom: 1rem; right: 1rem; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 1rem;
+    font-size: 0.8rem; display: none;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>specimux-suite</h1>
+  <span class="admin-tag">admin · localhost</span>
+  <a href="/">← dashboard</a>
+  <div id="conn"></div>
+</header>
+<main id="sections"></main>
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+const state = { version: 0, specimens: {}, suggestions: [], corrections: {}, dismissed: new Set() };
+
+// Admin actions are ordinary JSON POSTs with a marker header (the server
+// requires it — it forces a CORS preflight that browsers refuse cross-origin).
+async function adminPost(path, body) {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Specimux-Admin': '1' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || resp.statusText);
+  return data;
+}
+
+function toast(msg, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.borderColor = isError ? 'var(--error)' : 'var(--border)';
+  el.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
+function esc(t) { const d = document.createElement('div'); d.textContent = t == null ? '' : t; return d.innerHTML; }
+
+// ------------------------------------------------------------------
+// Section registry: each admin capability renders one <section>. New
+// operations plug in by appending {id, title, render} here.
+// ------------------------------------------------------------------
+const sections = [];
+
+function render() {
+  const main = document.getElementById('sections');
+  for (const s of sections) {
+    let el = document.getElementById(`section-${s.id}`);
+    if (!el) {
+      el = document.createElement('section');
+      el.id = `section-${s.id}`;
+      main.appendChild(el);
+    }
+    el.innerHTML = s.render();
+  }
+}
+
+// ------------------------------------------------------------------
+// Section: iNat ID corrections
+// ------------------------------------------------------------------
+function suggestionStatus(sid) {
+  if (state.corrections[sid]) return 'accepted';
+  if (state.dismissed.has(sid)) return 'dismissed';
+  return 'pending';
+}
+
+function obsLink(obsId) {
+  return `<a href="https://www.inaturalist.org/observations/${esc(obsId)}" target="_blank" rel="noopener">${esc(obsId)}</a>`;
+}
+
+// Each cluster's best database hit with identity — the sequence evidence an
+// admin weighs a suggested correction against. Deduped by name (best
+// identity kept), strongest first.
+function sequenceIdsHtml(spec) {
+  const best = {};
+  for (const m of (spec.identification || [])) {
+    const h = (m.top_hits || [])[0];
+    if (!h) continue;
+    const name = h.name || h.ref_id || '';
+    const identity = h.adjusted_identity || h.identity || 0;
+    if (!name || (best[name] || 0) >= identity) continue;
+    best[name] = identity;
+  }
+  const rows = Object.entries(best).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  if (!rows.length) return '<span class="dim">not yet sequenced</span>';
+  return rows.map(([name, identity]) =>
+    `<span class="taxon">${esc(name)}</span> <span class="dim">${(identity * 100).toFixed(1)}%</span>`
+  ).join('<br>');
+}
+
+function evidenceChips(evidence) {
+  return (evidence || '').split(',').filter(Boolean).map(e => {
+    const strong = e === 'observer_in_run' || e === 'sequence_genus_match';
+    return `<span class="chip evidence${strong ? ' strong' : ''}">${esc(e.replaceAll('_', ' '))}</span>`;
+  }).join('');
+}
+
+function inatRow(r) {
+  const sid = r.specimen_id;
+  const spec = state.specimens[sid] || {};
+  const status = suggestionStatus(sid);
+  const corrected = state.corrections[sid];
+
+  let action;
+  if (status === 'accepted') {
+    action = `<span class="chip status-accepted">accepted → ${esc(corrected.new)}</span>`;
+  } else if (status === 'dismissed') {
+    action = `<span class="chip status-dismissed">dismissed</span>`;
+  } else {
+    action = `
+      ${r.suggested_obs_id ? `<button class="primary" onclick="acceptCorrection('${esc(sid)}','${esc(r.suggested_obs_id)}')">Accept ${esc(r.suggested_obs_id)}</button>` : '<span class="dim">no suggestion</span>'}
+      <button class="subtle" onclick="dismissSuggestion('${esc(sid)}')">Dismiss</button>
+      <div class="manual">
+        <input id="manual-${esc(sid)}" placeholder="other obs id" inputmode="numeric">
+        <button onclick="acceptManual('${esc(sid)}')">Apply</button>
+      </div>`;
+  }
+
+  const alts = (r.alternates || '').split(';').filter(Boolean).map(a => {
+    const m = a.match(/^(\d+)\((.*),(.*)\)$/);
+    if (!m) return esc(a);
+    return `${obsLink(m[1])} <span class="taxon">${esc(m[2])}</span> <span class="dim">${esc(m[3])}</span>` +
+      (status === 'pending' ? `<a class="accept-alt" href="#" onclick="acceptCorrection('${esc(sid)}','${esc(m[1])}');return false">accept</a>` : '');
+  }).join('<br>');
+
+  return `<tr>
+    <td class="sid">${esc(sid)}<br><span class="chip problem">${esc(r.problem)}</span></td>
+    <td>${spec.community_taxon ? `<span class="taxon">${esc(spec.community_taxon)}</span>` : '<span class="dim">—</span>'}
+        ${spec.community_iconic_taxon ? `<br><span class="dim">${esc(spec.community_iconic_taxon)}</span>` : ''}</td>
+    <td>${sequenceIdsHtml(spec)}</td>
+    <td>${r.suggested_obs_id ? `${obsLink(r.suggested_obs_id)}<br><span class="taxon">${esc(r.suggested_taxon)}</span><br><span class="dim">${esc(r.suggested_observer)}</span><br>${evidenceChips(r.evidence)}` : '<span class="dim">—</span>'}</td>
+    <td class="alts">${alts || '<span class="dim">—</span>'}</td>
+    <td>${action}</td>
+  </tr>`;
+}
+
+sections.push({
+  id: 'inat',
+  render() {
+    const pending = state.suggestions.filter(r => suggestionStatus(r.specimen_id) === 'pending').length;
+    const rows = state.suggestions.map(inatRow).join('');
+    return `
+      <div class="section-head">
+        <h2>iNat ID corrections</h2>
+        <span class="meta">${state.suggestions.length} suspects · ${pending} pending</span>
+        <button onclick="rescan(this)">Re-scan</button>
+      </div>
+      <div class="section-note">
+        Specimens whose iNaturalist observation is missing or isn't a fungus,
+        with likely digit-typo corrections. Accepting emits an event: the
+        pipeline re-fetches the corrected observation (field ID, photos,
+        agreement heal live) and writes the mapping to the summary directory.
+        The current field ID column updates when the correction lands.
+      </div>
+      ${state.suggestions.length ? `<table>
+        <tr><th>Specimen</th><th>Current field ID</th><th>Sequence ID</th><th>Suggested</th><th>Alternates</th><th></th></tr>
+        ${rows}
+      </table>` : '<div class="empty">No suspect iNat IDs. Re-scan runs the audit again (network).</div>'}`;
+  },
+});
+
+async function acceptCorrection(sid, obsId) {
+  try {
+    await adminPost('/api/admin/inat/correction', { specimen_id: sid, new_obs_id: obsId });
+    toast(`Accepted ${obsId} — pipeline is applying it`);
+  } catch (e) { toast(`Failed: ${e.message}`, true); }
+}
+
+async function acceptManual(sid) {
+  const input = document.getElementById(`manual-${sid}`);
+  const v = (input.value || '').trim();
+  if (!/^\d{1,12}$/.test(v)) { toast('Enter a numeric observation id', true); return; }
+  acceptCorrection(sid, v);
+}
+
+async function dismissSuggestion(sid) {
+  try {
+    await adminPost('/api/admin/inat/dismiss', { specimen_id: sid });
+    toast('Dismissed');
+  } catch (e) { toast(`Failed: ${e.message}`, true); }
+}
+
+async function rescan(btn) {
+  btn.disabled = true;
+  try {
+    await adminPost('/api/admin/inat/rescan', {});
+    toast('Re-scan started — results arrive when it finishes');
+  } catch (e) { toast(`Failed: ${e.message}`, true); }
+  setTimeout(() => { btn.disabled = false; }, 5000);
+}
+
+// ------------------------------------------------------------------
+// State mirror + SSE (same pattern as the dashboard)
+// ------------------------------------------------------------------
+function applyEvent(event) {
+  const d = event.data;
+  switch (event.type) {
+    case 'inat.suggestions':
+      state.suggestions = d.suggestions || [];
+      break;
+    case 'inat.correction':
+      state.corrections[d.specimen_id] = { old: d.old_obs_id || '', new: d.new_obs_id };
+      break;
+    case 'inat.suggestion_dismissed':
+      state.dismissed.add(d.specimen_id);
+      break;
+    case 'specimens.taxa':
+      for (const [sid, taxon] of Object.entries(d.taxa || {})) {
+        if (!state.specimens[sid] || typeof taxon !== 'object') continue;
+        state.specimens[sid].community_taxon = taxon.name || '';
+        state.specimens[sid].community_iconic_taxon = taxon.iconic_taxon || '';
+      }
+      break;
+    // Sequence-ID mirror (same guards as index.html/present.html)
+    case 'consensus.completed': {
+      const s = state.specimens[d.specimen_id];
+      if (!s) break;
+      s.consensus_version = (s.consensus_version || 0) + 1;
+      s.identification = [];
+      break;
+    }
+    case 'identification.completed': {
+      const s = state.specimens[d.specimen_id];
+      if (!s) break;
+      if (d.consensus_version != null && d.consensus_version !== s.consensus_version) break;
+      const matches = d.matches || [];
+      const newClusters = new Set(matches.map(m => m.cluster));
+      s.identification = (s.identification || [])
+        .filter(m => !newClusters.has(m.cluster)).concat(matches);
+      break;
+    }
+  }
+  render();
+}
+
+function connect() {
+  const dot = document.getElementById('conn');
+  const es = new EventSource(`/events?after_version=${state.version}`);
+  es.onopen = () => dot.classList.remove('down');
+  es.onerror = () => { dot.classList.add('down'); es.close(); setTimeout(connect, 3000); };
+  // EventSource only delivers named SSE events to registered listeners
+  for (const type of ['inat.suggestions', 'inat.correction', 'inat.suggestion_dismissed', 'specimens.taxa', 'consensus.completed', 'identification.completed']) {
+    es.addEventListener(type, (e) => {
+      const event = JSON.parse(e.data);
+      state.version = Math.max(state.version, event.version);
+      applyEvent(event);
+    });
+  }
+}
+
+async function bootstrap() {
+  try {
+    const snap = await (await fetch('/api/state')).json();
+    state.version = snap.version || 0;
+    state.specimens = snap.specimens || {};
+    state.suggestions = snap.inat_suggestions || [];
+    state.corrections = snap.inat_corrections || {};
+    state.dismissed = new Set(snap.inat_dismissed || []);
+  } catch (e) { /* server not up; SSE reconnect will heal */ }
+  render();
+  connect();
+}
+
+bootstrap();
+</script>
+</body>
+</html>

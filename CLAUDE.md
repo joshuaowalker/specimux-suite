@@ -42,7 +42,7 @@ watcher (live) or CLI (batch)
 
 ## Event types
 
-All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `specimens.taxa`, `taxa.lineage`, `file.detected`, `file.stable`, `specimux.started`, `specimux.progress`, `specimux.completed`, `specimen.updated`, `specimen.watched`, `consensus.started`, `consensus.completed`, `identification.completed`, `summarize.started`, `summarize.completed`, `summarize.aggregate_completed`, `finalization.started`, `finalization.completed`, `pipeline.error`.
+All events use dot notation. Key types: `pipeline.started`, `specimens.loaded`, `specimens.taxa`, `taxa.lineage`, `inat.suggestions`, `inat.correction`, `inat.suggestion_dismissed`, `file.detected`, `file.stable`, `specimux.started`, `specimux.progress`, `specimux.completed`, `specimen.updated`, `specimen.watched`, `consensus.started`, `consensus.completed`, `identification.completed`, `summarize.started`, `summarize.completed`, `summarize.aggregate_completed`, `finalization.started`, `finalization.completed`, `pipeline.error`.
 
 Specimen status transitions:
 ```
@@ -69,6 +69,8 @@ When adding a new event type, there are **four places** that must be updated (si
 5. **(if relevant) `/present` `applyEvent()`** — `present.html` keeps its own state mirror with the same switch pattern
 6. **(if relevant) `/present` SSE listener list** — same silent-drop gotcha as the dashboard
 
+`admin.html` (`/admin`) keeps a third mirror with the same two spots for events it consumes.
+
 Clients bootstrap from `/api/state` and subscribe SSE at the snapshot version, so `applyEvent` never sees historical events — any state a new event builds must also ride the snapshot (`PipelineState.to_dict`).
 
 ## Key design decisions
@@ -79,4 +81,5 @@ Clients bootstrap from `/api/state` and subscribe SSE at the snapshot version, s
 - `adjusted-identity` library is used for homopolymer-aware scoring of vsearch hits.
 - The Summary tab strictly shows variant-level identification results — no fallback to raw cluster identifications.
 - iNaturalist community taxa are fetched asynchronously at startup and cached to `inat_taxon_cache.json`. On-target/off-target detection compares the top hit genus against the community taxon genus.
+- Web mutations are events, and admin is localhost-only. The web UI may mutate the run only by emitting events (`specimen.watched`, `inat.correction`, …) — never by touching state or files directly; the pipeline reacts via `EventLog` listeners. Admin routes (`/admin`, `/api/admin/*`) are gated to localhost clients with a Host-header check (DNS rebinding) and a required `X-Specimux-Admin` header on POSTs (CSRF via forced preflight) — see `_admin_denial` in `server.py`. There is no TLS, so never add a password over the wire; if second-device admin is ever needed, mint a one-time token at the laptop. A reverse proxy/tunnel would make every request look local — don't expose the port that way.
 - The reference-DB contract is deliberately minimal — a FASTA with `name="..."` headers — so users can mint their own references. Never consume other header fields (e.g. `sintax_*`). Taxonomy for a hit comes from its name's first token (the genus) resolved against iNat taxonomy (`fetch_genus_lineages`, cached in `inat_lineage_cache.json`, emitted as `taxa.lineage` events); taxonomy-level field-ID agreement (`agreementRank` in both `index.html` and `present.html`) compares the observation's `ancestor_ids` against the genus lineage. Display-only — scheduler confidence banding stays genus-based.

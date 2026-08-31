@@ -96,6 +96,11 @@ class PipelineState:
         # Genus lineages from iNat taxonomy, {genus_lower: [{id, rank, name},
         # ...] root→genus}: the sequence-ID side of taxonomy-level agreement.
         self.genus_lineages: dict[str, list] = {}
+        # iNat ID audit: the latest suggestion records, the admin-accepted
+        # corrections ({sid: {old, new}}), and dismissed suggestion sids.
+        self.inat_suggestions: list = []
+        self.inat_corrections: dict[str, dict] = {}
+        self.inat_dismissed: set = set()
         # Per-demux snapshots for the dashboard's Forecast tab:
         # {ts, input_cum, matched_cum, counts: {sid: cumulative reads}}.
         # Decimated by halving beyond _DEMUX_HISTORY_MAX entries.
@@ -139,6 +144,9 @@ class PipelineState:
                 "total_matched_reads": self.total_matched_reads,
                 "demux_history": [dict(h) for h in self.demux_history],
                 "genus_lineages": {g: list(l) for g, l in self.genus_lineages.items()},
+                "inat_suggestions": [dict(s) for s in self.inat_suggestions],
+                "inat_corrections": {k: dict(v) for k, v in self.inat_corrections.items()},
+                "inat_dismissed": sorted(self.inat_dismissed),
                 "specimens": {
                     sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
                 },
@@ -178,6 +186,18 @@ class PipelineState:
     def _on_taxa_lineage(self, data: dict):
         for genus, lineage in data.get("lineages", {}).items():
             self.genus_lineages[genus.lower()] = lineage
+
+    def _on_inat_suggestions(self, data: dict):
+        self.inat_suggestions = data.get("suggestions", [])
+
+    def _on_inat_correction(self, data: dict):
+        self.inat_corrections[data["specimen_id"]] = {
+            "old": data.get("old_obs_id", ""),
+            "new": data["new_obs_id"],
+        }
+
+    def _on_inat_suggestion_dismissed(self, data: dict):
+        self.inat_dismissed.add(data["specimen_id"])
 
     def _on_file_detected(self, data: dict):
         path = data["path"]
@@ -312,6 +332,9 @@ class PipelineState:
         "specimens.loaded": _on_specimens_loaded,
         "specimens.taxa": _on_specimens_taxa,
         "taxa.lineage": _on_taxa_lineage,
+        "inat.suggestions": _on_inat_suggestions,
+        "inat.correction": _on_inat_correction,
+        "inat.suggestion_dismissed": _on_inat_suggestion_dismissed,
         "file.detected": _on_file_detected,
         "file.stable": _on_file_stable,
         "specimux.started": _on_specimux_started,
