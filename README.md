@@ -54,7 +54,9 @@ specimux-suite live primers.fasta specimens.tsv /path/to/minknow/output/ \
     --reference-db references.fasta
 ```
 
-A web dashboard opens automatically at `http://127.0.0.1:8077` showing real-time progress. Press Ctrl+C to finalize — the pipeline will drain remaining files, process all eligible specimens regardless of threshold, and run summarization before exiting.
+On startup the suite fetches iNaturalist data for the run (field IDs, an observation-ID audit, taxonomy) with progress bars, then opens a web dashboard at `http://127.0.0.1:8077` showing real-time progress — use `--inat-background` to skip the wait and let the dashboard fill in as data arrives. Press Ctrl+C to finalize — the pipeline will drain remaining files, process all eligible specimens regardless of threshold, and run summarization before exiting.
+
+Restarting either mode on an existing output directory picks up where the previous run left off: the event log is replayed, interrupted consensus/identification/summarization work is resumed, and only new reads are processed.
 
 ### Profiles
 
@@ -74,7 +76,7 @@ Bundled profiles include `default` (standard settings) and `herbarium` (relaxed 
 
 **Primers** — FASTA file containing primer sequences used for demultiplexing.
 
-**Specimens** — Tab-separated file with at least `SampleID` and `PrimerPool` columns. Specimen IDs containing an iNaturalist observation ID (e.g., `iNat12345`) enable automatic community taxon lookup for on-target/off-target detection.
+**Specimens** — Tab-separated file with at least `SampleID` and `PrimerPool` columns. Specimen IDs containing an iNaturalist observation ID (e.g., `iNat12345`) enable the iNaturalist integration: community taxon lookup for on-target/off-target detection, observation photos and observer credits, field-ID comparison, and the observation-ID typo audit.
 
 ```
 SampleID	PrimerPool
@@ -111,6 +113,8 @@ TGCATGCA...
 | `--specimux-args` | — | Extra arguments passed through to specimux |
 | `--speconsense-args` | — | Extra arguments passed through to speconsense |
 | `--summarize-args` | — | Extra arguments passed through to speconsense-summarize |
+| `--no-incremental-summarize` | — | Only summarize in the final round instead of per specimen as identifications land |
+| `--inat-background` | — | Fetch iNaturalist data in the background instead of blocking with progress bars at startup |
 | `--log-level` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 ### Web dashboard options
@@ -156,11 +160,11 @@ uncertain results are revisited first, since additional depth might change the
 answer:
 
 1. **No match** — consensus produced but nothing hit the reference database
-2. **Low identity** — best hit below 90% adjusted identity
+2. **Low identity** — best hit below 95% adjusted identity
 3. **Off-target** — no hit matches the iNaturalist community genus (a
    mycoparasite or yeast contaminant may be dominating the true target), or the
    community genus appears only in a minority cluster
-4. **Marginal** — identity 90–98%, or ambiguous bases in the consensus
+4. **Marginal** — identity 95–98%, or ambiguous bases in the consensus
 5. **Confident** — ≥98% identity and on-target
 
 Uncertain results (the first three) also re-enter the queue at half the
@@ -180,17 +184,17 @@ The built-in dashboard provides a real-time view of pipeline progress, streamed 
 
 ### Processing tab
 
-- Specimen table with status, read count, top identification match, and identity score
+- Specimen table with status, read count, top identification match, and identity score (clean clusters preferred over NS/LQ/chimera-flagged ones; best identity among on-target hits)
 - Color-coded status badges (queued, processing, identified, no match, error)
-- On-target/off-target indicators when community taxa are available
-- Identity warnings for low-confidence matches (<98% or <90%)
+- On-target/off-target indicators when community taxa are available — taxonomy-aware: a sequence agreeing with the field ID at genus or deeper shows ✓ even when the names differ, a shared family or tribe shows ≈, and the filters always match the indicator
+- Identity warnings for low-confidence matches (<98% or <95%)
 - Expandable cluster-level detail with per-cluster identification and sequence viewer
 - Cluster quality badges: NS/LQ routing preview and CHIMERA (speconsense 0.8.6+ two-parent recombinant flag; routed to the `.chimera` track when summarize runs with `--filter-chimeras`, otherwise kept in Summary and badged for review)
 - Search, sort, and filter (novel, on-target, off-target, no-match, watched)
 
 ### Summary tab
 
-- Variant-level results after summarization
+- Variant-level results, filled in during the run: each specimen is summarized as soon as its identification lands (see `--no-incremental-summarize`)
 - Variant count per specimen with expandable detail rows
 - Per-variant identification, read count, and sequence length
 - Identification results shown only after variant-level identification completes
@@ -219,6 +223,18 @@ Click the star on any specimen row to boost its scheduling priority. Watched spe
 ### Sharing
 
 Use `--share` to bind the dashboard to your LAN address and display a QR code for easy access from other devices.
+
+## Highlights screen
+
+The dashboard's **Highlights ↗** link opens `/present` — a full-screen carousel designed for a projector at a live event. It cycles through cards: fresh identifications with full-bleed iNaturalist photos and a drifting consensus-sequence ribbon, burst roll-ups when results land quickly, run milestones, family spotlights with photo mosaics, field-ID-refinement journeys confirmed by DNA, and visually flagged callouts — novel candidates (no close reference match), surprises (confident DNA far from the field ID), and likely label mix-ups (an observation filed under a non-fungal kingdom that sequences cleanly). Card selection draws from weighted channels so a busy stretch never crowds out variety; only strong novelty interrupts.
+
+Operator keys: **space** pauses, **→** advances, **f** toggles fullscreen. Any number of viewers can open it (each is an independent client of the same event stream).
+
+## Admin page
+
+`/admin` (linked from the dashboard header, available only from localhost) reviews the iNaturalist observation-ID audit: specimen IDs whose embedded observation resolves to a non-fungal taxon or to nothing are checked against single-digit-edit candidates, ranked by evidence (candidate's observer has other specimens in the run, candidate's taxon matches the sequence). Accepting a correction heals the running pipeline live — field ID, photos, and agreement recover, and the corrected mapping is written to `summary/inat_id_corrections.tsv` for patching before MycoMap upload. All suspects, suggestions, and statuses are also written to `summary/inat_id_suggestions.tsv`.
+
+The correction approach — recovering the intended observation from a mistyped ID by checking digit-edit permutations against plausible observations — was inspired by Alan Rockefeller's [inat.finder.py](https://github.com/AlanRockefeller/inat.finder.py).
 
 ## Replay
 
@@ -251,14 +267,18 @@ The output directory contains:
 ```
 output_dir/
 ├── events.jsonl                    # Append-only event log (rotates at 100 MB)
-├── inat_taxon_cache.json           # Cached iNaturalist community taxa
+├── inat_taxon_cache.json           # Cached iNaturalist observations (taxa, photos, observers)
+├── inat_lineage_cache.json         # Cached genus lineages for taxonomy-level agreement
+├── inat_photos/                    # Local photo cache for the dashboard and highlights screen
 ├── specimux/full/{pool}/
 │   └── {specimen_id}.fastq         # Demultiplexed reads per specimen
 ├── consensus/{specimen_id}/
 │   └── {specimen_id}-all.fasta     # Consensus sequences (one or more clusters)
 ├── summary/
 │   ├── {variant_id}-RiC*.fasta     # Individual variant sequences
-│   └── summary.fasta               # Aggregated summary sequences
+│   ├── summary.fasta               # Aggregated summary sequences
+│   ├── inat_id_suggestions.tsv     # iNat observation-ID audit (suspects + suggested fixes)
+│   └── inat_id_corrections.tsv     # Admin-accepted ID corrections, for pre-upload patching
 └── identification/
     └── {specimen_id}.tsv           # vsearch hits with adjusted-identity scores
 ```
