@@ -20,7 +20,7 @@ _UNCERTAIN_BANDS = {1, 2, 3}
 # Reprocessing additionally requires this many new reads. The ratio gate
 # alone thrashes on small denominators (a 10-read specimen would re-consense
 # on 3 new reads every demux round); irrelevant for larger specimens, and
-# finalization ignores it. Mirrored in the dashboard's isReprocessCandidate.
+# finalization ignores it.
 MIN_NEW_READS_FOR_REPROCESS = 5
 
 
@@ -43,7 +43,8 @@ def confidence_band(spec: SpecimenState) -> tuple[int, str]:
                            identification not yet available (neutral)
       5 confident          >=98% identity, on-target (or nothing to compare)
 
-    Mirrored client-side in the dashboard (reprocessBand in index.html).
+    Mirrored client-side as reprocessBand in web/static/derived.js — keep in
+    sync (tests/test_mirror_parity.py replays real event logs through both).
     """
     if not any(m.top_hits for m in spec.identification):
         if spec.status == SpecimenStatus.NO_MATCH:
@@ -98,6 +99,37 @@ def confidence_band(spec: SpecimenState) -> tuple[int, str]:
             (dominant_cluster.ambig or 0) > 0 or dominant_cluster.chimera)):
         return 4, "marginal"
     return 5, "confident"
+
+
+def reprocess_assessment(
+    spec: SpecimenState, reprocess_ratio: float
+) -> tuple[bool, float, int, str]:
+    """Reprocess gate for a previously-processed specimen.
+
+    Returns (eligible, growth_ratio, band, reason). Uncertain results
+    (bands 1-3) pass at half the configured reprocess_ratio; reprocessing
+    always requires MIN_NEW_READS_FOR_REPROCESS new reads. band is 0 when
+    banding doesn't apply (never processed, gated out early, or no clusters).
+
+    Mirrored client-side as reprocessAssessment in web/static/derived.js —
+    keep in sync (parity-tested by tests/test_mirror_parity.py).
+    """
+    if spec.consensus_version == 0:
+        return False, 0.0, 0, "never_processed"
+    if spec.status == SpecimenStatus.CONSENSUS_RUNNING:
+        return False, 0.0, 0, "running"
+    new_reads = spec.total_reads - spec.reads_at_last_consensus
+    if new_reads < MIN_NEW_READS_FOR_REPROCESS:
+        return False, 0.0, 0, "too_few_new_reads"
+    if spec.reads_at_last_consensus > 0:
+        ratio = new_reads / spec.reads_at_last_consensus
+    else:
+        ratio = float("inf")
+    if not spec.clusters:
+        return ratio > reprocess_ratio, ratio, 0, "no_clusters"
+    band, reason = confidence_band(spec)
+    gate = reprocess_ratio / 2 if band in _UNCERTAIN_BANDS else reprocess_ratio
+    return ratio > gate, ratio, band, reason
 
 
 @dataclass
@@ -155,36 +187,27 @@ class Scheduler:
                     reason="new",
                 ))
             else:
-                # Previously processed — check if enough new reads
-                new_reads = spec.total_reads - spec.reads_at_last_consensus
-                if new_reads < MIN_NEW_READS_FOR_REPROCESS:
+                # Previously processed — single gate shared with the
+                # dashboard mirror (reprocess_assessment)
+                eligible, ratio, band, reason = reprocess_assessment(
+                    spec, self.config.reprocess_ratio)
+                if not eligible:
                     continue
-                if spec.reads_at_last_consensus > 0:
-                    ratio = new_reads / spec.reads_at_last_consensus
-                else:
-                    ratio = float("inf")
-
                 if not has_clusters:
                     # No clusters yet — same tier as never-processed
-                    if ratio > self.config.reprocess_ratio:
-                        jobs.append(ConsensusJob(
-                            specimen_id=sid,
-                            read_count=spec.total_reads,
-                            priority=1_000_000 + spec.total_reads,
-                            reason="no_clusters",
-                        ))
+                    jobs.append(ConsensusJob(
+                        specimen_id=sid,
+                        read_count=spec.total_reads,
+                        priority=1_000_000 + spec.total_reads,
+                        reason="no_clusters",
+                    ))
                 else:
-                    band, reason = confidence_band(spec)
-                    gate = self.config.reprocess_ratio
-                    if band in _UNCERTAIN_BANDS:
-                        gate = gate / 2
-                    if ratio > gate:
-                        jobs.append(ConsensusJob(
-                            specimen_id=sid,
-                            read_count=spec.total_reads,
-                            priority=_BAND_BASES[band] + min(ratio, 99_999.0),
-                            reason=reason,
-                        ))
+                    jobs.append(ConsensusJob(
+                        specimen_id=sid,
+                        read_count=spec.total_reads,
+                        priority=_BAND_BASES[band] + min(ratio, 99_999.0),
+                        reason=reason,
+                    ))
 
         # Watched specimens get highest priority boost
         for job in jobs:

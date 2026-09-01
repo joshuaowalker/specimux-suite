@@ -288,6 +288,7 @@
   </div>
 </div>
 
+<script src="/static/derived.js"></script>
 <script>
 'use strict';
 
@@ -303,17 +304,13 @@ const state = {
   summarizeFilter: {},  // effective NS/LQ/chimera routing settings
 };
 
-// Preview which summarize track a cluster routes to (ported from
-// index.html clusterFilterRouting — keep in sync). Truthy = flagged.
-function clusterFlagged(cluster) {
-  const f = state.summarizeFilter || {};
-  const minCer = f.min_cer_factor != null ? f.min_cer_factor : 1.0;
-  const maxErr = f.max_err_factor != null ? f.max_err_factor : 1.5;
-  if (maxErr > 0 && cluster.err_factor != null && cluster.err_factor > maxErr) return 'lq';
-  if (f.filter_chimeras && cluster.chimera) return 'chimera';
-  if (minCer > 0 && cluster.cer_factor != null && cluster.cer_factor < minCer) return 'ns';
-  return null;
-}
+// Shared decision logic lives in derived.js; these adapters bind it to this
+// page's state. Anything beyond a one-line delegation belongs in derived.js.
+const { hasIdentification, isHitOnTarget, hitIdentity } = SpecimuxDerived;
+function clusterFlagged(cluster) { return SpecimuxDerived.clusterFilterRouting(cluster, state.summarizeFilter); }
+function getTopMatch(s) { return SpecimuxDerived.getTopMatch(s, 'clusters', state.summarizeFilter); }
+function getTopHit(s) { const m = getTopMatch(s); return m ? m.top_hits[0] : null; }
+function agreementRank(s, hit) { return SpecimuxDerived.agreementRank(s, hit, state.genusLineages); }
 
 function getSpec(sid) {
   if (!state.specimens[sid]) {
@@ -399,69 +396,8 @@ function applyEvent(event) {
   }
 }
 
-// --- top-match selection, ported from index.html (keep in sync) ---
-function hasIdentification(s) {
-  return (s.identification || []).some(m => m.top_hits && m.top_hits.length > 0);
-}
-function isHitOnTarget(hit, communityGenus) {
-  if (!communityGenus || !hit) return false;
-  return (hit.name || hit.ref_id || '').split(/\s+/)[0].toLowerCase() === communityGenus;
-}
-function getTopMatch(s) {
-  if (!s.identification || !s.identification.length) return null;
-  const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0]).toLowerCase();
-  const seqs = s.clusters || [];
-  const sizeMap = {}, byName = {};
-  for (const seq of seqs) { sizeMap[seq.name] = seq.size || 0; byName[seq.name] = seq; }
-  // Prefer unflagged sequences; flagged (NS/LQ/chimera) only as fallback.
-  // Then on-target first; among on-target, best identity; among
-  // off-target-only, size (mirrors index.html's _findTopMatch — keep in sync)
-  let candidates = [];
-  const flaggedOnly = [];
-  for (const m of s.identification) {
-    if (!m.top_hits || !m.top_hits.length) continue;
-    if (seqs.length && !(m.cluster in sizeMap)) continue;
-    const seq = byName[m.cluster];
-    if (seq && clusterFlagged(seq)) flaggedOnly.push(m);
-    else candidates.push(m);
-  }
-  if (!candidates.length) candidates = flaggedOnly;
-  let best = null, bestOn = false, bestSize = -1, bestIdentity = -1;
-  for (const m of candidates) {
-    const on = isHitOnTarget(m.top_hits[0], communityGenus);
-    const size = sizeMap[m.cluster] || 0;
-    const identity = hitIdentity(m.top_hits[0]);
-    if (best === null || (on && !bestOn)
-        || (on === bestOn && (on ? identity > bestIdentity : size > bestSize))) {
-      best = m; bestOn = on; bestSize = size; bestIdentity = identity;
-    }
-  }
-  return best;
-}
-function getTopHit(s) { const m = getTopMatch(s); return m ? m.top_hits[0] : null; }
-
-// Deepest taxonomic level where field ID and top hit agree (ported from
-// index.html — keep in sync): {level, name} or null when unknown.
-function agreementRank(s, hit) {
-  if (!hit || !s.community_taxon) return null;
-  const hitName = (hit.name || hit.ref_id || '').trim();
-  if (hitName.toLowerCase() === s.community_taxon.trim().toLowerCase()) {
-    return { level: 'species', name: hitName };
-  }
-  const communityGenus = (s.community_genus || s.community_taxon.split(/\s+/)[0]).toLowerCase();
-  const hitGenusName = hitName.split(/\s+/)[0];
-  if (hitGenusName.toLowerCase() === communityGenus) {
-    return { level: 'genus', name: hitGenusName };
-  }
-  const lineage = state.genusLineages[hitGenusName.toLowerCase()];
-  if (!lineage || !lineage.length || !(s.inat_ancestors || []).length) return null;
-  const anc = new Set(s.inat_ancestors);
-  for (let i = lineage.length - 1; i >= 0; i--) {
-    if (anc.has(lineage[i].id)) return { level: lineage[i].rank, name: lineage[i].name };
-  }
-  return null;
-}
-function hitIdentity(h) { return h ? (h.adjusted_identity || h.identity || 0) : 0; }
+// Genus with display casing (for card copy — derived.js's hitGenusLower is
+// the comparison form).
 function hitGenus(h) { return h ? (h.name || h.ref_id || '').split(/\s+/)[0] : ''; }
 
 function esc(t) { const d = document.createElement('div'); d.textContent = t == null ? '' : t; return d.innerHTML; }

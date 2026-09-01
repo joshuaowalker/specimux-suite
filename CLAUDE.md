@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Run batch**: `specimux-suite batch <primers> <specimens> <reads.fastq> [--reference-db <refs.fasta>]`
 - **Run live**: `specimux-suite live <primers> <specimens> <watch_dir> [--reference-db <refs.fasta>]`
 - **Replay**: `specimux-replay <source.fastq> <output_dir> [--reads-per-file 4000] [--delay 30]`
+- **Serve a past run's dashboard** (no processing): `python tests/tools/serve_fixture.py <events.jsonl> [--port 8765]`
 
 ## Architecture
 
@@ -32,7 +33,7 @@ watcher (live) or CLI (batch)
 
 **Runners** are subprocess wrappers that follow a consistent pattern: emit `*.started` event → run external tool → parse output → emit `*.completed` event. All bioinformatics tools (specimux, speconsense, speconsense-summarize, vsearch) are invoked as subprocesses.
 
-**Scheduler** has two-tier prioritization: never-processed specimens (by read count descending) take priority over reprocessing candidates. Specimens below `min_reads` are skipped. Watched specimens (starred in the dashboard) receive a priority boost and are processed first. Reprocessing candidates are ordered by confidence band (`confidence_band()` in `scheduler.py`, mirrored client-side as `reprocessBand()` in `index.html` — keep in sync): no_match > low_identity > off_target/minority_on_target > marginal/pending > confident. Uncertain bands (1–3) pass the eligibility gate at half of `reprocess_ratio`; confident results still require the full ratio and sort last. Reprocessing always requires ≥5 new reads (`MIN_NEW_READS_FOR_REPROCESS`) — the ratio gate alone thrashes on small denominators now that `min_reads` defaults to 10. Confidence never removes work — finalization (`get_all_eligible_jobs`, `min_reads=0`) processes everything with new reads.
+**Scheduler** has two-tier prioritization: never-processed specimens (by read count descending) take priority over reprocessing candidates. Specimens below `min_reads` are skipped. Watched specimens (starred in the dashboard) receive a priority boost and are processed first. Reprocessing candidates are ordered by confidence band (`confidence_band()` in `scheduler.py`, mirrored client-side as `reprocessBand()` in `web/static/derived.js` — parity-tested, see "Shared decision logic" below): no_match > low_identity > off_target/minority_on_target > marginal/pending > confident. Uncertain bands (1–3) pass the eligibility gate at half of `reprocess_ratio`; confident results still require the full ratio and sort last. Reprocessing always requires ≥5 new reads (`MIN_NEW_READS_FOR_REPROCESS`) — the ratio gate alone thrashes on small denominators now that `min_reads` defaults to 10. Confidence never removes work — finalization (`get_all_eligible_jobs`, `min_reads=0`) processes everything with new reads.
 
 **Summarization** is incremental by default: a dedicated serial lane (`_summarize_worker`) summarizes each specimen as soon as its identification lands, then submits variant identification (tracked in `_variant_futures`, separate from `_futures` so scheduler slot math is untouched), so the Summary tab fills during the run. `summarize.started/completed` events carry `consensus_version` and stale generations are dropped by state and both client mirrors — the same race guard as identification. The final round (after `_drain_identifications` + `_drain_incremental_summaries`) only processes stragglers: never-summarized specimens plus any whose `summarize_consensus_version` trails their `consensus_version`. `--no-incremental-summarize` reverts to summarize-at-end. The aggregate pass (`summary.fasta`) still runs only at the end.
 
@@ -73,6 +74,20 @@ When adding a new event type, there are **four places** that must be updated (si
 
 Clients bootstrap from `/api/state` and subscribe SSE at the snapshot version, so `applyEvent` never sees historical events — any state a new event builds must also ride the snapshot (`PipelineState.to_dict`).
 
+`tests/test_event_mirror_lint.py` enforces the applyEvent-case ⊆ SSE-listener-list invariant on all three pages, so forgetting step 4/6 now fails the suite instead of silently dropping events.
+
+## Shared decision logic (derived.js) and the mirror-parity harness
+
+All client-side *decision* logic — top-match selection, NS/LQ/chimera routing, taxonomy agreement, effective target status, and the scheduler mirrors — lives in one place: `web/static/derived.js` (plain script, UMD-style: pages get `window.SpecimuxDerived`, node can `require()` it). Pages bind their state via one-line adapters only; `tests/test_event_mirror_lint.py` fails if a page re-inlines a shared function body.
+
+The remaining cross-language pair — `scheduler.py` (`confidence_band`, `reprocess_assessment`) ↔ `derived.js` (`reprocessBand`, `reprocessAssessment`) — is guarded by `tests/test_mirror_parity.py`: it replays captured event logs through `PipelineState`, feeds the `to_dict()` snapshots to the production derived.js under node, and diffs the decisions. **Parity, not golden files**: an intentional change made on both sides passes with no test churn; only one-sided drift fails. Reason tokens are canonical scheduler strings on both sides (pages map them to display labels, e.g. `REPROC_REASON_LABELS` in index.html).
+
+- Fixtures: `tests/fixtures/parity/*.events.jsonl`, generated (never hand-edited) by `python tests/tools/make_parity_fixture.py <full-events.jsonl> <out.jsonl>` from full run logs (originals at `~/mm/data/specimux-suite-fixtures/`).
+- Rare branches (bands 1–2, gate early-outs, threshold edges) are pinned by synthetic specimens in the test itself — extend those rather than growing fixtures.
+- Slow lane: `SPECIMUX_PARITY_EVENTS=<full1>:<full2> pytest tests/test_mirror_parity.py` sweeps entire runs.
+- node is an optional dev dependency; parity tests skip when absent (the shipped tool stays pure Python).
+- When changing decision logic: edit `derived.js` **and** the scheduler functions, keeping reason tokens and thresholds identical — parity tells you if you missed one. Add a threshold-edge synthetic when you add a threshold.
+
 ## Key design decisions
 
 - `scan_specimen_reads()` returns **cumulative** totals from the output directory, not deltas. State recomputes `total_matched_reads` from specimen totals to avoid double-counting.
@@ -82,4 +97,4 @@ Clients bootstrap from `/api/state` and subscribe SSE at the snapshot version, s
 - The Summary tab strictly shows variant-level identification results — no fallback to raw cluster identifications.
 - iNaturalist community taxa are fetched asynchronously at startup and cached to `inat_taxon_cache.json`. On-target/off-target detection compares the top hit genus against the community taxon genus.
 - Web mutations are events, and admin is localhost-only. The web UI may mutate the run only by emitting events (`specimen.watched`, `inat.correction`, …) — never by touching state or files directly; the pipeline reacts via `EventLog` listeners. Admin routes (`/admin`, `/api/admin/*`) are gated to localhost clients with a Host-header check (DNS rebinding) and a required `X-Specimux-Admin` header on POSTs (CSRF via forced preflight) — see `_admin_denial` in `server.py`. There is no TLS, so never add a password over the wire; if second-device admin is ever needed, mint a one-time token at the laptop. A reverse proxy/tunnel would make every request look local — don't expose the port that way.
-- The reference-DB contract is deliberately minimal — a FASTA with `name="..."` headers — so users can mint their own references. Never consume other header fields (e.g. `sintax_*`). Taxonomy for a hit comes from its name's first token (the genus) resolved against iNat taxonomy (`fetch_genus_lineages`, cached in `inat_lineage_cache.json`, emitted as `taxa.lineage` events); taxonomy-level field-ID agreement (`agreementRank` in both `index.html` and `present.html`) compares the observation's `ancestor_ids` against the genus lineage. Display-only — scheduler confidence banding stays genus-based.
+- The reference-DB contract is deliberately minimal — a FASTA with `name="..."` headers — so users can mint their own references. Never consume other header fields (e.g. `sintax_*`). Taxonomy for a hit comes from its name's first token (the genus) resolved against iNat taxonomy (`fetch_genus_lineages`, cached in `inat_lineage_cache.json`, emitted as `taxa.lineage` events); taxonomy-level field-ID agreement (`agreementRank` in `derived.js`) compares the observation's `ancestor_ids` against the genus lineage. Display-only — scheduler confidence banding stays genus-based.
