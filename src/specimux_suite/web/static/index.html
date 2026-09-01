@@ -548,7 +548,7 @@ col.col-sum-reads { width: 12%; }
     <summary>What do the symbols mean?</summary>
     <div class="legend-body">
       <span><b>✓ / ≈ / ✗</b> — how the best database match relates to the iNaturalist community ID: same genus or species (✓ on-target), a different genus in the same family or order (≈ partial), or unrelated (✗ off-target). Hover the symbol for the exact shared rank. The On-target filter shows ✓ specimens; the Off-target filter shows ≈ and ✗. Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
-      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species than the match) and red ⚠ below 90% (no close reference — possibly undescribed, not yet sequenced, or a poor read).</span>
+      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species than the match) and red ⚠ below 95% (no close reference — possibly undescribed, not yet sequenced, or a poor read).</span>
       <span><b>★</b> — watched: the operator starred this specimen so it gets processed first. Click to star.</span>
       <span><b>Status</b> — waiting → queued → processing → consensus built → identified / no match → summarized (final).</span>
       <span><b>NS / LQ / CHIMERA</b> — quality flags on individual sequences: not statistically significant, low quality, or a suspected PCR chimera. Flagged sequences are excluded from (or marked in) the final Summary.</span>
@@ -612,7 +612,7 @@ col.col-sum-reads { width: 12%; }
     <summary>What do the symbols mean?</summary>
     <div class="legend-body">
       <span><b>✓ / ≈ / ✗</b> — how the best database match relates to the iNaturalist community ID: same genus or species (✓ on-target), a different genus in the same family or order (≈ partial), or unrelated (✗ off-target). Hover the symbol for the exact shared rank. The On-target filter shows ✓ specimens; the Off-target filter shows ≈ and ✗. Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
-      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species than the match) and red ⚠ below 90% (no close reference — possibly undescribed, not yet sequenced, or a poor read).</span>
+      <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species than the match) and red ⚠ below 95% (no close reference — possibly undescribed, not yet sequenced, or a poor read).</span>
       <span><b>Variants</b> — distinct sequence versions recovered for the specimen (a specimen can carry several ITS variants or several organisms).</span>
     </div>
   </details>
@@ -932,8 +932,8 @@ function targetIndicatorHtml(effStatus, agreement) {
 }
 
 function identityWarningHtml(identity) {
-  if (identity < 0.90) {
-    return `<span class="identity-warning" style="color:var(--error)" title="Best match below 90% — no close reference: possibly undescribed, not yet sequenced, or a poor read" aria-label="identity below 90%">⚠</span>`;
+  if (identity < 0.95) {
+    return `<span class="identity-warning" style="color:var(--error)" title="Best match below 95% — no close reference: possibly undescribed, not yet sequenced, or a poor read" aria-label="identity below 95%">⚠</span>`;
   }
   if (identity < 0.98) {
     return `<span class="identity-warning" style="color:var(--processing)" title="Best match below 98% — possibly a different species than the match" aria-label="identity below 98%">⚠</span>`;

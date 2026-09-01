@@ -217,7 +217,7 @@ function reprocessBand(s) {
   }
   if (!bestHit) return { band: 4, reason: 'pending' };
   const identity = hitIdentity(bestHit);
-  if (identity < 0.90) return { band: 2, reason: 'low_identity' };
+  if (identity < 0.95) return { band: 2, reason: 'low_identity' };
   if (communityGenus) {
     if (!onAnywhere) return { band: 3, reason: 'off_target' };
     if (domHit && hitGenusLower(domHit) !== communityGenus) return { band: 3, reason: 'minority_on_target' };

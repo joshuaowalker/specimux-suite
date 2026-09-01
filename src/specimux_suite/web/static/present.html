@@ -124,8 +124,48 @@
   }
   .creditrow b { color: var(--muted); font-weight: 500; }
 
+  /* ---- flagged cards: novel / surprise / mix-up must read as "something
+     different is on screen" from across a room, not just by eyebrow text.
+     Shared signature: a full-width colored top rule, an ambient wash in
+     the flag color, and the eyebrow set as a filled chip (routine cards
+     keep quiet text eyebrows). Each type owns a hue: amber = beyond the
+     references, cool blue = surprise, aged paper = label mix-up. ---- */
+  .card.flag-novel { --flag: var(--amber); }
+  .card.flag-surprise { --flag: #6da8c4; }
+  .card.flag-mixup { --flag: #d9c79a; }
+  .card.flagged { border-top: 5px solid var(--flag); }
+  .card.flagged::before {
+    content: ''; position: absolute; inset: 0;
+    pointer-events: none; z-index: 1;
+  }
+  .card.flag-novel::before {
+    background: radial-gradient(ellipse 70% 90% at 15% 25%, rgba(232, 163, 61, 0.13), transparent 60%);
+  }
+  .card.flag-surprise::before {
+    background: radial-gradient(ellipse 70% 90% at 15% 25%, rgba(109, 168, 196, 0.12), transparent 60%);
+  }
+  .card.flag-mixup::before {
+    background: radial-gradient(ellipse 70% 90% at 15% 25%, rgba(217, 199, 154, 0.10), transparent 60%);
+  }
+  .flagchip {
+    display: inline-block; padding: 0.38em 0.85em; border-radius: 4px;
+    background: var(--flag); color: #14100d; font-weight: 600;
+  }
+  .card.novel .flagchip { animation: chippulse 2.4s ease-in-out infinite; }
+  @keyframes chippulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(232, 163, 61, 0); }
+    50% { box-shadow: 0 0 22px 2px rgba(232, 163, 61, 0.55); }
+  }
+  /* The misfiled name on a mix-up card, set as a crooked specimen label */
+  .labeltag {
+    display: inline-block; padding: 0.12em 0.5em; margin: 0 0.15em;
+    border: 1px dashed var(--flag); border-radius: 3px;
+    background: rgba(217, 199, 154, 0.12);
+    transform: rotate(-1.5deg);
+  }
+
   /* novel variants: the one loud moment. Soft (<98%) gets a steady amber
-     bar; strong (<90%) pulses. */
+     bar; strong (<95%) pulses. */
   .card.novel .text-pane::before,
   .card.novel-soft .text-pane::before {
     content: ''; position: absolute; left: 0; top: 10%; bottom: 10%;
@@ -372,6 +412,7 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .ribbon .scroll { animation: none; }
+    .card.novel .flagchip { animation: none; }
     .eyebrow, .binomial, .datarow, .fieldrow, .creditrow, .stat .num, .board-row,
     .milestone-num, .milestone-lbl, .burst-item, .taxo-row, .taxo-row .bar, .journey-row { animation: none; }
     .card { transition: opacity 0.2s ease; }
@@ -537,7 +578,12 @@ const CHANNEL_WEIGHTS = { news: 0.40, encore: 0.25, bigpicture: 0.20, people: 0.
 const DWELL = { breaking: 14000, news: 11000, program: 9000 };
 const NEWS_TTL_MS = 10 * 60000;    // unaired news older than this expires
 const ENCORE_FIRST_MS = 8 * 60000; // first re-show delay; doubles per encore
-const NOVEL_SOFT = 0.98, NOVEL_STRONG = 0.90;
+// Strong sits at 0.95: it is very rare for a sequence to be more than
+// ~10% from everything in the reference library, so 0.90 almost never
+// fired (Josh, Sep 2026). The scheduler's low-identity band is aligned
+// at 0.95 too (confidence_band in scheduler.py / reprocessBand in
+// derived.js).
+const NOVEL_SOFT = 0.98, NOVEL_STRONG = 0.95;
 // A news slot with this many routine items pending shows them as one burst
 // card — every name on screen — instead of racing through them one by one.
 const BURST_MIN = 6, BURST_MAX = 12;
@@ -903,8 +949,8 @@ function renderIdentification(s, hit, card) {
   const supported = novelSupported(s, getTopMatch(s));
   const strong = identity < NOVEL_STRONG && supported;
   const soft = identity < NOVEL_SOFT && supported;
-  if (strong) el.classList.add('novel');
-  else if (soft) el.classList.add('novel-soft');
+  if (strong) el.classList.add('novel', 'flagged', 'flag-novel');
+  else if (soft) el.classList.add('novel-soft', 'flagged', 'flag-novel');
 
   // Precision matters to mycologists: distance from the reference library
   // is not the same claim as "undescribed species" — a distant sequence may
@@ -981,7 +1027,7 @@ function renderIdentification(s, hit, card) {
 
   el.innerHTML = `
     <div class="text-pane">
-      <div class="eyebrow">${eyebrow}</div>
+      <div class="eyebrow">${(strong || soft) ? `<span class="flagchip">${eyebrow}</span>` : eyebrow}</div>
       <div class="binomial">${nameHtml}</div>
       ${soft ? gaugeHtml(identity) : ''}
       <div class="datarow">${dataHtml}</div>
@@ -1028,7 +1074,7 @@ function creditLine(s) {
 function renderSurprise(s) {
   const hit = getTopHit(s);
   const el = document.createElement('div');
-  el.className = 'card';
+  el.className = 'card flagged flag-surprise';
   const name = splitBinomial(hit.name || hit.ref_id || '');
   // Surprises exclude 'near' (shared order..tribe) by construction, so any
   // agreement left is class-or-higher — "not even the same order" is
@@ -1037,7 +1083,7 @@ function renderSurprise(s) {
   const credit = creditLine(s);
   el.innerHTML = `
     <div class="text-pane">
-      <div class="eyebrow">Surprise!</div>
+      <div class="eyebrow"><span class="flagchip">Surprise!</span></div>
       <div class="fieldrow" style="margin-top:0;margin-bottom:2vh;animation-delay:0.1s">
         Field ID said <span class="fieldname">${esc(s.community_taxon)}</span> — but the sequence reads…</div>
       <div class="binomial">
@@ -1065,12 +1111,12 @@ function renderSurprise(s) {
 function renderMixup(s) {
   const hit = getTopHit(s);
   const el = document.createElement('div');
-  el.className = 'card';
+  el.className = 'card flagged flag-mixup';
   const name = splitBinomial(hit.name || hit.ref_id || '');
   const credit = creditLine(s);
   el.innerHTML = `
     <div class="text-pane">
-      <div class="eyebrow">Hmmm…</div>
+      <div class="eyebrow"><span class="flagchip">Hmmm…</span></div>
       <div class="binomial">
         <span class="genus">${esc(name.genus)}</span>
         ${name.rest ? `<span class="epithet">${esc(name.rest)}</span>` : ''}
@@ -1080,7 +1126,7 @@ function renderMixup(s) {
         <span>${fmt(s.total_reads)} reads</span>
       </div>
       <div class="fieldrow">…but this observation is filed as
-        <span class="fieldname">${esc(s.community_taxon || 'unknown')}</span> — ${esc(s.community_iconic_taxon)}, not a fungus.<br>
+        <span class="labeltag"><span class="fieldname">${esc(s.community_taxon || 'unknown')}</span></span> — ${esc(s.community_iconic_taxon)}, not a fungus.<br>
         Probably a field-label mix-up: flagged for review.</div>
       ${credit ? `<div class="creditrow">${credit}</div>` : ''}
     </div>

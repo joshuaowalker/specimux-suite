@@ -35,7 +35,7 @@ def confidence_band(spec: SpecimenState) -> tuple[int, str]:
 
     Bands (1 = most urgent to revisit with more reads):
       1 no_match           consensus exists but nothing hit the reference DB
-      2 low_identity       best hit < 90% adjusted identity
+      2 low_identity       best hit < 95% adjusted identity
       3 off_target         no hit matches the community genus (possible
                            parasite/contaminant dominating the target), or the
                            community genus appears only in a minority cluster
@@ -87,7 +87,9 @@ def confidence_band(spec: SpecimenState) -> tuple[int, str]:
         return 4, "pending"
 
     identity = best_hit.get("adjusted_identity") or best_hit.get("identity") or 0.0
-    if identity < 0.90:
+    # 0.95, aligned with the novelty tiers: a best hit is very rarely
+    # <90% from everything in the reference DB, so 0.90 never fired
+    if identity < 0.95:
         return 2, "low_identity"
     if community_genus:
         if not on_target_anywhere:

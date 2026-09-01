@@ -157,7 +157,7 @@ def _synthetic_state() -> PipelineState:
          reads_at_last_consensus=20, consensus_version=1,
          clusters=[ClusterInfo(name="c1", size=30)],
          identification=[IdentificationMatch(cluster="c1", top_hits=[])])
-    # Band 2: best hit below 90%
+    # Band 2: best hit below 95%
     spec("low_identity", status=SpecimenStatus.IDENTIFIED, total_reads=60,
          reads_at_last_consensus=40, consensus_version=1,
          community_taxon="Russula fake",
@@ -194,11 +194,11 @@ def _synthetic_state() -> PipelineState:
              IdentificationMatch(cluster="c2",
                                  top_hits=[hit("Trichoderma sp", 0.99)])])
     # Threshold pinning: one specimen just inside each identity band edge,
-    # so a one-sided drift of the 0.90/0.98 constants can't hide between
+    # so a one-sided drift of the 0.95/0.98 constants can't hide between
     # fixture datapoints (verified: the 0.98 marginal check drifted to 0.97
     # undetected before these existed)
     for sid, ident in [("ident_0975", 0.975), ("ident_0985", 0.985),
-                       ("ident_0895", 0.895), ("ident_0905", 0.905)]:
+                       ("ident_0945", 0.945), ("ident_0955", 0.955)]:
         spec(sid, status=SpecimenStatus.IDENTIFIED, total_reads=60,
              reads_at_last_consensus=30, consensus_version=1,
              community_taxon="Russula fake",
