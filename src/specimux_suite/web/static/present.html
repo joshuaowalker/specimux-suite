@@ -290,7 +290,34 @@
   .taxo-row .n { font-family: var(--mono); color: var(--muted); }
   @keyframes growbar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 
-  /* ---- refinement journeys: field ID sharpened at the tables ---- */
+  /* ---- family spotlight: one family, a mosaic of its specimens ---- */
+  /* Family names are conventionally set roman, unlike binomials */
+  .binomial .family { font-style: normal; }
+  .spotlight-grid {
+    flex: 1 1 52%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-auto-rows: 1fr;
+    gap: 5px;
+    position: relative; z-index: 2;
+  }
+  .spotlight-cell { position: relative; overflow: hidden; }
+  .spotlight-cell img {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+  }
+  .spotlight-cell .cap {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 1.6em 0.8em 0.55em;
+    font-family: var(--serif); font-style: italic;
+    font-size: clamp(0.8rem, 1.3vw, 1.2rem);
+    color: var(--text);
+    background: linear-gradient(transparent, rgba(16, 13, 11, 0.85));
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---- refinement journeys: field ID sharpened by other eyes ---- */
   .journey-row {
     font-size: clamp(1.05rem, 2.1vw, 2rem);
     padding: 1.4vh 0;
@@ -382,7 +409,7 @@ const state = {
 
 // Shared decision logic lives in derived.js; these adapters bind it to this
 // page's state. Anything beyond a one-line delegation belongs in derived.js.
-const { hasIdentification, isHitOnTarget, hitIdentity, GENUS_OR_DEEPER_RANKS, NEAR_RANKS } = SpecimuxDerived;
+const { hasIdentification, isHitOnTarget, hitIdentity, hitGenusLower, GENUS_OR_DEEPER_RANKS, NEAR_RANKS } = SpecimuxDerived;
 function clusterFlagged(cluster) { return SpecimuxDerived.clusterFilterRouting(cluster, state.summarizeFilter); }
 function getTopMatch(s) { return SpecimuxDerived.getTopMatch(s, 'clusters', state.summarizeFilter); }
 function getTopHit(s) { const m = getTopMatch(s); return m ? m.top_hits[0] : null; }
@@ -723,10 +750,17 @@ function encoreSlot() {
 }
 
 function bigpictureSlot() {
-  // The graph gets top billing over the bare numbers (2:1)
-  const rot = ['families', 'stats', 'families'];
+  // Spotlights carry the photos and rotate through families, so they get
+  // half the slots; the bar chart and bare numbers appear between them.
+  const rot = ['spotlight', 'families', 'spotlight', 'stats'];
   for (let i = 0; i < rot.length; i++) {
     const t = rot[(bigpictureIdx + i) % rot.length];
+    if (t === 'spotlight') {
+      const fam = pickSpotlightFamily();
+      if (!fam) continue;
+      bigpictureIdx += i + 1;
+      return { render: () => renderSpotlight(fam), dwell: DWELL.program };
+    }
     if (t === 'families' && familyRows().length < 3) continue;
     bigpictureIdx += i + 1;
     return { render: t === 'families' ? renderFamilies : renderStats, dwell: DWELL.program };
@@ -1263,10 +1297,10 @@ function renderMilestone(m) {
 
 // The run grouped by family (order when iNat has no family for a genus),
 // from the lineages already fetched for taxonomy agreement. Lineages arrive
-// asynchronously over the run, so early cards undercount — the gate in
-// pickFiller keeps the card off stage until it has substance.
-function familyRows() {
-  const counts = {};
+// asynchronously over the run, so early cards undercount — the channel
+// gates keep these cards off stage until they have substance.
+function familiesIndex() {
+  const fams = {};
   for (const s of Object.values(state.specimens)) {
     if (!hasIdentification(s)) continue;
     const g = hitGenus(getTopHit(s)).toLowerCase();
@@ -1274,11 +1308,88 @@ function familyRows() {
     if (!lineage || !lineage.length) continue;
     const fam = lineage.find(l => l.rank === 'family') || lineage.find(l => l.rank === 'order');
     if (!fam) continue;
-    counts[fam.name] = (counts[fam.name] || 0) + 1;
+    (fams[fam.name] ||= []).push(s);
   }
-  return Object.entries(counts)
-    .map(([name, n]) => ({ name, n }))
+  return fams;
+}
+
+function familyRows() {
+  return Object.entries(familiesIndex())
+    .map(([name, specs]) => ({ name, n: specs.length }))
     .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+}
+
+// Family spotlight: one family per card, several confirmed specimens'
+// photos. Rotates least-recently-featured first (with a small random pool
+// so the order isn't a fixed loop); needs 2+ photographed specimens.
+const spotlightShown = {};  // family name -> timestamp last featured
+function pickSpotlightFamily() {
+  const eligible = Object.entries(familiesIndex()).filter(([, specs]) =>
+    specs.filter(s => (s.inat_photos || []).length).length >= 2);
+  if (!eligible.length) return null;
+  eligible.sort((a, b) => (spotlightShown[a[0]] || 0) - (spotlightShown[b[0]] || 0));
+  const pool = eligible.slice(0, Math.min(4, eligible.length));
+  const [name, specs] = pool[Math.floor(Math.random() * pool.length)];
+  return { name, specs };
+}
+
+function renderSpotlight(fam) {
+  spotlightShown[fam.name] = Date.now();
+  // Up to 4 photographed specimens, distinct taxa, least recently on stage
+  const withPhotos = fam.specs
+    .filter(s => (s.inat_photos || []).length && getTopHit(s))
+    .sort((a, b) => (lastShown[a.specimen_id] || 0) - (lastShown[b.specimen_id] || 0));
+  const seen = new Set();
+  const picks = [];
+  for (const s of withPhotos) {
+    const name = (getTopHit(s).name || getTopHit(s).ref_id || '').toLowerCase();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    picks.push(s);
+    if (picks.length === 4) break;
+  }
+  const taxa = new Set();
+  const genera = new Set();
+  for (const s of fam.specs) {
+    const hit = getTopHit(s);
+    const n = hit && (hit.name || hit.ref_id);
+    if (n) taxa.add(n.toLowerCase());
+    const g = hitGenusLower(hit);
+    if (g) genera.add(g);
+  }
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="text-pane">
+      <div class="eyebrow">Family spotlight</div>
+      <div class="binomial"><span class="family">${esc(fam.name)}</span></div>
+      <div class="datarow">
+        <span class="identity">${fam.specs.length} specimen${fam.specs.length > 1 ? 's' : ''}</span>
+        <span>${genera.size} ${genera.size > 1 ? 'genera' : 'genus'}</span>
+        <span>${taxa.size} taxa</span>
+      </div>
+      <div class="creditrow" style="animation-delay:0.4s">so far, in this run</div>
+    </div>
+    <div class="spotlight-grid"></div>`;
+  const grid = el.querySelector('.spotlight-grid');
+  for (const s of picks) {
+    lastShown[s.specimen_id] = Date.now();
+    const photo = s.inat_photos[0];
+    const src = photoSources(photo);
+    const cell = document.createElement('div');
+    cell.className = 'spotlight-cell';
+    const img = document.createElement('img');
+    img.alt = '';
+    img.onerror = () => { if (img.src !== src.remote && src.remote) img.src = src.remote; else cell.remove(); };
+    img.src = src.local;
+    const cap = document.createElement('div');
+    cap.className = 'cap';
+    cap.textContent = getTopHit(s).name || getTopHit(s).ref_id || '';
+    cell.appendChild(img);
+    cell.appendChild(cap);
+    grid.appendChild(cell);
+  }
+  return el;
 }
 
 function renderFamilies() {
@@ -1306,10 +1417,10 @@ function renderFamilies() {
   return el;
 }
 
-// Field IDs that were sharpened at the display tables and then confirmed by
-// DNA: first identification ≠ community taxon, and the sequence agrees with
-// the refined name at genus or deeper. Grouped by journey, species-exact
-// confirmations first — the strongest advertisement for the ID tables.
+// First identifications that were refined by other eyes (foray ID tables,
+// iNat identifiers) and then confirmed by DNA: first ID ≠ community taxon,
+// and the sequence agrees with the refined name at genus or deeper. Grouped
+// by journey, species-exact confirmations first.
 function refinedRows() {
   const groups = {};
   for (const s of Object.values(state.specimens)) {
@@ -1337,7 +1448,7 @@ function renderRefined() {
   el.className = 'card';
   el.innerHTML = `
     <div class="stat-pane">
-      <div class="eyebrow">Sharpened at the ID tables</div>
+      <div class="eyebrow">Many eyes see clearly</div>
       <div class="board">
         ${rows.map((r, i) => `
           <div class="journey-row" style="animation-delay:${(i * 0.1).toFixed(2)}s">
@@ -1345,7 +1456,7 @@ function renderRefined() {
             <span class="ok">DNA agrees${r.exact ? ' to species' : ''}</span>${r.n > 1 ? `<span class="n">×${r.n}</span>` : ''}
           </div>`).join('')}
       </div>
-      <div class="creditrow" style="animation-delay:0.6s">Field IDs refined by the identification tables, confirmed by sequencing</div>
+      <div class="creditrow" style="animation-delay:0.6s">First IDs refined by the community — confirmed by the sequence</div>
     </div>`;
   return el;
 }
