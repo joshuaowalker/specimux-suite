@@ -17,6 +17,7 @@ from .scheduler import Scheduler
 from .inat import apply_corrections, extract_inat_ids, fetch_community_taxa, fetch_genus_lineages
 from .inat_check import run_inat_check, write_corrections_tsv
 from .photos import photo_cache_dir, prefetch_photos
+from .progress import StageProgress
 from .util import clone_or_copy, parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
 from .runners.speconsense_runner import SpeconsenseRunner
@@ -79,15 +80,17 @@ class Pipeline:
         # so a restart backfills genera whose lineages were never fetched.
         self._lineage_queue: queue.Queue = queue.Queue()
         self._lineage_seen: set[str] = set(self.state.genus_lineages)
+        self._lineage_thread_started = False
         if self.identify:
             for spec in self.state.specimens.values():
                 for m in spec.identification:
                     for h in m.top_hits:
                         self._queue_lineage_genus(h.get("name") or h.get("ref_id") or "")
             self.event_log.add_listener(self._on_event_queue_lineages)
-            threading.Thread(
-                target=self._lineage_fetcher, name="lineage-fetch", daemon=True,
-            ).start()
+            # The fetcher thread starts lazily (_ensure_lineage_thread): a
+            # blocking startup prefetch drains the restart-seeded queue
+            # synchronously first, and an eagerly-started thread would race
+            # it for those entries.
 
         # Incremental summarization: a dedicated serial lane summarizes each
         # specimen as its identification lands, so the Summary tab fills
@@ -120,6 +123,8 @@ class Pipeline:
             target=self._correction_worker, name="inat-correction", daemon=True,
         ).start()
         self._draining = False  # True while waiting for specimux to run
+        self._specimens_loaded = False
+        self._inat_ids: dict[str, str] = {}
         self.cmd_queue: queue.Queue = queue.Queue()
         self._file_queue: queue.Queue[Path] = queue.Queue()
         self._console: ConsoleUI | None = None
@@ -128,7 +133,14 @@ class Pipeline:
         self._old_sigint = None
 
     def _load_specimens(self) -> None:
-        """Parse the specimens file and emit specimens.loaded event."""
+        """Parse the specimens file and emit specimens.loaded event.
+
+        Idempotent — a blocking startup prefetch loads specimens before
+        run_batch/run_live call this again.
+        """
+        if self._specimens_loaded:
+            return
+        self._specimens_loaded = True
         specimens = parse_specimens_file(self.config.specimens_file)
         if specimens:
             self.event_log.emit("specimens.loaded", {
@@ -136,15 +148,122 @@ class Pipeline:
             })
             logger.info(f"Loaded {len(specimens)} specimens from index file")
 
-            # Fetch community taxon from iNaturalist asynchronously. Runs on
-            # a daemon thread, not the worker pool: a slow fetch must never
-            # hold a consensus slot or block executor shutdown on exit.
-            inat_ids = extract_inat_ids(specimens)
-            if inat_ids:
+            self._inat_ids = extract_inat_ids(specimens)
+            # In blocking mode prefetch_inat does this work synchronously
+            # with progress bars before the web UI opens. Otherwise fetch
+            # asynchronously on a daemon thread, not the worker pool: a slow
+            # fetch must never hold a consensus slot or block executor
+            # shutdown on exit.
+            if self._inat_ids and not self.config.inat_blocking:
                 threading.Thread(
-                    target=self._fetch_inat_taxa, args=(inat_ids,),
+                    target=self._fetch_inat_taxa, args=(dict(self._inat_ids),),
                     name="inat-fetch", daemon=True,
                 ).start()
+
+    def _prefetch_photos_background(self, taxa: dict) -> None:
+        try:
+            prefetch_photos(
+                taxa, photo_cache_dir(self.config.output_dir), abort=self._shutdown,
+            )
+        except Exception as e:
+            logger.warning(f"iNaturalist photo prefetch failed: {e}")
+
+    def _ensure_lineage_thread(self) -> None:
+        """Start the background lineage fetcher (idempotent)."""
+        if self.identify is None or self._lineage_thread_started:
+            return
+        self._lineage_thread_started = True
+        threading.Thread(
+            target=self._lineage_fetcher, name="lineage-fetch", daemon=True,
+        ).start()
+
+    def prefetch_inat(self, show_progress: bool = True) -> None:
+        """Blocking startup fetch of all iNaturalist data, with progress.
+
+        Runs before the web server starts so the dashboard and /present
+        open fully populated: field IDs and photos, the iNat ID audit, and
+        (on restart) the lineages backing taxonomy agreement. Every stage
+        is cached per output dir, so a restart's prefetch is near-instant.
+        Ctrl+C skips whatever remains and falls back to the background
+        fetch path.
+        """
+        self._load_specimens()
+        # Replayed admin corrections win over the obs id embedded in the
+        # specimen name (same rule as the background path).
+        inat_ids = apply_corrections(dict(self._inat_ids), self.state.inat_corrections)
+        taxa: dict = {}
+        # While bars are drawing, suite INFO logs would splice into the
+        # \r-updated lines; the bars carry the same information. Warnings
+        # still surface.
+        suite_logger = logging.getLogger("specimux_suite")
+        quiet = show_progress and sys.stderr.isatty() and suite_logger.getEffectiveLevel() <= logging.INFO
+        prev_level = suite_logger.level
+        if quiet:
+            suite_logger.setLevel(logging.WARNING)
+        try:
+            if inat_ids:
+                bar = StageProgress("Field IDs (iNaturalist)", enabled=show_progress)
+                taxa = fetch_community_taxa(
+                    inat_ids, cache_dir=self.config.output_dir,
+                    abort=self._shutdown, progress=bar.update,
+                )
+                bar.finish()
+                if taxa:
+                    self.event_log.emit("specimens.taxa", {"taxa": taxa})
+            if taxa:
+                bar = StageProgress("Auditing iNat IDs", enabled=show_progress)
+                try:
+                    self._run_inat_id_check(progress=bar.update)
+                except Exception as e:
+                    logger.warning(f"iNat ID check failed: {e}")
+                bar.finish(note="done")
+            # Restart backfill: resolve the lineages seeded from replayed
+            # identifications now, before the fetcher thread starts.
+            genera = []
+            while True:
+                try:
+                    genera.append(self._lineage_queue.get_nowait())
+                except queue.Empty:
+                    break
+            if genera:
+                bar = StageProgress("Genus lineages", enabled=show_progress)
+                lineages = fetch_genus_lineages(
+                    genera, cache_dir=self.config.output_dir,
+                    abort=self._shutdown, progress=bar.update,
+                )
+                bar.finish()
+                if lineages:
+                    self.event_log.emit("taxa.lineage", {"lineages": lineages})
+                for genus in genera:
+                    if genus not in lineages:
+                        self._lineage_seen.discard(genus.lower())
+            if taxa:
+                # Photos are a nice-to-have for the UIs — every page falls
+                # back to the iNat photo URL when the local cache misses —
+                # so only the cache warmup runs here, on a daemon thread.
+                # (The cache is what makes a flaky-venue-network run look
+                # good; it just doesn't need to hold up startup.)
+                threading.Thread(
+                    target=self._prefetch_photos_background, args=(taxa,),
+                    name="photo-prefetch", daemon=True,
+                ).start()
+                if show_progress:
+                    print(f"{'Photos':<26} → caching in the background",
+                          file=sys.stderr, flush=True)
+        except KeyboardInterrupt:
+            if quiet:
+                suite_logger.setLevel(prev_level)
+            print(file=sys.stderr)
+            logger.info("Skipping the rest of the iNat prefetch — continuing in the background")
+            if self._inat_ids:
+                threading.Thread(
+                    target=self._fetch_inat_taxa, args=(dict(self._inat_ids),),
+                    name="inat-fetch", daemon=True,
+                ).start()
+        finally:
+            if quiet:
+                suite_logger.setLevel(prev_level)
+            self._ensure_lineage_thread()
 
     def _fetch_inat_taxa(self, inat_ids: dict[str, str]) -> None:
         """Fetch community taxon from iNaturalist and emit event (daemon thread)."""
@@ -276,6 +395,7 @@ class Pipeline:
             "config_summary": self.config.summary(),
         })
         self._load_specimens()
+        self._ensure_lineage_thread()
 
         # Ensure output dirs exist
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -339,6 +459,7 @@ class Pipeline:
             "config_summary": self.config.summary(),
         })
         self._load_specimens()
+        self._ensure_lineage_thread()
 
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         self.config.specimux_output_dir.mkdir(parents=True, exist_ok=True)
@@ -1106,11 +1227,11 @@ class Pipeline:
         except Exception as e:
             logger.warning(f"iNat ID check failed: {e}")
 
-    def _run_inat_id_check(self) -> None:
+    def _run_inat_id_check(self, progress=None) -> None:
         """Audit specimen iNat IDs and publish correction suggestions (network)."""
         run_inat_check(
             self.state, self.event_log, self.config.summarize_output_dir,
-            abort=self._shutdown,
+            abort=self._shutdown, progress=progress,
         )
 
     def _find_specimen_fastq(self, specimen_id: str, pool: str) -> Path | None:

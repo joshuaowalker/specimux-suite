@@ -142,10 +142,18 @@ def main():
         settle_time=getattr(args, "settle_time", 30.0),
         live_presample=getattr(args, "presample", 100),
         incremental_summarize=not args.no_incremental_summarize,
+        inat_blocking=not args.inat_background,
     )
 
     from .pipeline import Pipeline
     pipeline = Pipeline(config)
+
+    # Blocking iNat prefetch (default): fetch field IDs, audit, lineages,
+    # and photos with progress bars BEFORE the web server starts and the
+    # browser opens, so the dashboard and /present come up fully populated.
+    # --inat-background restores fetch-while-running.
+    if config.inat_blocking:
+        pipeline.prefetch_inat(show_progress=sys.stderr.isatty())
 
     # Start web server in background (both modes)
     if not args.no_web:
@@ -227,6 +235,10 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Minimum coverage (max of query/target) for identification hits (default: 0.5)")
     parser.add_argument("--no-open", action="store_true",
                         help="Don't auto-open the dashboard in a browser")
+    parser.add_argument("--inat-background", action="store_true",
+                        help="Fetch iNaturalist data (field IDs, ID audit, photos) in the "
+                             "background instead of blocking with progress bars at startup; "
+                             "the dashboard fills in as data arrives")
 
 
 def _arg_was_explicit(args: argparse.Namespace, attr_name: str) -> bool:

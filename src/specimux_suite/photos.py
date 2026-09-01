@@ -8,16 +8,22 @@ once in the background and served locally by the web server (mounted at
 
 import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # 1024px max dimension — full-bleed quality on a projector, ~550KB each.
 PHOTO_SIZE = "large"
-_FETCH_DELAY_S = 0.25
+# Photos come from iNat's S3/CDN hosts, not the rate-limited API, so a
+# small worker pool with a per-worker pause is polite and warms a
+# ~700-photo cache in about a minute instead of several.
+_FETCH_DELAY_S = 0.1
+_FETCH_WORKERS = 4
 
 
 def photo_cache_dir(output_dir: Path) -> Path:
@@ -62,6 +68,7 @@ def prefetch_photos(
     cache_dir: Path,
     abort=None,
     size: str = PHOTO_SIZE,
+    progress=None,
 ) -> int:
     """Download each observation's first photo into cache_dir.
 
@@ -79,25 +86,45 @@ def prefetch_photos(
         return 0
 
     logger.info(f"Prefetching {len(to_fetch)} iNaturalist photos to {cache_dir}")
+    if progress:
+        progress(0, len(to_fetch))
     fetched = 0
-    for p in to_fetch:
+    done = 0
+    lock = threading.Lock()
+
+    def fetch_one(p) -> None:
+        nonlocal fetched, done
         if abort is not None and abort.is_set():
-            logger.info(f"Photo prefetch aborted (shutdown) after {fetched} photos")
-            return fetched
+            return
         url = photo_size_url(p["url"], size)
         dest = cache_dir / cached_photo_name(p["id"], size)
+        # Distinct photo ids mean distinct dest/tmp paths per task (first_photos
+        # dedupes), so the plain .tmp name can't collide across workers
         tmp = dest.with_suffix(".tmp")
+        ok = False
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 tmp.write_bytes(resp.read())
             tmp.rename(dest)
-            fetched += 1
+            ok = True
         except (urllib.error.URLError, OSError) as e:
             logger.warning(f"Failed to fetch photo {p['id']}: {e}")
             tmp.unlink(missing_ok=True)
+        with lock:
+            done += 1
+            if ok:
+                fetched += 1
+            if progress:
+                progress(done, len(to_fetch))
         time.sleep(_FETCH_DELAY_S)
 
+    with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+        list(pool.map(fetch_one, to_fetch))
+
+    if abort is not None and abort.is_set():
+        logger.info(f"Photo prefetch aborted (shutdown) after {fetched} photos")
+        return fetched
     logger.info(f"Photo prefetch complete: {fetched} downloaded, "
                 f"{len(photos) - len(to_fetch)} already cached")
     return fetched

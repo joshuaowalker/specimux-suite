@@ -65,6 +65,13 @@ class PipelineConfig:
     summarize_overrides: dict = field(default_factory=dict)
     summarize_args: list[str] = field(default_factory=list)
 
+    # Block at startup fetching all iNaturalist data (field IDs, ID audit,
+    # lineages, photos) with progress bars, so the web UI opens fully
+    # populated; False reverts to fetching in the background while the run
+    # starts. Per-output-dir caches make a restart's blocking fetch
+    # near-instant either way.
+    inat_blocking: bool = True
+
     # Live mode: subsample reads for incremental consensus (0 = no limit)
     live_presample: int = 100
 

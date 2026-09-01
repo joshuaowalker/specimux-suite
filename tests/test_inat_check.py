@@ -162,7 +162,7 @@ def test_run_inat_check_emits_event_and_statuses(tmp_path, monkeypatch):
     state.rebuild(EventLog(tmp_path / "events.jsonl"))
 
     monkeypatch.setattr("specimux_suite.inat_check.fetch_observations_summary",
-                        lambda ids, abort=None: {})
+                        lambda ids, abort=None, progress=None: {})
 
     out_dir = tmp_path / "summary"
     assert run_inat_check(state, log, out_dir)

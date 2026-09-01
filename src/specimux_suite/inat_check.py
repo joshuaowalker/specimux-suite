@@ -94,16 +94,20 @@ def find_suspects(inat_ids: dict[str, str], specimens_info: dict[str, dict]) -> 
     return suspects
 
 
-def fetch_observations_summary(obs_ids: list[str], abort=None) -> dict[str, dict]:
+def fetch_observations_summary(obs_ids: list[str], abort=None, progress=None) -> dict[str, dict]:
     """Batch-fetch candidate observations: {obs_id: {taxon, iconic, login, name, observed_on}}.
 
     IDs that don't exist simply don't come back — that absence is the filter.
     """
     result: dict[str, dict] = {}
+    if progress:
+        progress(0, len(obs_ids))
     for i in range(0, len(obs_ids), MAX_BATCH_SIZE):
         if abort is not None and abort.is_set():
             logger.info("iNaturalist candidate fetch aborted (shutdown)")
             return result
+        if progress:
+            progress(i, len(obs_ids))
         batch = obs_ids[i : i + MAX_BATCH_SIZE]
         url = f"{API_URL}?per_page={MAX_BATCH_SIZE}&id={','.join(batch)}"
         try:
@@ -122,6 +126,8 @@ def fetch_observations_summary(obs_ids: list[str], abort=None) -> dict[str, dict
                 }
         except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Failed to fetch iNaturalist candidate batch: {e}")
+        if progress:
+            progress(min(i + MAX_BATCH_SIZE, len(obs_ids)), len(obs_ids))
         if i + MAX_BATCH_SIZE < len(obs_ids):
             time.sleep(1)
     return result
@@ -176,6 +182,7 @@ def check_inat_ids(
     out_dir: Path,
     statuses: dict[str, str] | None = None,
     abort=None,
+    progress=None,
 ) -> list[dict]:
     """Find suspect iNat IDs, rank corrections, and write the mapping TSV.
 
@@ -191,7 +198,7 @@ def check_inat_ids(
 
     all_candidates = {s["specimen_id"]: digit_edit_candidates(s["obs_id"]) for s in suspects}
     unique_ids = sorted({cid for cands in all_candidates.values() for cid in cands})
-    fetched = fetch_observations_summary(unique_ids, abort=abort)
+    fetched = fetch_observations_summary(unique_ids, abort=abort, progress=progress)
 
     records = []
     for s in suspects:
@@ -250,7 +257,7 @@ def write_corrections_tsv(corrections: dict[str, dict], out_dir: Path) -> Path |
 _check_running = threading.Lock()
 
 
-def run_inat_check(state, event_log, out_dir: Path, abort=None) -> bool:
+def run_inat_check(state, event_log, out_dir: Path, abort=None, progress=None) -> bool:
     """Audit the run's iNat IDs from live state and publish the results.
 
     Builds inputs from PipelineState, writes the suggestions TSV, emits the
@@ -293,7 +300,7 @@ def run_inat_check(state, event_log, out_dir: Path, abort=None) -> bool:
         statuses.update({sid: "dismissed" for sid in state.inat_dismissed})
         records = check_inat_ids(
             inat_ids, specimens_info, run_observers, hit_genera,
-            out_dir, statuses=statuses, abort=abort,
+            out_dir, statuses=statuses, abort=abort, progress=progress,
         )
         event_log.emit("inat.suggestions", {"suggestions": records})
         write_corrections_tsv(state.inat_corrections, out_dir)

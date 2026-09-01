@@ -165,6 +165,7 @@ def fetch_community_taxa(
     inat_ids: dict[str, str],
     cache_dir: Path | None = None,
     abort=None,
+    progress=None,
 ) -> dict[str, dict]:
     """Batch-fetch community taxon names for iNaturalist observations.
 
@@ -223,6 +224,8 @@ def fetch_community_taxa(
 
     unique_obs_ids = list(obs_id_to_specimens.keys())
     logger.info(f"Fetching community taxon for {len(unique_obs_ids)} iNaturalist observations")
+    if progress:
+        progress(0, len(unique_obs_ids))
 
     # First pass: fetch observations and extract taxa
     # Track infrageneric taxa that need genus resolution
@@ -285,6 +288,8 @@ def fetch_community_taxa(
         except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Failed to fetch iNaturalist batch: {e}")
 
+        if progress:
+            progress(min(i + MAX_BATCH_SIZE, len(unique_obs_ids)), len(unique_obs_ids))
         # Rate limiting between batches
         if i + MAX_BATCH_SIZE < len(unique_obs_ids):
             time.sleep(1)
@@ -349,6 +354,7 @@ def fetch_genus_lineages(
     genera: list[str],
     cache_dir: Path | None = None,
     abort=None,
+    progress=None,
 ) -> dict[str, list[dict]]:
     """Resolve genus names to their iNaturalist lineages.
 
@@ -378,9 +384,11 @@ def fetch_genus_lineages(
         return result
 
     # Pass 1: search each genus for its taxon and ancestor ids
+    if progress:
+        progress(0, len(to_fetch))
     ancestor_ids_by_genus: dict[str, list[int]] = {}
     all_ancestor_ids: set[int] = set()
-    for genus in to_fetch:
+    for n, genus in enumerate(to_fetch):
         if abort is not None and abort.is_set():
             logger.info("iNaturalist lineage fetch aborted (shutdown)")
             return result
@@ -401,6 +409,9 @@ def fetch_genus_lineages(
         except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Failed to search iNaturalist genus {genus}: {e}")
             continue  # transient: leave uncached so it retries next wave
+        finally:
+            if progress:
+                progress(n + 1, len(to_fetch))
         time.sleep(_LINEAGE_SEARCH_DELAY_S)
 
     # Pass 2: batch-fetch rank+name for every ancestor id
