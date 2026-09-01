@@ -228,6 +228,74 @@
   .board-row .who { flex: 1; }
   .board-row .count { font-family: var(--mono); color: var(--amber); }
 
+  /* ---- milestone card: one huge number, the room should look up ---- */
+  .milestone-num {
+    font-family: var(--sans);
+    font-weight: 200;
+    font-size: clamp(5rem, 17vw, 17rem);
+    line-height: 1;
+    color: var(--amber);
+    animation: rise 0.9s 0.1s ease both;
+  }
+  .milestone-lbl {
+    font-size: clamp(1.1rem, 2.4vw, 2.2rem);
+    letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--muted); margin-top: 2.5vh;
+    animation: rise 0.9s 0.35s ease both;
+  }
+
+  /* ---- burst roll-up: a busy stretch collapsed into one card ---- */
+  .burst-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 0.8vh 4vw; margin-top: 4.5vh;
+  }
+  .burst-item {
+    font-family: var(--serif); font-style: italic;
+    font-size: clamp(1.05rem, 2vw, 1.9rem);
+    color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    animation: rise 0.7s ease both;
+  }
+  .burst-item.first { color: var(--amber); }
+  .burst-item .pct {
+    font-family: var(--mono); font-style: normal;
+    color: var(--faint); font-size: 0.68em; margin-left: 0.6em;
+  }
+
+  /* ---- family portrait: taxonomic breakdown bars ---- */
+  .taxo-row {
+    display: grid; grid-template-columns: minmax(10ch, 0.34fr) 1fr auto;
+    align-items: center; gap: 2vw;
+    font-size: clamp(1.05rem, 2.1vw, 2rem);
+    padding: 1vh 0;
+    animation: rise 0.7s ease both;
+  }
+  .taxo-row .fam {
+    font-family: var(--serif); font-style: italic;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .taxo-row .bar {
+    display: block; height: 0.8em; border-radius: 3px;
+    background: linear-gradient(90deg, var(--amber-dim), var(--amber));
+    min-width: 4px;
+    transform-origin: left; animation: growbar 0.9s ease both;
+  }
+  .taxo-row .n { font-family: var(--mono); color: var(--muted); }
+  @keyframes growbar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+  /* ---- refinement journeys: field ID sharpened at the tables ---- */
+  .journey-row {
+    font-size: clamp(1.05rem, 2.1vw, 2rem);
+    padding: 1.4vh 0;
+    border-bottom: 1px solid #2a231d;
+    animation: rise 0.7s ease both;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .journey-row .fieldname { font-family: var(--serif); font-style: italic; }
+  .journey-row .arrow { color: var(--amber); margin: 0 0.5em; }
+  .journey-row .ok { color: var(--base-a); font-size: 0.72em; margin-left: 1.2em; }
+  .journey-row .n { font-family: var(--mono); color: var(--faint); font-size: 0.72em; margin-left: 0.8em; }
+
   @keyframes rise {
     from { opacity: 0; transform: translateY(1.2vh); }
     to { opacity: 1; transform: none; }
@@ -270,7 +338,8 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .ribbon .scroll { animation: none; }
-    .eyebrow, .binomial, .datarow, .fieldrow, .creditrow, .stat .num, .board-row { animation: none; }
+    .eyebrow, .binomial, .datarow, .fieldrow, .creditrow, .stat .num, .board-row,
+    .milestone-num, .milestone-lbl, .burst-item, .taxo-row, .taxo-row .bar, .journey-row { animation: none; }
     .card { transition: opacity 0.2s ease; }
   }
 </style>
@@ -306,7 +375,7 @@ const state = {
 
 // Shared decision logic lives in derived.js; these adapters bind it to this
 // page's state. Anything beyond a one-line delegation belongs in derived.js.
-const { hasIdentification, isHitOnTarget, hitIdentity } = SpecimuxDerived;
+const { hasIdentification, isHitOnTarget, hitIdentity, GENUS_OR_DEEPER_RANKS, NEAR_RANKS } = SpecimuxDerived;
 function clusterFlagged(cluster) { return SpecimuxDerived.clusterFilterRouting(cluster, state.summarizeFilter); }
 function getTopMatch(s) { return SpecimuxDerived.getTopMatch(s, 'clusters', state.summarizeFilter); }
 function getTopHit(s) { const m = getTopMatch(s); return m ? m.top_hits[0] : null; }
@@ -416,6 +485,25 @@ function photoSources(photo) {
 // ============================================================
 const DWELL = { base: 12000, busy: 7000, slammed: 5000, stats: 9000 };
 const NOVEL_SOFT = 0.98, NOVEL_STRONG = 0.90;
+// When this many identifications are waiting, one burst card honors them
+// together — dwell-shortening alone would blur past every individual
+// moment. Strong novelty and milestones still play solo; first-of-genus
+// joins the burst under load (amber in the grid) but gets a solo card
+// when the room is quiet.
+const BURST_MIN = 6, BURST_MAX = 12;
+// Run milestones: fired live when a count crosses a threshold; thresholds
+// already passed at bootstrap are seeded as announced (snapshot is history).
+const MILESTONES = {
+  identified: [25, 50, 100, 150, 200, 300, 400, 500, 750, 1000],
+  genera: [10, 25, 50, 75, 100, 150],
+  taxa: [25, 50, 100, 150, 200, 300],
+  matched: [50000, 100000, 250000, 500000, 1000000, 2000000],
+};
+const MILESTONE_LABELS = {
+  identified: 'specimens identified', genera: 'genera recorded',
+  taxa: 'distinct taxa', matched: 'reads matched',
+};
+const passedMilestones = new Set();
 // Announcement gate: a low identity from a thin cluster is as likely noise
 // as novelty. The loud treatments (amber card, priority boost) require this
 // much read support behind the matched sequence; below it the card renders
@@ -460,14 +548,17 @@ function onIdentification(s) {
 }
 
 function nextDwell(type) {
-  if (type === 'stats' || type === 'leaderboard') return DWELL.stats;
+  if (type !== 'identification') return DWELL.stats;
   if (queue.length > 15) return DWELL.slammed;
   if (queue.length > 5) return DWELL.busy;
   return DWELL.base;
 }
 
+// Each filler type gates on having enough data to be worth a card, so early
+// in a run the rotation degrades to highlights + stats.
 function pickFiller() {
-  const rotation = ['highlight', 'stats', 'highlight', 'leaderboard', 'highlight', 'fieldids'];
+  const rotation = ['highlight', 'stats', 'highlight', 'families', 'highlight',
+                    'leaderboard', 'highlight', 'refined', 'highlight', 'fieldids'];
   for (let i = 0; i < rotation.length; i++) {
     const type = rotation[(fillerIdx + i) % rotation.length];
     if (type === 'highlight') {
@@ -477,6 +568,10 @@ function pickFiller() {
       if (leaderboardRows().length >= 2) { fillerIdx += i + 1; return { type: 'leaderboard' }; }
     } else if (type === 'fieldids') {
       if (fieldIdRows().length >= 2) { fillerIdx += i + 1; return { type: 'fieldids' }; }
+    } else if (type === 'families') {
+      if (familyRows().length >= 3) { fillerIdx += i + 1; return { type: 'families' }; }
+    } else if (type === 'refined') {
+      if (refinedRows().length >= 2) { fillerIdx += i + 1; return { type: 'refined' }; }
     } else {
       fillerIdx += i + 1; return { type: 'stats' };
     }
@@ -503,7 +598,20 @@ function pickHighlight() {
 function showNext() {
   clearTimeout(dwellTimer);
   if (paused) return;
-  const card = queue.length ? queue.shift() : pickFiller();
+  let card;
+  // The queue is priority-sorted, so when the head is an identification at
+  // priority 2+ nothing truly loud (strong novelty, milestone) is waiting —
+  // roll the backlog into one burst card instead of racing through it at
+  // minimum dwell. First-of-genus cards join the burst under load (amber
+  // in the grid); when the room is quiet they still get a solo card.
+  if (queue.length >= BURST_MIN && queue[0].priority >= 2
+      && queue[0].type === 'identification') {
+    const batch = queue.splice(0, BURST_MAX)
+      .filter(c => c.type === 'identification');
+    card = { type: 'burst', batch };
+  } else {
+    card = queue.length ? queue.shift() : pickFiller();
+  }
   let el = null, type = card.type;
   if (type === 'identification') {
     const s = state.specimens[card.sid];
@@ -513,6 +621,14 @@ function showNext() {
     lastShown[card.sid] = Date.now();
     const g = hitGenus(hit);
     if (g) announcedGenera.add(g.toLowerCase());
+  } else if (type === 'burst') {
+    el = renderBurst(card.batch);
+  } else if (type === 'milestone') {
+    el = renderMilestone(card.milestone);
+  } else if (type === 'families') {
+    el = renderFamilies();
+  } else if (type === 'refined') {
+    el = renderRefined();
   } else if (type === 'leaderboard') {
     el = renderLeaderboard();
   } else if (type === 'fieldids') {
@@ -642,12 +758,10 @@ function renderIdentification(s, hit, card) {
     } else {
       fieldHtml = `Field ID: <span class="fieldname">${esc(s.community_taxon)}</span>`;
     }
-    const GENUS_OR_DEEPER = new Set(['genus', 'subgenus', 'section', 'subsection', 'complex', 'species', 'subspecies', 'variety', 'form', 'hybrid']);
-    const NEAR = new Set(['order', 'suborder', 'infraorder', 'superfamily', 'epifamily', 'family', 'subfamily', 'supertribe', 'tribe', 'subtribe']);
-    if ((onTarget || (agreement && GENUS_OR_DEEPER.has(agreement.level))) && !soft) {
+    if ((onTarget || (agreement && GENUS_OR_DEEPER_RANKS.has(agreement.level))) && !soft) {
       const level = agreement && agreement.level === 'species' ? 'to species' : '';
       fieldHtml += ` <span class="ok">— sequence agrees${level ? ' ' + level : ''}</span>`;
-    } else if (agreement && NEAR.has(agreement.level)) {
+    } else if (agreement && NEAR_RANKS.has(agreement.level)) {
       fieldHtml += ` <span class="ok">— same ${esc(agreement.level)}: ${esc(agreement.name)}</span>`;
     }
   }
@@ -682,11 +796,38 @@ function renderIdentification(s, hit, card) {
     const src = photoSources(photo);
     img.alt = '';
     img.onerror = () => { if (img.src !== src.remote && src.remote) img.src = src.remote; else el.classList.add('no-photo'); };
+    img.onload = () => { img.dataset.firstSrc = img.currentSrc; };
     img.src = src.local;
     el.querySelector('.photo-pane').appendChild(img);
+    if ((s.inat_photos || []).length > 1) cyclePhotos(el, img, s.inat_photos);
   }
   loadRibbon(el.querySelector('.ribbon'), s, getTopMatch(s));
   return el;
+}
+
+// Cycle through the observation's photos during the card's dwell. Only the
+// first photo is prefetched locally; the rest come from the iNat host, so
+// each is preloaded off-screen and the card simply stays on the current
+// photo if the venue network can't deliver the next one.
+const PHOTO_CYCLE_MS = 4500;
+function cyclePhotos(cardEl, img, photos) {
+  let idx = 0;
+  img.style.transition = 'opacity 0.5s ease';
+  const timer = setInterval(() => {
+    if (!cardEl.isConnected) { clearInterval(timer); return; }
+    const nextIdx = (idx + 1) % photos.length;
+    const nextSrc = nextIdx === 0
+      ? (img.dataset.firstSrc || photoSources(photos[0]).local)
+      : photoSources(photos[nextIdx]).remote;
+    const preload = new Image();
+    preload.onload = () => {
+      if (!cardEl.isConnected) return;
+      idx = nextIdx;
+      img.style.opacity = '0';
+      setTimeout(() => { img.src = nextSrc; img.style.opacity = '1'; }, 500);
+    };
+    preload.src = nextSrc;
+  }, PHOTO_CYCLE_MS);
 }
 
 // The signature: the specimen's actual consensus bases drifting under the name.
@@ -707,11 +848,16 @@ function runStats() {
   const all = Object.values(state.specimens);
   const identified = all.filter(hasIdentification);
   const genera = new Set();
+  const taxa = new Set();
   for (const s of identified) {
-    const g = hitGenus(getTopHit(s));
+    const hit = getTopHit(s);
+    const g = hitGenus(hit);
     if (g) genera.add(g.toLowerCase());
+    const name = hit && (hit.name || hit.ref_id);
+    if (name) taxa.add(name.toLowerCase());
   }
-  return { matched: state.totalMatched, identified: identified.length, genera: genera.size, total: all.length };
+  return { matched: state.totalMatched, identified: identified.length,
+           genera: genera.size, taxa: taxa.size, total: all.length };
 }
 
 function renderStats() {
@@ -806,6 +952,185 @@ function renderLeaderboard() {
   return el;
 }
 
+// A busy stretch honored as one card: every specimen in the batch gets its
+// name on screen (and counts as shown/announced) instead of being blurred
+// past at minimum dwell.
+function renderBurst(batch) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  const items = [];
+  for (const c of batch) {
+    const s = state.specimens[c.sid];
+    const hit = s && getTopHit(s);
+    if (!hit) continue;
+    lastShown[c.sid] = Date.now();
+    const g = hitGenus(hit);
+    if (g) announcedGenera.add(g.toLowerCase());
+    items.push({ name: hit.name || hit.ref_id || '', first: c.firstOfGenus,
+                 identity: hitIdentity(hit) });
+  }
+  const oldest = Math.min(...batch.map(c => c.at));
+  const mins = Math.max(1, Math.round((Date.now() - oldest) / 60000));
+  const firsts = items.filter(it => it.first).length;
+  el.innerHTML = `
+    <div class="stat-pane">
+      <div class="eyebrow">A busy stretch</div>
+      <div class="stat">
+        <div class="num">${items.length}</div>
+        <div class="lbl">identifications in the last ${mins} minute${mins > 1 ? 's' : ''}${firsts ? ` · ${firsts} new gener${firsts > 1 ? 'a' : 'us'} for the run` : ''}</div>
+      </div>
+      <div class="burst-grid">
+        ${items.map((it, i) => `
+          <div class="burst-item${it.first ? ' first' : ''}" style="animation-delay:${(0.15 + i * 0.06).toFixed(2)}s">
+            ${esc(it.name)}<span class="pct">${(it.identity * 100).toFixed(0)}%</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  return el;
+}
+
+function renderMilestone(m) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  // The live span keeps pace with the footer counters (renderFooter syncs
+  // [data-stat] in the current card), so the card can't read as stale even
+  // when the count has already moved past the threshold.
+  const current = runStats()[m.metric] || m.value;
+  el.innerHTML = `
+    <div class="stat-pane" style="align-items:center;text-align:center">
+      <div class="eyebrow">Run milestone</div>
+      <div class="milestone-num">${fmt(m.value)}</div>
+      <div class="milestone-lbl">${esc(MILESTONE_LABELS[m.metric] || m.metric)}</div>
+      <div class="creditrow" style="animation-delay:0.55s">now <span data-stat="${esc(m.metric)}">${fmt(current)}</span> and counting</div>
+    </div>`;
+  return el;
+}
+
+// The run grouped by family (order when iNat has no family for a genus),
+// from the lineages already fetched for taxonomy agreement. Lineages arrive
+// asynchronously over the run, so early cards undercount — the gate in
+// pickFiller keeps the card off stage until it has substance.
+function familyRows() {
+  const counts = {};
+  for (const s of Object.values(state.specimens)) {
+    if (!hasIdentification(s)) continue;
+    const g = hitGenus(getTopHit(s)).toLowerCase();
+    const lineage = state.genusLineages[g];
+    if (!lineage || !lineage.length) continue;
+    const fam = lineage.find(l => l.rank === 'family') || lineage.find(l => l.rank === 'order');
+    if (!fam) continue;
+    counts[fam.name] = (counts[fam.name] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([name, n]) => ({ name, n }))
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+}
+
+function renderFamilies() {
+  const rows = familyRows();
+  const top = rows.slice(0, 7);
+  const max = top.length ? top[0].n : 1;
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="stat-pane">
+      <div class="eyebrow">The run by family</div>
+      <div class="stat">
+        <div class="num">${rows.length}</div>
+        <div class="lbl">families so far</div>
+      </div>
+      <div class="board" style="margin-top:3.5vh">
+        ${top.map((r, i) => `
+          <div class="taxo-row" style="animation-delay:${(i * 0.08).toFixed(2)}s">
+            <span class="fam">${esc(r.name)}</span>
+            <span class="bar" style="width:${(r.n / max * 100).toFixed(1)}%"></span>
+            <span class="n">${r.n}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  return el;
+}
+
+// Field IDs that were sharpened at the display tables and then confirmed by
+// DNA: first identification ≠ community taxon, and the sequence agrees with
+// the refined name at genus or deeper. Grouped by journey, species-exact
+// confirmations first — the strongest advertisement for the ID tables.
+function refinedRows() {
+  const groups = {};
+  for (const s of Object.values(state.specimens)) {
+    const from = (s.inat_first_id || {}).name || '';
+    const to = s.community_taxon || '';
+    if (!from || !to || from === to) continue;
+    const hit = getTopHit(s);
+    if (!hit) continue;
+    const communityGenus = (s.community_genus || to.split(/\s+/)[0]).toLowerCase();
+    const a = agreementRank(s, hit);
+    if (!(isHitOnTarget(hit, communityGenus) || (a && GENUS_OR_DEEPER_RANKS.has(a.level)))) continue;
+    const exact = !!a && a.level === 'species';
+    const key = from + '→' + to;
+    const entry = groups[key] ||= { from, to, n: 0, exact: false };
+    entry.n++;
+    entry.exact = entry.exact || exact;
+  }
+  return Object.values(groups)
+    .sort((a, b) => (b.exact - a.exact) || (b.n - a.n) || a.to.localeCompare(b.to));
+}
+
+function renderRefined() {
+  const rows = refinedRows().slice(0, 5);
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="stat-pane">
+      <div class="eyebrow">Sharpened at the ID tables</div>
+      <div class="board">
+        ${rows.map((r, i) => `
+          <div class="journey-row" style="animation-delay:${(i * 0.1).toFixed(2)}s">
+            <span class="fieldname">${esc(r.from)}</span><span class="arrow">→</span><span class="fieldname">${esc(r.to)}</span>
+            <span class="ok">DNA agrees${r.exact ? ' to species' : ''}</span>${r.n > 1 ? `<span class="n">×${r.n}</span>` : ''}
+          </div>`).join('')}
+      </div>
+      <div class="creditrow" style="animation-delay:0.6s">Field IDs refined by the identification tables, confirmed by sequencing</div>
+    </div>`;
+  return el;
+}
+
+// ============================================================
+// Milestones: fire live when a count crosses a threshold
+// ============================================================
+function checkMilestones() {
+  if (!bootstrapped) return;
+  const st = runStats();
+  for (const [metric, thresholds] of Object.entries(MILESTONES)) {
+    for (const t of thresholds) {
+      const key = metric + ':' + t;
+      if (st[metric] >= t && !passedMilestones.has(key)) {
+        passedMilestones.add(key);
+        // Collapse: a newer threshold supersedes a queued lower one for the
+        // same metric — showing "100" after 150 was crossed reads as stale.
+        for (let i = queue.length - 1; i >= 0; i--) {
+          if (queue[i].type === 'milestone' && queue[i].milestone.metric === metric
+              && queue[i].milestone.value < t) queue.splice(i, 1);
+        }
+        // 1.5: ahead of first-of-genus, behind strong novelty — counts
+        // move fast when identifications land in batches, so a milestone
+        // that waits its turn behind a run of solo cards goes stale.
+        enqueue({ key: 'milestone:' + key, type: 'milestone', priority: 1.5,
+                  at: Date.now(), milestone: { value: t, metric } });
+      }
+    }
+  }
+}
+
+function seedMilestones() {
+  const st = runStats();
+  for (const [metric, thresholds] of Object.entries(MILESTONES)) {
+    for (const t of thresholds) {
+      if (st[metric] >= t) passedMilestones.add(metric + ':' + t);
+    }
+  }
+}
+
 // ============================================================
 // Footer counters + bootstrap + SSE
 // ============================================================
@@ -817,7 +1142,7 @@ function renderFooter() {
   // A stats card on stage ticks live during its dwell — it must never
   // disagree with the footer counters.
   if (currentCardEl) {
-    for (const [key, val] of [['matched', st.matched], ['identified', st.identified], ['genera', st.genera]]) {
+    for (const [key, val] of [['matched', st.matched], ['identified', st.identified], ['genera', st.genera], ['taxa', st.taxa]]) {
       const el = currentCardEl.querySelector(`[data-stat="${key}"]`);
       if (el) el.textContent = fmt(val);
     }
@@ -839,6 +1164,7 @@ function connect() {
       state.version = Math.max(state.version, event.version);
       applyEvent(event);
       renderFooter();
+      checkMilestones();
     });
   }
 }
@@ -858,6 +1184,7 @@ async function bootstrap() {
       const g = hitGenus(getTopHit(s));
       if (g && hasIdentification(s)) announcedGenera.add(g.toLowerCase());
     }
+    seedMilestones();
   } catch (e) { /* server not up yet; SSE reconnect will heal */ }
   bootstrapped = true;
   renderFooter();
