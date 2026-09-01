@@ -1,11 +1,14 @@
 """Pipeline state — in-memory materialized view rebuilt from events."""
 
+import logging
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 from .events import Event, EventLog
+
+logger = logging.getLogger(__name__)
 
 
 class SpecimenStatus(str, Enum):
@@ -134,6 +137,42 @@ class PipelineState:
                 handler = self._handlers.get(event.type)
                 if handler:
                     handler(self, event.data)
+            self._normalize_interrupted()
+
+    def _normalize_interrupted(self) -> None:
+        """Heal specimens stranded in CONSENSUS_RUNNING by a killed run.
+
+        A consensus.started with no matching consensus.completed means the
+        process died mid-job. Nothing is running after a rebuild, and both
+        scheduler paths skip "running" specimens, so a phantom would be
+        stuck forever (and displayed as processing). Demote each to the
+        status its data implies; the interrupted job reschedules naturally
+        — its new reads are still unrecorded, so the gate that submitted
+        it passes again. Runs only at the end of rebuild (under the state
+        lock): during live operation "running" is truthful.
+        """
+        healed = []
+        for sid, spec in self.specimens.items():
+            if spec.status != SpecimenStatus.CONSENSUS_RUNNING:
+                continue
+            if spec.consensus_version == 0:
+                spec.status = SpecimenStatus.WAITING
+            elif spec.summarize_consensus_version == spec.consensus_version:
+                spec.status = SpecimenStatus.SUMMARIZED
+            elif any(m.top_hits for m in spec.identification):
+                spec.status = SpecimenStatus.IDENTIFIED
+            elif spec.identification:
+                spec.status = SpecimenStatus.NO_MATCH
+            else:
+                spec.status = SpecimenStatus.CONSENSUS_DONE
+            spec.active_job_id = None
+            healed.append(sid)
+        if healed:
+            shown = ", ".join(sorted(healed)[:10])
+            more = f" (+{len(healed) - 10} more)" if len(healed) > 10 else ""
+            logger.info(
+                f"Healed {len(healed)} specimen(s) left mid-consensus by an "
+                f"interrupted run: {shown}{more}")
 
     def get_specimen(self, specimen_id: str) -> SpecimenState:
         if specimen_id not in self.specimens:

@@ -38,10 +38,9 @@ def main():
 
     event_log = EventLog(log_path)
     state = PipelineState()
-    n = 0
-    for event in event_log.replay():
-        state.apply(event)
-        n += 1
+    # rebuild (not a manual replay loop) so interrupted-run normalization
+    # applies, same as a real pipeline restart
+    state.rebuild(event_log)
 
     config = PipelineConfig(
         primers_file=tmp / "primers.fasta",
@@ -51,7 +50,7 @@ def main():
         web_port=args.port,
     )
     start_web_server(event_log, state, config)
-    print(f"replayed {n} events ({len(state.specimens)} specimens)")
+    print(f"replayed {state.version} events ({len(state.specimens)} specimens)")
     print(f"dashboard: http://{args.host}:{args.port}/  (/present, /admin)")
     try:
         while True:

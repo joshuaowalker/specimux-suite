@@ -102,6 +102,13 @@ class Pipeline:
             threading.Thread(
                 target=self._summarize_worker, name="summarize-lane", daemon=True,
             ).start()
+            # Restart backfill: the lane is otherwise fed only by the
+            # identification-done callback, so replayed identified/no_match
+            # specimens whose summary is missing or stale would sit
+            # unsummarized until finalization.
+            for sid, spec in self.state.specimens.items():
+                if spec.summarize_consensus_version != spec.consensus_version:
+                    self._maybe_queue_incremental_summarize(sid)
 
         # Admin-accepted iNat ID corrections heal the run: a listener queues
         # each inat.correction (emitted by the web admin page) and a daemon
@@ -364,8 +371,11 @@ class Pipeline:
         logger.info(f"Watching {self.config.watch_dir} for new FASTQ files")
 
         # Schedule any work that's ready from rebuilt state (e.g. specimens
-        # that gained reads before previous shutdown but never got consensus)
+        # that gained reads before previous shutdown but never got consensus),
+        # and resume identification for specimens a previous session left
+        # stranded between consensus and identification
         self._schedule_consensus()
+        self._submit_stranded_identifications()
 
         self._install_sigint("live")
         try:
@@ -709,12 +719,20 @@ class Pipeline:
                 # (consensus.completed sets CONSENSUS_DONE and clears
                 # identification). Not limited to this round's jobs — heals
                 # specimens stranded by an interrupted earlier session too.
-                if self.identify:
-                    for sid, spec in self.state.specimens.items():
-                        if (spec.status == SpecimenStatus.CONSENSUS_DONE
-                                and spec.clusters
-                                and not spec.identification):
-                            self._submit_identification(sid)
+                self._submit_stranded_identifications()
+
+    def _submit_stranded_identifications(self) -> None:
+        """Identify every specimen whose consensus completed but whose
+        identification never ran — including specimens stranded between
+        consensus.completed and identification.completed by an interrupted
+        session, which the completion-callback path can never reach."""
+        if not self.identify:
+            return
+        for sid, spec in self.state.specimens.items():
+            if (spec.status == SpecimenStatus.CONSENSUS_DONE
+                    and spec.clusters
+                    and not spec.identification):
+                self._submit_identification(sid)
 
     def _schedule_consensus(self) -> None:
         """Check scheduler and submit consensus jobs for available slots."""

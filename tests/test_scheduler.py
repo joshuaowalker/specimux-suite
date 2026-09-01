@@ -71,12 +71,13 @@ def test_skip_running(tmp_path):
     config = _make_config(tmp_path)
     log = EventLog(tmp_path / "events.jsonl")
 
+    # Deliver events live (rebuild would heal a trailing consensus.started
+    # as an interrupted run — here the job is genuinely running)
+    state = PipelineState()
+    log.add_listener(state.apply)
     log.emit("specimen.updated", {"specimen_id": "A", "pool": "p1", "total_reads": 100})
     log.emit("consensus.started", {"specimen_id": "A", "job_id": "j1", "read_count": 100})
     # A is now CONSENSUS_RUNNING
-
-    state = PipelineState()
-    state.rebuild(log)
 
     scheduler = Scheduler(config, state)
     jobs = scheduler.get_ready_jobs()
@@ -152,11 +153,11 @@ def test_available_slots(tmp_path):
     config = _make_config(tmp_path, workers=2)
     log = EventLog(tmp_path / "events.jsonl")
 
+    # Deliver events live — see test_skip_running
+    state = PipelineState()
+    log.add_listener(state.apply)
     log.emit("specimen.updated", {"specimen_id": "A", "pool": "p1", "total_reads": 100})
     log.emit("consensus.started", {"specimen_id": "A", "job_id": "j1", "read_count": 100})
-
-    state = PipelineState()
-    state.rebuild(log)
 
     scheduler = Scheduler(config, state)
     assert scheduler.available_slots() == 1
