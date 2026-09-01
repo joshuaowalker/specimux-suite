@@ -250,16 +250,23 @@
     gap: 0.8vh 4vw; margin-top: 4.5vh;
   }
   .burst-item {
+    display: flex; align-items: center; gap: 0.55em;
     font-family: var(--serif); font-style: italic;
     font-size: clamp(1.05rem, 2vw, 1.9rem);
     color: var(--text);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     animation: rise 0.7s ease both;
   }
   .burst-item.first { color: var(--amber); }
+  .burst-item .bn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* iNat square thumbnails (75px source) — tiny, so a busy card stays light */
+  .burst-item .thumb {
+    width: 2.1em; height: 2.1em; border-radius: 5px;
+    object-fit: cover; flex: none;
+  }
+  .burst-item .thumb-blank { display: block; background: #221c17; }
   .burst-item .pct {
     font-family: var(--mono); font-style: normal;
-    color: var(--faint); font-size: 0.68em; margin-left: 0.6em;
+    color: var(--faint); font-size: 0.68em; flex: none;
   }
 
   /* ---- family portrait: taxonomic breakdown bars ---- */
@@ -380,6 +387,7 @@ function clusterFlagged(cluster) { return SpecimuxDerived.clusterFilterRouting(c
 function getTopMatch(s) { return SpecimuxDerived.getTopMatch(s, 'clusters', state.summarizeFilter); }
 function getTopHit(s) { const m = getTopMatch(s); return m ? m.top_hits[0] : null; }
 function agreementRank(s, hit) { return SpecimuxDerived.agreementRank(s, hit, state.genusLineages); }
+function effectiveTargetStatus(s) { return SpecimuxDerived.effectiveTargetStatus(s, 'clusters', { genusLineages: state.genusLineages, summarizeFilter: state.summarizeFilter }); }
 
 function getSpec(sid) {
   if (!state.specimens[sid]) {
@@ -481,15 +489,30 @@ function photoSources(photo) {
 }
 
 // ============================================================
-// Card engine: priority queue + rate-adaptive dwell + filler
+// Card engine: weighted channels — programming, not queueing
 // ============================================================
-const DWELL = { base: 12000, busy: 7000, slammed: 5000, stats: 9000 };
+// /present is a highlights reel, not a data feed: each slot on stage is
+// drawn from weighted channels, and only strong novelty interrupts the
+// programming. News is perishable — whatever the news slots don't reach
+// was, by definition, not attention-worthy, and the good material
+// resurfaces through encores. Channels:
+//   breaking    strong novel debuts — the one true interrupt, always solo
+//   news        fresh identifications: one slot = the top-ranked pending
+//               item (label mix-up > surprise > milestone) or a burst
+//   encore      re-shows: unmatched mysteries at doubling intervals, and
+//               least-recently-seen photo highlights
+//   bigpicture  family portrait (the graph gets top billing), run stats
+//   people      refinement journeys, leaderboards, field-ID confirmations
+// The weights, dwell table, and thresholds below are the field-tuning
+// surface. Weights are photo-biased: encore (photo cards) outranks the
+// text-heavy channels.
+const CHANNEL_WEIGHTS = { news: 0.40, encore: 0.25, bigpicture: 0.20, people: 0.15 };
+const DWELL = { breaking: 14000, news: 11000, program: 9000 };
+const NEWS_TTL_MS = 10 * 60000;    // unaired news older than this expires
+const ENCORE_FIRST_MS = 8 * 60000; // first re-show delay; doubles per encore
 const NOVEL_SOFT = 0.98, NOVEL_STRONG = 0.90;
-// When this many identifications are waiting, one burst card honors them
-// together — dwell-shortening alone would blur past every individual
-// moment. Strong novelty and milestones still play solo; first-of-genus
-// joins the burst under load (amber in the grid) but gets a solo card
-// when the room is quiet.
+// A news slot with this many routine items pending shows them as one burst
+// card — every name on screen — instead of racing through them one by one.
 const BURST_MIN = 6, BURST_MAX = 12;
 // Run milestones: fired live when a count crosses a threshold; thresholds
 // already passed at bootstrap are seeded as announced (snapshot is history).
@@ -516,20 +539,46 @@ function novelSupported(s, match) {
   return !!cluster && (cluster.size || 0) >= NOVEL_MIN_CLUSTER_READS;
 }
 
-const queue = [];              // [{key, type, priority, sid, at}]
+// Channel state
+const breaking = [];   // [{sid, at}] — strong novel debuts
+const news = [];       // [{key, sid?, at, rank, firstOfGenus?, milestone?}]
+const encoreTracker = {};  // sid -> {debutReads, interval, nextAt}
 const announcedGenera = new Set();  // genera already seen this run
-const lastShown = {};          // sid -> timestamp (for highlight recycling)
-let fillerIdx = 0;
+const lastShown = {};      // sid -> timestamp (for highlight recycling)
+let slotCounter = 0;
+const lastAired = {};      // channel -> slot index it last aired
+let bigpictureIdx = 0, peopleIdx = 0;
 let paused = false;
 let dwellTimer = null;
 let currentCardEl = null;
 let bootstrapped = false;
 
-function enqueue(card) {
-  const i = queue.findIndex(c => c.key === card.key);
-  if (i >= 0) queue.splice(i, 1);
-  queue.push(card);
-  queue.sort((a, b) => a.priority - b.priority || a.at - b.at);
+// Rank within the news channel; a slot airs the best-ranked pending item.
+const NEWS_RANK = { mixup: 0, surprise: 1, milestone: 2, routine: 3 };
+
+function pushNews(item) {
+  const i = news.findIndex(c => c.key === item.key);
+  if (i >= 0) news.splice(i, 1);
+  news.push(item);
+  // Newest first within a rank: the news slot shows what is fresh and
+  // lets the rest expire — perishability is the attention mechanic.
+  news.sort((a, b) => NEWS_RANK[a.rank] - NEWS_RANK[b.rank] || b.at - a.at);
+}
+
+// Mirrors ALLOWED_ICONIC in inat_check.py: an observation filed outside
+// these kingdoms that nonetheless sequences cleanly is a likely
+// field-label mix-up (myxomycetes are foray-legit, hence Protozoa).
+function isLabelMixup(s) {
+  const iconic = s.community_iconic_taxon || '';
+  return !!iconic && iconic !== 'Fungi' && iconic !== 'Protozoa';
+}
+
+// Confident DNA pointing somewhere taxonomically far from the field ID:
+// the ✗ class only — 'near' (shared family/tribe, usually a taxonomy
+// split like Cortinarius→Phlegmacium) is deliberately not a surprise.
+function isSurprise(s, hit, identity) {
+  if (!s.community_taxon || identity < NOVEL_STRONG) return false;
+  return effectiveTargetStatus(s) === 'off-target';
 }
 
 // Called from applyEvent when a specimen gains/refreshes hits. During
@@ -539,44 +588,167 @@ function onIdentification(s) {
   const hit = getTopHit(s);
   if (!hit) return;
   const identity = hitIdentity(hit);
+  const supported = novelSupported(s, getTopMatch(s));
+  // Unmatched mysteries earn re-shows at growing intervals
+  if (identity < NOVEL_SOFT && supported && !encoreTracker[s.specimen_id]) {
+    encoreTracker[s.specimen_id] = {
+      debutReads: s.total_reads,
+      interval: ENCORE_FIRST_MS,
+      nextAt: Date.now() + ENCORE_FIRST_MS,
+    };
+  }
+  if (identity < NOVEL_STRONG && supported) {
+    if (!breaking.some(c => c.sid === s.specimen_id)) {
+      breaking.push({ sid: s.specimen_id, at: Date.now() });
+    }
+    return;
+  }
   const genus = hitGenus(hit);
-  const firstOfGenus = genus && !announcedGenera.has(genus.toLowerCase());
-  let priority = 3;
-  if (identity < NOVEL_STRONG && novelSupported(s, getTopMatch(s))) priority = 1;
-  else if (firstOfGenus) priority = 2;
-  enqueue({ key: s.specimen_id, type: 'identification', priority, sid: s.specimen_id, at: Date.now(), firstOfGenus });
+  // First-of-genus keeps its eyebrow and its amber in bursts, but no
+  // longer outranks routine news — a second-in-genus identification is
+  // barely less interesting (Josh).
+  const firstOfGenus = !!genus && !announcedGenera.has(genus.toLowerCase());
+  let rank = 'routine';
+  if (isLabelMixup(s)) rank = 'mixup';
+  else if (isSurprise(s, hit, identity)) rank = 'surprise';
+  pushNews({ key: s.specimen_id, sid: s.specimen_id, at: Date.now(), rank, firstOfGenus });
 }
 
-function nextDwell(type) {
-  if (type !== 'identification') return DWELL.stats;
-  if (queue.length > 15) return DWELL.slammed;
-  if (queue.length > 5) return DWELL.busy;
-  return DWELL.base;
+function expireNews() {
+  const cutoff = Date.now() - NEWS_TTL_MS;
+  for (let i = news.length - 1; i >= 0; i--) {
+    if (news[i].at < cutoff) news.splice(i, 1);
+  }
 }
 
-// Each filler type gates on having enough data to be worth a card, so early
-// in a run the rotation degrades to highlights + stats.
-function pickFiller() {
-  const rotation = ['highlight', 'stats', 'highlight', 'families', 'highlight',
-                    'leaderboard', 'highlight', 'refined', 'highlight', 'fieldids'];
-  for (let i = 0; i < rotation.length; i++) {
-    const type = rotation[(fillerIdx + i) % rotation.length];
-    if (type === 'highlight') {
-      const sid = pickHighlight();
-      if (sid) { fillerIdx += i + 1; return { type: 'identification', sid, recycled: true }; }
-    } else if (type === 'leaderboard') {
-      if (leaderboardRows().length >= 2) { fillerIdx += i + 1; return { type: 'leaderboard' }; }
-    } else if (type === 'fieldids') {
-      if (fieldIdRows().length >= 2) { fillerIdx += i + 1; return { type: 'fieldids' }; }
-    } else if (type === 'families') {
-      if (familyRows().length >= 3) { fillerIdx += i + 1; return { type: 'families' }; }
-    } else if (type === 'refined') {
-      if (refinedRows().length >= 2) { fillerIdx += i + 1; return { type: 'refined' }; }
+function encoreDue() {
+  const now = Date.now();
+  return Object.keys(encoreTracker)
+    .filter(sid => {
+      const s = state.specimens[sid];
+      return encoreTracker[sid].nextAt <= now && s && getTopHit(s);
+    })
+    .sort((a, b) => encoreTracker[a].nextAt - encoreTracker[b].nextAt);
+}
+
+function channelAvailable(ch) {
+  if (ch === 'news') return news.length > 0;
+  if (ch === 'encore') return encoreDue().length > 0 || pickHighlight() !== null;
+  if (ch === 'people') {
+    return refinedRows().length >= 2 || leaderboardRows().length >= 2
+        || fieldIdRows().length >= 2;
+  }
+  return true; // bigpicture: stats needs nothing
+}
+
+// Weighted draw with two modifiers: a channel is damped right after it
+// airs (no double features — news less so, liveness is its point), and
+// one starved for 8+ slots while it has content is boosted.
+function drawChannel() {
+  const entries = [];
+  for (const [ch, w] of Object.entries(CHANNEL_WEIGHTS)) {
+    if (!channelAvailable(ch)) continue;
+    let weight = w;
+    const last = lastAired[ch] ?? slotCounter - 8;
+    if (last === slotCounter - 1) weight *= (ch === 'news' ? 0.6 : 0.3);
+    else if (slotCounter - last >= 8) weight *= 3;
+    entries.push([ch, weight]);
+  }
+  if (!entries.length) return 'bigpicture';
+  const total = entries.reduce((sum, [, w]) => sum + w, 0);
+  let r = Math.random() * total;
+  for (const [ch, w] of entries) {
+    r -= w;
+    if (r <= 0) return ch;
+  }
+  return entries[entries.length - 1][0];
+}
+
+// --- per-channel slot resolution: {render, dwell, sid?} or null ---
+function newsSlot() {
+  const lead = news[0];
+  if (!lead) return null;
+  if (lead.rank !== 'routine') {
+    news.shift();
+    if (lead.rank === 'milestone') {
+      return { render: () => renderMilestone(lead.milestone), dwell: DWELL.news };
+    }
+    const s = state.specimens[lead.sid];
+    if (!s || !getTopHit(s)) return null;
+    return {
+      render: () => (lead.rank === 'mixup' ? renderMixup(s) : renderSurprise(s)),
+      dwell: DWELL.news, sid: lead.sid,
+    };
+  }
+  if (news.length >= BURST_MIN) {
+    const batch = news.splice(0, BURST_MAX);
+    return { render: () => renderBurst(batch), dwell: DWELL.program };
+  }
+  const item = news.shift();
+  const s = state.specimens[item.sid];
+  if (!s || !getTopHit(s)) return null;
+  return {
+    render: () => renderIdentification(s, getTopHit(s), item),
+    dwell: DWELL.news, sid: item.sid,
+  };
+}
+
+function encoreSlot() {
+  const due = encoreDue();
+  if (due.length) {
+    const sid = due[0];
+    const t = encoreTracker[sid];
+    const s = state.specimens[sid];
+    const hit = getTopHit(s);
+    const stillNovel = hitIdentity(hit) < NOVEL_SOFT && novelSupported(s, getTopMatch(s));
+    if (stillNovel) {
+      t.interval *= 2;
+      t.nextAt = Date.now() + t.interval;
     } else {
-      fillerIdx += i + 1; return { type: 'stats' };
+      // One "mystery solved" appearance, then retire the encore
+      delete encoreTracker[sid];
+    }
+    return {
+      render: () => renderIdentification(s, hit, { encore: true, debutReads: t.debutReads }),
+      dwell: DWELL.program, sid,
+    };
+  }
+  const sid = pickHighlight();
+  if (!sid) return null;
+  const s = state.specimens[sid];
+  return {
+    render: () => renderIdentification(s, getTopHit(s), { recycled: true }),
+    dwell: DWELL.program, sid,
+  };
+}
+
+function bigpictureSlot() {
+  // The graph gets top billing over the bare numbers (2:1)
+  const rot = ['families', 'stats', 'families'];
+  for (let i = 0; i < rot.length; i++) {
+    const t = rot[(bigpictureIdx + i) % rot.length];
+    if (t === 'families' && familyRows().length < 3) continue;
+    bigpictureIdx += i + 1;
+    return { render: t === 'families' ? renderFamilies : renderStats, dwell: DWELL.program };
+  }
+  return { render: renderStats, dwell: DWELL.program };
+}
+
+function peopleSlot() {
+  const rot = ['refined', 'leaderboard', 'fieldids'];
+  for (let i = 0; i < rot.length; i++) {
+    const t = rot[(peopleIdx + i) % rot.length];
+    if (t === 'refined' && refinedRows().length >= 2) {
+      peopleIdx += i + 1; return { render: renderRefined, dwell: DWELL.program };
+    }
+    if (t === 'leaderboard' && leaderboardRows().length >= 2) {
+      peopleIdx += i + 1; return { render: renderLeaderboard, dwell: DWELL.program };
+    }
+    if (t === 'fieldids' && fieldIdRows().length >= 2) {
+      peopleIdx += i + 1; return { render: renderFieldIds, dwell: DWELL.program };
     }
   }
-  return { type: 'stats' };
+  return null;
 }
 
 // Least-recently-shown identified specimen with a photo; novel ones first.
@@ -598,46 +770,40 @@ function pickHighlight() {
 function showNext() {
   clearTimeout(dwellTimer);
   if (paused) return;
-  let card;
-  // The queue is priority-sorted, so when the head is an identification at
-  // priority 2+ nothing truly loud (strong novelty, milestone) is waiting —
-  // roll the backlog into one burst card instead of racing through it at
-  // minimum dwell. First-of-genus cards join the burst under load (amber
-  // in the grid); when the room is quiet they still get a solo card.
-  if (queue.length >= BURST_MIN && queue[0].priority >= 2
-      && queue[0].type === 'identification') {
-    const batch = queue.splice(0, BURST_MAX)
-      .filter(c => c.type === 'identification');
-    card = { type: 'burst', batch };
-  } else {
-    card = queue.length ? queue.shift() : pickFiller();
-  }
-  let el = null, type = card.type;
-  if (type === 'identification') {
-    const s = state.specimens[card.sid];
+  expireNews();
+  slotCounter++;
+  let slot = null, channel = null;
+  if (breaking.length) {
+    const c = breaking.shift();
+    const s = state.specimens[c.sid];
     const hit = s && getTopHit(s);
-    if (!hit) { dwellTimer = setTimeout(showNext, 50); return; }
-    el = renderIdentification(s, hit, card);
-    lastShown[card.sid] = Date.now();
-    const g = hitGenus(hit);
-    if (g) announcedGenera.add(g.toLowerCase());
-  } else if (type === 'burst') {
-    el = renderBurst(card.batch);
-  } else if (type === 'milestone') {
-    el = renderMilestone(card.milestone);
-  } else if (type === 'families') {
-    el = renderFamilies();
-  } else if (type === 'refined') {
-    el = renderRefined();
-  } else if (type === 'leaderboard') {
-    el = renderLeaderboard();
-  } else if (type === 'fieldids') {
-    el = renderFieldIds();
-  } else {
-    el = renderStats();
+    if (hit) {
+      slot = { render: () => renderIdentification(s, hit, {}), dwell: DWELL.breaking, sid: c.sid };
+      channel = 'breaking';
+    }
   }
-  swapCard(el);
-  dwellTimer = setTimeout(showNext, nextDwell(type));
+  // A resolver can come up empty (a specimen superseded mid-queue, an
+  // exhausted channel) — redraw a few times before falling back to stats.
+  for (let tries = 0; !slot && tries < 4; tries++) {
+    channel = drawChannel();
+    slot = channel === 'news' ? newsSlot()
+         : channel === 'encore' ? encoreSlot()
+         : channel === 'people' ? peopleSlot()
+         : bigpictureSlot();
+  }
+  if (!slot) {
+    slot = { render: renderStats, dwell: DWELL.program };
+    channel = 'bigpicture';
+  }
+  lastAired[channel] = slotCounter;
+  if (slot.sid) {
+    lastShown[slot.sid] = Date.now();
+    const s = state.specimens[slot.sid];
+    const g = s && hasIdentification(s) ? hitGenus(getTopHit(s)) : '';
+    if (g) announcedGenera.add(g.toLowerCase());
+  }
+  swapCard(slot.render());
+  dwellTimer = setTimeout(showNext, slot.dwell);
 }
 
 // Shrink the display name until no word overflows its line — a long epithet
@@ -710,7 +876,12 @@ function renderIdentification(s, hit, card) {
   // is not the same claim as "undescribed species" — a distant sequence may
   // be undescribed, described-but-unsequenced, or just a rough read.
   let eyebrow;
-  if (strong) eyebrow = 'Beyond the reference library';
+  if (card.encore) {
+    // A re-aired mystery; if more reads resolved it since its debut, this
+    // one appearance closes the arc and the encore retires.
+    eyebrow = strong ? 'Still unmatched' : soft ? 'Still no close match'
+            : 'Mystery solved — matched with more reads';
+  } else if (strong) eyebrow = 'Beyond the reference library';
   else if (soft) eyebrow = 'No close reference match';
   else if (card.firstOfGenus) eyebrow = `First ${esc(hitGenus(hit))} of the run`;
   else if (card.recycled) eyebrow = 'From this run';
@@ -739,8 +910,6 @@ function renderIdentification(s, hit, card) {
   const clusters = (s.clusters || []).length;
   const communityGenus = (s.community_genus || (s.community_taxon || '').split(/\s+/)[0] || '');
   const onTarget = communityGenus && isHitOnTarget(hit, communityGenus.toLowerCase());
-  const observer = s.inat_observer || {};
-  const obsId = (s.specimen_id.match(/iNat(\d+)/) || [])[1];
 
   const agreement = agreementRank(s, hit);
   let fieldHtml = '';
@@ -765,19 +934,16 @@ function renderIdentification(s, hit, card) {
       fieldHtml += ` <span class="ok">— same ${esc(agreement.level)}: ${esc(agreement.name)}</span>`;
     }
   }
-  let creditHtml = '';
-  if (observer.login) {
-    creditHtml += `Collected by <b>${esc(observer.name || observer.login)}</b>`;
-  }
-  if (obsId) creditHtml += `${creditHtml ? ' · ' : ''}iNat observation ${esc(obsId)}`;
-  if (photo && photo.attribution) creditHtml += `<br>Photo ${esc(photo.attribution)}`;
+  const creditHtml = creditLine(s);
 
+  const growth = card.encore && card.debutReads != null && s.total_reads > card.debutReads
+    ? `<span>+${fmt(s.total_reads - card.debutReads)} reads since first seen</span>` : '';
   const dataHtml = soft
     ? `<span>${fmt(s.total_reads)} reads</span>
-       ${clusters ? `<span>${clusters} sequence${clusters > 1 ? 's' : ''}</span>` : ''}`
+       ${clusters ? `<span>${clusters} sequence${clusters > 1 ? 's' : ''}</span>` : ''}${growth}`
     : `<span class="identity">${(identity * 100).toFixed(1)}% identity</span>
        <span>${fmt(s.total_reads)} reads</span>
-       ${clusters ? `<span>${clusters} sequence${clusters > 1 ? 's' : ''}</span>` : ''}`;
+       ${clusters ? `<span>${clusters} sequence${clusters > 1 ? 's' : ''}</span>` : ''}${growth}`;
 
   el.innerHTML = `
     <div class="text-pane">
@@ -791,16 +957,102 @@ function renderIdentification(s, hit, card) {
     <div class="photo-pane"></div>
     <div class="ribbon"></div>`;
 
-  if (photo) {
-    const img = document.createElement('img');
-    const src = photoSources(photo);
-    img.alt = '';
-    img.onerror = () => { if (img.src !== src.remote && src.remote) img.src = src.remote; else el.classList.add('no-photo'); };
-    img.onload = () => { img.dataset.firstSrc = img.currentSrc; };
-    img.src = src.local;
-    el.querySelector('.photo-pane').appendChild(img);
-    if ((s.inat_photos || []).length > 1) cyclePhotos(el, img, s.inat_photos);
-  }
+  attachPhoto(el, s);
+  loadRibbon(el.querySelector('.ribbon'), s, getTopMatch(s));
+  return el;
+}
+
+// Shared photo-pane plumbing: local cache first, iNat host fallback,
+// multi-photo cycling. Adds .no-photo when nothing loads.
+function attachPhoto(el, s) {
+  const photo = (s.inat_photos || [])[0];
+  if (!photo) { el.classList.add('no-photo'); return; }
+  const img = document.createElement('img');
+  const src = photoSources(photo);
+  img.alt = '';
+  img.onerror = () => { if (img.src !== src.remote && src.remote) img.src = src.remote; else el.classList.add('no-photo'); };
+  img.onload = () => { img.dataset.firstSrc = img.currentSrc; };
+  img.src = src.local;
+  el.querySelector('.photo-pane').appendChild(img);
+  if ((s.inat_photos || []).length > 1) cyclePhotos(el, img, s.inat_photos);
+}
+
+function creditLine(s) {
+  const observer = s.inat_observer || {};
+  const obsId = (s.specimen_id.match(/iNat(\d+)/) || [])[1];
+  const photo = (s.inat_photos || [])[0];
+  let credit = '';
+  if (observer.login) credit += `Collected by <b>${esc(observer.name || observer.login)}</b>`;
+  if (obsId) credit += `${credit ? ' · ' : ''}iNat observation ${esc(obsId)}`;
+  if (photo && photo.attribution) credit += `<br>Photo ${esc(photo.attribution)}`;
+  return credit;
+}
+
+// "Surprise!" — confident DNA far from the field ID (different family or
+// beyond). The copy stays honest about the candidate explanations: the
+// sequence is real either way.
+function renderSurprise(s) {
+  const hit = getTopHit(s);
+  const el = document.createElement('div');
+  el.className = 'card';
+  const name = splitBinomial(hit.name || hit.ref_id || '');
+  // Surprises exclude 'near' (shared order..tribe) by construction, so any
+  // agreement left is class-or-higher — "not even the same order" is
+  // always the accurate summary.
+  const shared = 'Not even the same order.';
+  const credit = creditLine(s);
+  el.innerHTML = `
+    <div class="text-pane">
+      <div class="eyebrow">Surprise!</div>
+      <div class="fieldrow" style="margin-top:0;margin-bottom:2vh;animation-delay:0.1s">
+        Field ID said <span class="fieldname">${esc(s.community_taxon)}</span> — but the sequence reads…</div>
+      <div class="binomial">
+        <span class="genus">${esc(name.genus)}</span>
+        ${name.rest ? `<span class="epithet">${esc(name.rest)}</span>` : ''}
+      </div>
+      <div class="datarow">
+        <span class="identity">${(hitIdentity(hit) * 100).toFixed(1)}% identity</span>
+        <span>${fmt(s.total_reads)} reads</span>
+      </div>
+      <div class="fieldrow">${shared} A lookalike, a parasite riding the specimen, or a label mix-up — the fun part is finding out.</div>
+      ${credit ? `<div class="creditrow">${credit}</div>` : ''}
+    </div>
+    <div class="photo-pane"></div>
+    <div class="ribbon"></div>`;
+  attachPhoto(el, s);
+  loadRibbon(el.querySelector('.ribbon'), s, getTopMatch(s));
+  return el;
+}
+
+// "Hmmm…" — the observation is filed under a non-fungal kingdom but the
+// sample sequences cleanly: the label-mix-up class the typo audit exists
+// for. Heals live if an admin correction lands (specimens.taxa refreshes
+// community_iconic_taxon).
+function renderMixup(s) {
+  const hit = getTopHit(s);
+  const el = document.createElement('div');
+  el.className = 'card';
+  const name = splitBinomial(hit.name || hit.ref_id || '');
+  const credit = creditLine(s);
+  el.innerHTML = `
+    <div class="text-pane">
+      <div class="eyebrow">Hmmm…</div>
+      <div class="binomial">
+        <span class="genus">${esc(name.genus)}</span>
+        ${name.rest ? `<span class="epithet">${esc(name.rest)}</span>` : ''}
+      </div>
+      <div class="datarow">
+        <span class="identity">${(hitIdentity(hit) * 100).toFixed(1)}% identity</span>
+        <span>${fmt(s.total_reads)} reads</span>
+      </div>
+      <div class="fieldrow">…but this observation is filed as
+        <span class="fieldname">${esc(s.community_taxon || 'unknown')}</span> — ${esc(s.community_iconic_taxon)}, not a fungus.<br>
+        Probably a field-label mix-up: flagged for review.</div>
+      ${credit ? `<div class="creditrow">${credit}</div>` : ''}
+    </div>
+    <div class="photo-pane"></div>
+    <div class="ribbon"></div>`;
+  attachPhoto(el, s);
   loadRibbon(el.querySelector('.ribbon'), s, getTopMatch(s));
   return el;
 }
@@ -967,7 +1219,7 @@ function renderBurst(batch) {
     const g = hitGenus(hit);
     if (g) announcedGenera.add(g.toLowerCase());
     items.push({ name: hit.name || hit.ref_id || '', first: c.firstOfGenus,
-                 identity: hitIdentity(hit) });
+                 identity: hitIdentity(hit), photo: (s.inat_photos || [])[0] });
   }
   const oldest = Math.min(...batch.map(c => c.at));
   const mins = Math.max(1, Math.round((Date.now() - oldest) / 60000));
@@ -977,12 +1229,15 @@ function renderBurst(batch) {
       <div class="eyebrow">A busy stretch</div>
       <div class="stat">
         <div class="num">${items.length}</div>
-        <div class="lbl">identifications in the last ${mins} minute${mins > 1 ? 's' : ''}${firsts ? ` · ${firsts} new gener${firsts > 1 ? 'a' : 'us'} for the run` : ''}</div>
+        <div class="lbl">identifications in the last ${mins} minute${mins > 1 ? 's' : ''}${firsts ? ` · ${firsts} new ${firsts > 1 ? 'genera' : 'genus'} for the run` : ''}</div>
       </div>
       <div class="burst-grid">
         ${items.map((it, i) => `
           <div class="burst-item${it.first ? ' first' : ''}" style="animation-delay:${(0.15 + i * 0.06).toFixed(2)}s">
-            ${esc(it.name)}<span class="pct">${(it.identity * 100).toFixed(0)}%</span>
+            ${it.photo && it.photo.url
+              ? `<img class="thumb" src="${esc(it.photo.url)}" alt="" onerror="this.remove()">`
+              : '<span class="thumb thumb-blank"></span>'}
+            <span class="bn">${esc(it.name)}</span><span class="pct">${(it.identity * 100).toFixed(0)}%</span>
           </div>`).join('')}
       </div>
     </div>`;
@@ -1106,17 +1361,14 @@ function checkMilestones() {
       const key = metric + ':' + t;
       if (st[metric] >= t && !passedMilestones.has(key)) {
         passedMilestones.add(key);
-        // Collapse: a newer threshold supersedes a queued lower one for the
+        // Collapse: a newer threshold supersedes a pending lower one for the
         // same metric — showing "100" after 150 was crossed reads as stale.
-        for (let i = queue.length - 1; i >= 0; i--) {
-          if (queue[i].type === 'milestone' && queue[i].milestone.metric === metric
-              && queue[i].milestone.value < t) queue.splice(i, 1);
+        for (let i = news.length - 1; i >= 0; i--) {
+          if (news[i].rank === 'milestone' && news[i].milestone.metric === metric
+              && news[i].milestone.value < t) news.splice(i, 1);
         }
-        // 1.5: ahead of first-of-genus, behind strong novelty — counts
-        // move fast when identifications land in batches, so a milestone
-        // that waits its turn behind a run of solo cards goes stale.
-        enqueue({ key: 'milestone:' + key, type: 'milestone', priority: 1.5,
-                  at: Date.now(), milestone: { value: t, metric } });
+        pushNews({ key: 'milestone:' + key, at: Date.now(), rank: 'milestone',
+                   milestone: { value: t, metric } });
       }
     }
   }
