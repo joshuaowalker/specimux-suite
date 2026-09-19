@@ -18,6 +18,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .util import USER_AGENT
 logger = logging.getLogger(__name__)
 
 # 1024px max dimension — full-bleed quality on a projector, ~550KB each.
@@ -119,7 +120,7 @@ def prefetch_photos(
         if is_mo:
             _mo_photo_lock.acquire()
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 tmp.write_bytes(resp.read())
             tmp.rename(dest)

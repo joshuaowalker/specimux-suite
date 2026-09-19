@@ -31,6 +31,7 @@ import urllib.request
 from pathlib import Path
 
 from .inat import MAX_PHOTOS_PER_OBSERVATION, fetch_genus_lineages
+from .util import USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,6 @@ IMAGE_HOST = "https://images.mushroomobserver.org"
 OBSERVATION_URL = "https://mushroomobserver.org/obs/{id}"
 MAX_BATCH_SIZE = 100
 MIN_REQUEST_INTERVAL_S = 5.0
-_USER_AGENT = "specimux-suite/0.2"
 
 # Photo size variants served by the image host: thumb (160), 320, 640, 960,
 # 1280, orig. `thumb` plays the role of iNat's `square`; 960 ≈ iNat `large`.
@@ -159,7 +159,7 @@ def _request(ids: list[str]) -> dict:
         "id": ",".join(ids), "detail": "high", "format": "json",
     })
     req = urllib.request.Request(
-        f"{API_URL}?{query}", headers={"User-Agent": _USER_AGENT})
+        f"{API_URL}?{query}", headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read())

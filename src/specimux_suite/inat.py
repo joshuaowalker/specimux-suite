@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 from pathlib import Path
 
+from .util import USER_AGENT
 logger = logging.getLogger(__name__)
 
 MAX_BATCH_SIZE = 200
@@ -137,7 +138,7 @@ def _resolve_genera(ancestor_ids_by_taxon: dict[int, list[int]]) -> dict[int, st
         url = f"{TAXA_API_URL}?per_page={MAX_BATCH_SIZE}&id={ids_str}"
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
 
@@ -241,7 +242,7 @@ def fetch_community_taxa(
         url = f"{API_URL}?per_page={MAX_BATCH_SIZE}&id={ids_str}"
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
 
@@ -403,7 +404,7 @@ def fetch_genus_lineages(
         rank_q = f"&rank={urllib.parse.quote(rank)}" if rank else ""
         url = f"{TAXA_API_URL}?q={urllib.parse.quote(genus)}{rank_q}&per_page=10"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
             taxon = _pick_genus_match(data.get("results", []), genus, rank)
@@ -433,7 +434,7 @@ def fetch_genus_lineages(
         ids_str = ",".join(str(tid) for tid in batch)
         url = f"{TAXA_API_URL}?per_page={MAX_BATCH_SIZE}&id={ids_str}"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
             for t in data.get("results", []):

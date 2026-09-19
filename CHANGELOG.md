@@ -5,7 +5,9 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
-## Unreleased
+## 0.2.1 — 2026-09-19
+
+Mushroom Observer joins iNaturalist as a field-ID source.
 
 ### Mushroom Observer field IDs
 

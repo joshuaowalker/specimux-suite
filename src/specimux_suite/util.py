@@ -7,6 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import __version__
+
+# Sent on every outbound HTTP request (iNaturalist, Mushroom Observer, photo hosts).
+USER_AGENT = f"specimux-suite/{__version__}"
+
 logger = logging.getLogger(__name__)
 
 

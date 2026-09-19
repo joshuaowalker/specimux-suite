@@ -21,6 +21,7 @@ import urllib.request
 from pathlib import Path
 
 from .inat import API_URL, MAX_BATCH_SIZE, apply_corrections, extract_inat_ids
+from .util import USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,7 @@ def fetch_observations_summary(obs_ids: list[str], abort=None, progress=None) ->
         batch = obs_ids[i : i + MAX_BATCH_SIZE]
         url = f"{API_URL}?per_page={MAX_BATCH_SIZE}&id={','.join(batch)}"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
             for obs in data.get("results", []):
