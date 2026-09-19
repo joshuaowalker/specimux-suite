@@ -102,7 +102,7 @@
 <script>
 'use strict';
 
-const state = { version: 0, specimens: {}, suggestions: [], corrections: {}, dismissed: new Set() };
+const state = { version: 0, specimens: {}, suggestions: [], corrections: {}, dismissed: new Set(), moUnresolved: [] };
 
 // Admin actions are ordinary JSON POSTs with a marker header (the server
 // requires it — it forces a CORS preflight that browsers refuse cross-origin).
@@ -253,6 +253,35 @@ sections.push({
   },
 });
 
+// ------------------------------------------------------------------
+// Section: Mushroom Observer IDs not found (no audit or corrections for
+// MO — all of MO is Fungi and MO volume per run is low — so this is a
+// plain list for checking the sheet; the fix is a corrected sheet.)
+// ------------------------------------------------------------------
+sections.push({
+  id: 'mo',
+  render() {
+    const rows = state.moUnresolved.map(u => `<tr>
+      <td><span class="sid">${esc(u.specimen_id)}</span></td>
+      <td><a href="https://mushroomobserver.org/obs/${esc(u.obs_id)}" target="_blank" rel="noopener">MO${esc(u.obs_id)}</a></td>
+    </tr>`).join('');
+    return `
+      <div class="section-head">
+        <h2>Mushroom Observer IDs not found</h2>
+        <span class="meta">${state.moUnresolved.length} unresolved</span>
+      </div>
+      <div class="section-note">
+        Specimens whose <code>MO&lt;id&gt;</code> tag names an observation Mushroom Observer
+        reports as nonexistent or deleted. These specimens run without a field ID.
+        There is no automatic correction for MO ids: fix the specimen sheet and restart.
+      </div>
+      ${state.moUnresolved.length ? `<table>
+        <tr><th>Specimen</th><th>Observation</th></tr>
+        ${rows}
+      </table>` : '<div class="empty">All Mushroom Observer IDs resolved.</div>'}`;
+  },
+});
+
 async function acceptCorrection(sid, obsId) {
   try {
     await adminPost('/api/admin/inat/correction', { specimen_id: sid, new_obs_id: obsId });
@@ -298,6 +327,9 @@ function applyEvent(event) {
     case 'inat.suggestion_dismissed':
       state.dismissed.add(d.specimen_id);
       break;
+    case 'mo.unresolved':
+      state.moUnresolved = d.unresolved || [];
+      break;
     case 'specimens.taxa':
       for (const [sid, taxon] of Object.entries(d.taxa || {})) {
         if (!state.specimens[sid] || typeof taxon !== 'object') continue;
@@ -333,7 +365,7 @@ function connect() {
   es.onopen = () => dot.classList.remove('down');
   es.onerror = () => { dot.classList.add('down'); es.close(); setTimeout(connect, 3000); };
   // EventSource only delivers named SSE events to registered listeners
-  for (const type of ['inat.suggestions', 'inat.correction', 'inat.suggestion_dismissed', 'specimens.taxa', 'consensus.completed', 'identification.completed']) {
+  for (const type of ['inat.suggestions', 'inat.correction', 'inat.suggestion_dismissed', 'mo.unresolved', 'specimens.taxa', 'consensus.completed', 'identification.completed']) {
     es.addEventListener(type, (e) => {
       const event = JSON.parse(e.data);
       state.version = Math.max(state.version, event.version);
@@ -350,6 +382,7 @@ async function bootstrap() {
     state.suggestions = snap.inat_suggestions || [];
     state.corrections = snap.inat_corrections || {};
     state.dismissed = new Set(snap.inat_dismissed || []);
+    state.moUnresolved = snap.mo_unresolved || [];
   } catch (e) { /* server not up; SSE reconnect will heal */ }
   render();
   connect();

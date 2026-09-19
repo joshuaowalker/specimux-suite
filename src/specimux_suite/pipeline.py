@@ -180,21 +180,31 @@ class Pipeline:
             target=self._lineage_fetcher, name="lineage-fetch", daemon=True,
         ).start()
 
-    def _fetch_mo_taxa(self, mo_ids: dict[str, str], progress=None) -> dict:
+    def _fetch_mo_taxa(self, mo_ids: dict[str, str], progress=None,
+                       lineage_progress=None, unresolved: list | None = None) -> tuple[dict, list]:
         """Fetch Mushroom Observer field IDs and emit specimens.taxa.
 
-        Returns the taxa fetched (for the photo prefetch). MO specimens get
-        no ID audit — see mo.py for the deliberate scope.
+        Returns (taxa fetched, unresolved ids). MO specimens get no ID
+        audit — see mo.py for the deliberate scope — so ids MO reports as
+        nonexistent are published as `mo.unresolved` for the admin page
+        (emitted whenever MO ids exist, so a fixed sheet clears the list).
+        `unresolved` may be passed in so a caller's progress callbacks can
+        read it while the fetch is still running.
         """
         if not mo_ids:
-            return {}
+            return {}, []
+        if unresolved is None:
+            unresolved = []
         taxa = fetch_mo_taxa(
             mo_ids, cache_dir=self.config.output_dir,
             abort=self._shutdown, progress=progress,
+            lineage_progress=lineage_progress, unresolved=unresolved,
         )
         if taxa:
             self.event_log.emit("specimens.taxa", {"taxa": taxa})
-        return taxa
+        if not self._shutdown.is_set():
+            self.event_log.emit("mo.unresolved", {"unresolved": unresolved})
+        return taxa, unresolved
 
     def prefetch_inat(self, show_progress: bool = True) -> None:
         """Blocking startup fetch of all field-ID data, with progress.
@@ -237,13 +247,33 @@ class Pipeline:
                     logger.warning(f"iNat ID check failed: {e}")
                 bar.finish(note="done")
             if self._mo_ids:
-                bar = StageProgress("Field IDs (Mushroom Observer)", enabled=show_progress)
+                # Two phases, two bars: the observations themselves, then
+                # (uncached genera only) mapping them onto iNat taxonomy —
+                # the slow phase, ~0.6 s per genus, that must not look hung.
+                obs_bar = StageProgress("Field IDs (Mushroom Obs.)", enabled=show_progress)
+                lineage_bar = None
+                unresolved: list = []
+
+                def _obs_note():
+                    return f"{len(unresolved)} id(s) not found" if unresolved else ""
+
+                def lineage_progress(done, total):
+                    nonlocal lineage_bar
+                    if lineage_bar is None:
+                        obs_bar.finish(note=_obs_note())
+                        lineage_bar = StageProgress("MO genera → iNat taxonomy", enabled=show_progress)
+                    lineage_bar.update(done, total)
                 try:
-                    mo_taxa = self._fetch_mo_taxa(dict(self._mo_ids), progress=bar.update)
+                    mo_taxa, _ = self._fetch_mo_taxa(
+                        dict(self._mo_ids), progress=obs_bar.update,
+                        lineage_progress=lineage_progress, unresolved=unresolved)
                     taxa = {**taxa, **mo_taxa}
                 except Exception as e:
                     logger.warning(f"Mushroom Observer fetch failed: {e}")
-                bar.finish()
+                if lineage_bar is None:
+                    obs_bar.finish(note=_obs_note())
+                else:
+                    lineage_bar.finish()
             # Restart backfill: resolve the lineages seeded from replayed
             # identifications now, before the fetcher thread starts.
             genera = []
@@ -320,7 +350,7 @@ class Pipeline:
                 logger.warning(f"iNat ID check failed: {e}")
         if self._mo_ids:
             try:
-                mo_taxa = self._fetch_mo_taxa(dict(self._mo_ids))
+                mo_taxa, _ = self._fetch_mo_taxa(dict(self._mo_ids))
                 if mo_taxa:
                     logger.info(f"Fetched Mushroom Observer field IDs for {len(mo_taxa)} specimens")
                 taxa = {**taxa, **mo_taxa}

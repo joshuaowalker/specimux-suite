@@ -20,7 +20,9 @@ minor releases may change APIs and formats.
   unchanged. Provisional names filed above genus (e.g. "Boletaceae sp.
   'AL01'") resolve at their actual rank and behave like an iNat
   family-level ID. MO specimens are excluded from the observation-ID
-  typo audit by design (all of MO is Fungi).
+  typo audit by design (all of MO is Fungi); ids MO reports as nonexistent
+  are listed on `/admin` instead. Startup shows the MO fetch as two
+  progress steps (observations, then mapping genera onto iNat taxonomy).
 
 ## 0.2.0 — 2026-09-01
 

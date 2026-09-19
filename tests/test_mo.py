@@ -151,11 +151,15 @@ def test_fetch_retries_without_missing_ids_and_maps_genus_onto_inat(tmp_path, mo
         return lineages if rank == "genus" else {n: any_rank.get(n, []) for n in names}
     with patch("specimux_suite.mo.fetch_genus_lineages", side_effect=fake_lineages) as fgl:
         progress = []
+        unresolved = []
         taxa = fetch_mo_taxa(
             {"a-MO500000": "500000", "a2-MO500000": "500000",
              "b-MO346513": "346513", "c-MO500024": "500024"},
             cache_dir=tmp_path, progress=lambda d, t: progress.append((d, t)),
+            lineage_progress=lambda d, t: None, unresolved=unresolved,
         )
+    assert unresolved == [{"specimen_id": "c-MO500024", "obs_id": "500024"}]
+    assert fgl.call_args_list[0].kwargs["progress"] is not None
     assert calls == [["500000", "346513", "500024"], ["500000", "346513"]]
     assert fgl.call_args_list[0].args[0] == ["Clitocybe", "Laccaria"]
     assert fgl.call_args_list[1].args[0] == ["Laccaria"]
@@ -206,6 +210,8 @@ def test_fetch_keeps_genus_when_lineage_fetch_fails_transiently(tmp_path, monkey
         taxa = fetch_mo_taxa({"x-MO0001": "1"}, cache_dir=tmp_path)
     assert taxa["x-MO0001"]["genus"] == "Clitocybe"
     assert taxa["x-MO0001"]["ancestors"] == []
+    # served this run, but not cached: the next run completes the lineage
+    assert not (tmp_path / "mo_taxon_cache.json").exists()
 
 
 def test_fetch_serves_cache_without_network(tmp_path, monkeypatch):
@@ -221,7 +227,9 @@ def test_fetch_survives_non_missing_api_error(tmp_path, monkeypatch):
     monkeypatch.setattr(mo.time, "sleep", lambda s: None)
     request, _ = _fake_api([{"errors": [{"code": "API2::BadParameterValue", "details": "nope"}]}])
     monkeypatch.setattr(mo, "_request", request)
-    assert fetch_mo_taxa({"x-MO0001": "1"}, cache_dir=tmp_path) == {}
+    unresolved = []
+    assert fetch_mo_taxa({"x-MO0001": "1"}, cache_dir=tmp_path, unresolved=unresolved) == {}
+    assert unresolved == []  # a failed batch is transient, not "not found"
     assert not (tmp_path / "mo_taxon_cache.json").exists()
 
 
@@ -303,6 +311,7 @@ def _make_pipeline(tmp_path, blocking=True):
         "SampleID\tPrimerPool\n"
         "specA--iNat111\tp1\n"
         "specB-MO222222\tp1\n"
+        "specC-MO333333\tp1\n"
     )
     config = PipelineConfig(
         primers_file=tmp_path / "primers.fasta",
@@ -331,17 +340,26 @@ def test_blocking_prefetch_runs_mo_stage_and_hands_both_to_photos(tmp_path):
         def fake_photos(taxa, *a, **k):
             photos_arg.update(taxa)
             photos_called.set()
+        def fake_mo(mo_ids, **kw):
+            kw["unresolved"].append({"specimen_id": "specC-MO333333", "obs_id": "333333"})
+            kw["lineage_progress"](1, 1)
+            return mo_taxa
         with patch("specimux_suite.pipeline.fetch_community_taxa", return_value=inat_taxa), \
-             patch("specimux_suite.pipeline.fetch_mo_taxa", return_value=mo_taxa) as fmo, \
+             patch("specimux_suite.pipeline.fetch_mo_taxa", side_effect=fake_mo) as fmo, \
              patch("specimux_suite.pipeline.run_inat_check"), \
              patch("specimux_suite.pipeline.prefetch_photos", side_effect=fake_photos):
             pipeline.prefetch_inat(show_progress=False)
             assert photos_called.wait(timeout=5.0)
-        assert fmo.call_args.args[0] == {"specB-MO222222": "222222"}
+        assert fmo.call_args.args[0] == {"specB-MO222222": "222222", "specC-MO333333": "333333"}
         assert set(photos_arg) == {"specA--iNat111", "specB-MO222222"}
         taxa_events = [e for e in pipeline.event_log.replay() if e.type == "specimens.taxa"]
         assert len(taxa_events) == 2
         assert "specB-MO222222" in taxa_events[1].data["taxa"]
+        unresolved_events = [e for e in pipeline.event_log.replay() if e.type == "mo.unresolved"]
+        assert [e.data for e in unresolved_events] == [
+            {"unresolved": [{"specimen_id": "specC-MO333333", "obs_id": "333333"}]}]
+        assert pipeline.state.mo_unresolved == [{"specimen_id": "specC-MO333333", "obs_id": "333333"}]
+        assert pipeline.state.to_dict()["mo_unresolved"] == pipeline.state.mo_unresolved
         spec = pipeline.state.specimens["specB-MO222222"]
         assert spec.community_taxon == "Laccaria laccata"
         assert spec.community_genus == "Laccaria"

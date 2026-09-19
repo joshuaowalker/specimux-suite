@@ -210,6 +210,8 @@ def fetch_mo_taxa(
     cache_dir: Path | None = None,
     abort=None,
     progress=None,
+    lineage_progress=None,
+    unresolved: list | None = None,
 ) -> dict[str, dict]:
     """Batch-fetch field IDs for Mushroom Observer observations.
 
@@ -219,6 +221,13 @@ def fetch_mo_taxa(
             genus lineages share inat_lineage_cache.json)
         abort: optional threading.Event checked between requests
         progress: optional callback(done, total) over observations
+        lineage_progress: optional callback(done, total) over the genera
+            being mapped onto iNat taxonomy (the second, slower phase)
+        unresolved: optional list; appended with {specimen_id, obs_id} for
+            every observation MO reports as nonexistent (a mistyped or
+            deleted id — there is no audit for MO, so the admin page lists
+            these). Batches lost to a network failure are not reported:
+            they are retried next run.
 
     Returns {specimen_id: record} in the `fetch_community_taxa` shape
     ({name, genus, iconic_taxon, ancestors, photos, observer, first_id})
@@ -257,6 +266,7 @@ def fetch_mo_taxa(
         progress(0, len(unique_obs_ids))
 
     fetched: dict[str, dict] = {}
+    not_found: list[str] = []
     last_run_time = 0.0
     for i in range(0, len(unique_obs_ids), MAX_BATCH_SIZE):
         if abort is not None and abort.is_set():
@@ -272,11 +282,25 @@ def fetch_mo_taxa(
         except (urllib.error.URLError, OSError, json.JSONDecodeError, RuntimeError) as e:
             logger.warning(f"Failed to fetch Mushroom Observer batch: {e}")
             records, missing = [], set()
+            batch = []  # transient: nothing in this batch is "not found"
+        got = set()
         for obs in records:
             if isinstance(obs, dict) and obs.get("id") is not None:
                 fetched[str(obs["id"])] = obs
+                got.add(str(obs["id"]))
+        # Anything a successful batch didn't return is gone on MO's side:
+        # reported nonexistent, or silently absent (e.g. deleted).
+        if batch and not (abort is not None and abort.is_set()):
+            not_found.extend(o for o in batch if o not in got)
         if progress:
             progress(min(i + MAX_BATCH_SIZE, len(unique_obs_ids)), len(unique_obs_ids))
+    if not_found:
+        logger.warning(f"Mushroom Observer: {len(not_found)} observation id(s) not found: "
+                       + ", ".join(not_found))
+        if unresolved is not None:
+            for obs_id in not_found:
+                for specimen_id in obs_id_to_specimens.get(obs_id, []):
+                    unresolved.append({"specimen_id": specimen_id, "obs_id": obs_id})
 
     # Map the MO consensus onto iNat taxonomy at genus level: the record's
     # ancestors are the iNat lineage ids of the consensus genus (cached in
@@ -303,14 +327,17 @@ def fetch_mo_taxa(
     # hit read as off-target. A token absent from the result is a transient
     # fetch failure: keep the genus and retry next run.
     genera = sorted({e["genus"] for e in entries.values() if e["genus"]})
+    transient: set[str] = set()  # obs ids whose lineage lookup failed: don't cache
     if genera and not (abort is not None and abort.is_set()):
-        lineages = fetch_genus_lineages(genera, cache_dir=cache_dir, abort=abort)
+        lineages = fetch_genus_lineages(genera, cache_dir=cache_dir, abort=abort,
+                                        progress=lineage_progress)
         not_genera = sorted({g for g in genera if lineages.get(g) == []})
         any_rank = (fetch_genus_lineages(not_genera, cache_dir=cache_dir, abort=abort, rank=None)
                     if not_genera and not (abort is not None and abort.is_set()) else {})
-        for entry in entries.values():
+        for obs_id, entry in entries.items():
             lineage = lineages.get(entry["genus"])
             if lineage is None:
+                transient.add(obs_id)
                 continue
             if not lineage:
                 token = entry["genus"]
@@ -320,12 +347,19 @@ def fetch_mo_taxa(
                 logger.info(f"Mushroom Observer name {entry['name']!r}: {token!r} is not a genus ({found})")
             entry["ancestors"] = [item["id"] for item in lineage if item.get("id") is not None]
 
+    cached_any = False
     for obs_id, entry in entries.items():
-        cache[obs_id] = entry
+        # An entry whose genus never reached iNat (transient failure, or
+        # shutdown before the lineage phase) is served this run but not
+        # cached, so the next run completes it instead of freezing empty
+        # ancestors forever.
+        if obs_id not in transient and (not entry["genus"] or entry["ancestors"]):
+            cache[obs_id] = entry
+            cached_any = True
         for specimen_id in obs_id_to_specimens.get(obs_id, []):
             result[specimen_id] = entry
 
-    if cache_file and entries:
+    if cache_file and cached_any:
         try:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps(cache), encoding="utf-8")

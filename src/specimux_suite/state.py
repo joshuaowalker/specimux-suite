@@ -111,6 +111,9 @@ class PipelineState:
         self.inat_suggestions: list = []
         self.inat_corrections: dict[str, dict] = {}
         self.inat_dismissed: set = set()
+        # Mushroom Observer ids the API reported nonexistent, [{specimen_id,
+        # obs_id}]: listed on the admin page (no MO audit/corrections).
+        self.mo_unresolved: list = []
         # Per-demux snapshots for the dashboard's Forecast tab:
         # {ts, input_cum, matched_cum, counts: {sid: cumulative reads}}.
         # Decimated by halving beyond _DEMUX_HISTORY_MAX entries.
@@ -193,6 +196,7 @@ class PipelineState:
                 "inat_suggestions": [dict(s) for s in self.inat_suggestions],
                 "inat_corrections": {k: dict(v) for k, v in self.inat_corrections.items()},
                 "inat_dismissed": sorted(self.inat_dismissed),
+                "mo_unresolved": [dict(u) for u in self.mo_unresolved],
                 "specimens": {
                     sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
                 },
@@ -245,6 +249,9 @@ class PipelineState:
 
     def _on_inat_suggestion_dismissed(self, data: dict):
         self.inat_dismissed.add(data["specimen_id"])
+
+    def _on_mo_unresolved(self, data: dict):
+        self.mo_unresolved = list(data.get("unresolved", []))
 
     def _on_file_detected(self, data: dict):
         path = data["path"]
@@ -391,6 +398,7 @@ class PipelineState:
         "inat.suggestions": _on_inat_suggestions,
         "inat.correction": _on_inat_correction,
         "inat.suggestion_dismissed": _on_inat_suggestion_dismissed,
+        "mo.unresolved": _on_mo_unresolved,
         "file.detected": _on_file_detected,
         "file.stable": _on_file_stable,
         "specimux.started": _on_specimux_started,
