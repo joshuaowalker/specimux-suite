@@ -33,7 +33,7 @@ SHARED_NAMES = [
     "agreementRank", "effectiveTargetStatus", "getTopMatch", "findTopMatch",
     "_findTopMatch", "clusterFilterRouting", "clusterFlagged",
     "getTargetStatus", "getActiveMatches", "hasIdentification",
-    "isHitOnTarget", "hitGenusLower",
+    "isHitOnTarget", "hitGenusLower", "observationRef",
 ]
 
 
@@ -89,6 +89,6 @@ def test_derived_js_defines_each_shared_function_once():
     for name in ["reprocessBand", "reprocessAssessment", "agreementRank",
                  "effectiveTargetStatus", "getTopMatch", "findTopMatch",
                  "clusterFilterRouting", "getTargetStatus", "getActiveMatches",
-                 "hasIdentification", "isHitOnTarget"]:
+                 "hasIdentification", "isHitOnTarget", "observationRef"]:
         defs = re.findall(rf"function {name}\s*\(", text)
         assert len(defs) == 1, f"derived.js defines {name} {len(defs)} times"

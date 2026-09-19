@@ -76,13 +76,14 @@ Bundled profiles include `default` (standard settings) and `herbarium` (relaxed 
 
 **Primers** — FASTA file containing primer sequences used for demultiplexing.
 
-**Specimens** — Tab-separated file with at least `SampleID` and `PrimerPool` columns. Specimen IDs containing an iNaturalist observation ID (e.g., `iNat12345`) enable the iNaturalist integration: community taxon lookup for on-target/off-target detection, observation photos and observer credits, field-ID comparison, and the observation-ID typo audit.
+**Specimens** — Tab-separated file with at least `SampleID` and `PrimerPool` columns. Specimen IDs containing an iNaturalist observation ID (e.g., `iNat12345`) enable the iNaturalist integration: community taxon lookup for on-target/off-target detection, observation photos and observer credits, field-ID comparison, and the observation-ID typo audit. Specimen IDs containing a Mushroom Observer observation ID (e.g., `MO346513`) get the same treatment from MO's consensus name, images and namings — except the typo audit, and higher-rank taxonomy comes from iNaturalist (the MO consensus is mapped onto iNat taxonomy at genus level). A run may mix both.
 
 ```
 SampleID	PrimerPool
 spec001	pool1
 spec002	pool1
 specimen-B--iNat12345	pool2
+specimen-C-MO346513	pool2
 ```
 
 **Reads** — Standard FASTQ format (batch mode expects a single file; live mode watches a directory for `*.fastq` files).
@@ -268,8 +269,9 @@ The output directory contains:
 output_dir/
 ├── events.jsonl                    # Append-only event log (rotates at 100 MB)
 ├── inat_taxon_cache.json           # Cached iNaturalist observations (taxa, photos, observers)
+├── mo_taxon_cache.json             # Cached Mushroom Observer observations (same shape)
 ├── inat_lineage_cache.json         # Cached genus lineages for taxonomy-level agreement
-├── inat_photos/                    # Local photo cache for the dashboard and highlights screen
+├── inat_photos/                    # Local photo cache (iNat + MO) for the dashboard and highlights screen
 ├── specimux/full/{pool}/
 │   └── {specimen_id}.fastq         # Demultiplexed reads per specimen
 ├── consensus/{specimen_id}/

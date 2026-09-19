@@ -5,6 +5,23 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## Unreleased
+
+### Mushroom Observer field IDs
+
+- Specimen IDs tagged `MO<digits>` now resolve against Mushroom Observer
+  the way `iNat<digits>` ones resolve against iNaturalist: consensus name
+  and genus for on/off-target detection, observation photos with
+  attribution, observer credits, and the first naming as the field ID.
+  Runs may mix both providers. Dashboard and highlights links go to the
+  right site.
+- Higher-rank taxonomy stays iNaturalist's: the MO consensus is mapped
+  onto iNat taxonomy at genus level, so taxonomy-level agreement works
+  unchanged. Provisional names filed above genus (e.g. "Boletaceae sp.
+  'AL01'") resolve at their actual rank and behave like an iNat
+  family-level ID. MO specimens are excluded from the observation-ID
+  typo audit by design (all of MO is Fungi).
+
 ## 0.2.0 — 2026-09-01
 
 The audience release: a projector-ready highlights screen, iNaturalist

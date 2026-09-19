@@ -200,6 +200,43 @@ def test_fetch_genus_lineages(tmp_path, monkeypatch):
     assert again["Russula"] == result["Russula"]
 
 
+def test_fetch_genus_lineages_any_rank_resolves_family_and_caches_apart(tmp_path, monkeypatch):
+    """rank=None finds a non-genus token (a family from an MO provisional
+    name) and caches it under an 'any:' key, so it never shadows the
+    genus-rank entry for the same string."""
+    search_payload = {"results": [
+        _taxon(9001, "Boletaceae", ancestors=[48460, 47170, 9001], rank="family"),
+    ]}
+    details_payload = {"results": [
+        {"id": 48460, "rank": "stateofmatter", "name": "Life"},
+        {"id": 47170, "rank": "kingdom", "name": "Fungi"},
+        {"id": 9001, "rank": "family", "name": "Boletaceae"},
+    ]}
+    urls = []
+
+    class FakeResponse:
+        def __init__(self, payload): self.payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(self.payload).encode()
+
+    def fake_urlopen(req, timeout=None):
+        urls.append(req.full_url)
+        return FakeResponse(search_payload if "q=" in req.full_url else details_payload)
+
+    monkeypatch.setattr("specimux_suite.inat.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("specimux_suite.inat.time.sleep", lambda s: None)
+
+    # As a genus it is unresolved (search results carry no genus-rank match)
+    assert fetch_genus_lineages(["Boletaceae"], cache_dir=tmp_path) == {"Boletaceae": []}
+    assert "rank=genus" in urls[0]
+    result = fetch_genus_lineages(["Boletaceae"], cache_dir=tmp_path, rank=None)
+    assert "rank=" not in urls[1]
+    assert [e["rank"] for e in result["Boletaceae"]] == ["stateofmatter", "kingdom", "family"]
+    cache = json.loads((tmp_path / "inat_lineage_cache.json").read_text())
+    assert cache["boletaceae"] == [] and len(cache["any:boletaceae"]) == 3
+
+
 def test_fetch_genus_lineages_unresolved_cached_as_empty(tmp_path, monkeypatch):
     class FakeResponse:
         def __enter__(self): return self

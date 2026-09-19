@@ -455,6 +455,7 @@ function clusterFlagged(cluster) { return SpecimuxDerived.clusterFilterRouting(c
 function getTopMatch(s) { return SpecimuxDerived.getTopMatch(s, 'clusters', state.summarizeFilter); }
 function getTopHit(s) { const m = getTopMatch(s); return m ? m.top_hits[0] : null; }
 function agreementRank(s, hit) { return SpecimuxDerived.agreementRank(s, hit, state.genusLineages); }
+function observationRef(specimen_id) { return SpecimuxDerived.observationRef(specimen_id); }
 function effectiveTargetStatus(s) { return SpecimuxDerived.effectiveTargetStatus(s, 'clusters', { genusLineages: state.genusLineages, summarizeFilter: state.summarizeFilter }); }
 
 function getSpec(sid) {
@@ -548,11 +549,12 @@ function hitGenus(h) { return h ? (h.name || h.ref_id || '').split(/\s+/)[0] : '
 function esc(t) { const d = document.createElement('div'); d.textContent = t == null ? '' : t; return d.innerHTML; }
 function fmt(n) { return (n || 0).toLocaleString('en-US'); }
 
-// Local photo cache first; fall back to the iNat host if not prefetched yet.
+// Local photo cache first; fall back to the provider's host if not
+// prefetched yet. MO records carry large_url; iNat's is a size substitution.
 function photoSources(photo) {
   return {
     local: `/photos/${photo.id}_large.jpg`,
-    remote: (photo.url || '').replace('/square.', '/large.'),
+    remote: photo.large_url || (photo.url || '').replace('/square.', '/large.'),
   };
 }
 
@@ -1059,11 +1061,11 @@ function attachPhoto(el, s) {
 
 function creditLine(s) {
   const observer = s.inat_observer || {};
-  const obsId = (s.specimen_id.match(/iNat(\d+)/) || [])[1];
+  const obsRef = observationRef(s.specimen_id);
   const photo = (s.inat_photos || [])[0];
   let credit = '';
   if (observer.login) credit += `Collected by <b>${esc(observer.name || observer.login)}</b>`;
-  if (obsId) credit += `${credit ? ' · ' : ''}iNat observation ${esc(obsId)}`;
+  if (obsRef) credit += `${credit ? ' · ' : ''}${esc(obsRef.label)} observation ${esc(obsRef.id)}`;
   if (photo && photo.attribution) credit += `<br>Photo ${esc(photo.attribution)}`;
   return credit;
 }

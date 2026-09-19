@@ -1006,10 +1006,7 @@ function getDisplayStatus(s) {
   return s.status;
 }
 
-function getInatId(specimen_id) {
-  const m = specimen_id.match(/iNat(\d+)/);
-  return m ? m[1] : null;
-}
+function observationRef(specimen_id) { return SpecimuxDerived.observationRef(specimen_id); }
 
 // Count clusters across all specimens that would be routed to .ns/.lq. Drives
 // visibility + the count label on the "Hide NS/LQ" toggle, so the toggle only
@@ -1549,9 +1546,9 @@ function renderProcessing() {
     // Low-identity warning
     const warningHtml = topHit ? identityWarningHtml(identity) : '';
 
-    // Specimen cell: name + community taxon (clickable if iNat)
-    // Yellow ? if community taxon is not in kingdom Fungi
-    const inatId = getInatId(s.specimen_id);
+    // Specimen cell: name + community taxon (clickable if the specimen
+    // carries an iNat/MO observation id). Yellow ? if not in kingdom Fungi
+    const obsRef = observationRef(s.specimen_id);
     const notFungi = s.community_iconic_taxon && s.community_iconic_taxon !== 'Fungi';
     const taxonWarning = notFungi ? ' <span title="Not a fungus — possible wrong observation ID" style="color:#b8860b;font-style:normal">?</span>' : '';
     const starClass = s.watched ? 'watch-star watched' : 'watch-star';
@@ -1559,13 +1556,13 @@ function renderProcessing() {
     let specimenCell = `<button class="${starClass}" data-sid="${esc(s.specimen_id)}" aria-label="${s.watched ? 'Unwatch' : 'Watch'} ${esc(s.specimen_id)}" title="${s.watched ? 'Watched: processed first. Click to unwatch.' : 'Click to watch: process this specimen first.'}">${starIcon}</button><strong>${esc(s.specimen_id)}</strong>`;
     if (s.community_taxon) {
       const taxonText = esc(s.community_taxon);
-      if (inatId) {
-        specimenCell += `<br><a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank" rel="noopener noreferrer"><span class="community-taxon">${taxonText}</span></a>${taxonWarning}`;
+      if (obsRef) {
+        specimenCell += `<br><a class="community-taxon-link" href="${esc(obsRef.url)}" target="_blank" rel="noopener noreferrer"><span class="community-taxon">${taxonText}</span></a>${taxonWarning}`;
       } else {
         specimenCell += `<br><span class="community-taxon">${taxonText}</span>${taxonWarning}`;
       }
-    } else if (inatId) {
-      specimenCell += ` <a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank" rel="noopener noreferrer" style="font-size:0.7rem">iNat</a>`;
+    } else if (obsRef) {
+      specimenCell += ` <a class="community-taxon-link" href="${esc(obsRef.url)}" target="_blank" rel="noopener noreferrer" style="font-size:0.7rem">${esc(obsRef.label)}</a>`;
     }
 
     // Identity cell: [target] [pct%] [warning] [+N others]
@@ -1723,7 +1720,7 @@ function renderSummary() {
     const topReads = topVariant ? topVariant.size : null;
 
     // Specimen cell: name + community taxon (matching Processing tab layout)
-    const inatId = getInatId(s.specimen_id);
+    const obsRef = observationRef(s.specimen_id);
     const notFungi = s.community_iconic_taxon && s.community_iconic_taxon !== 'Fungi';
     const taxonWarning = notFungi ? ' <span title="Not a fungus — possible wrong observation ID" style="color:#b8860b;font-style:normal">?</span>' : '';
     const starClass = s.watched ? 'watch-star watched' : 'watch-star';
@@ -1732,13 +1729,13 @@ function renderSummary() {
     if (s.pool) specimenCell += `<br><span style="font-size:0.75rem;color:var(--text-dim)">${esc(s.pool)}</span>`;
     if (s.community_taxon) {
       const taxonText = esc(s.community_taxon);
-      if (inatId) {
-        specimenCell += `<br><a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank" rel="noopener noreferrer"><span class="community-taxon">${taxonText}</span></a>${taxonWarning}`;
+      if (obsRef) {
+        specimenCell += `<br><a class="community-taxon-link" href="${esc(obsRef.url)}" target="_blank" rel="noopener noreferrer"><span class="community-taxon">${taxonText}</span></a>${taxonWarning}`;
       } else {
         specimenCell += `<br><span class="community-taxon">${taxonText}</span>${taxonWarning}`;
       }
-    } else if (inatId) {
-      specimenCell += ` <a class="community-taxon-link" href="https://www.inaturalist.org/observations/${inatId}" target="_blank" rel="noopener noreferrer" style="font-size:0.7rem">iNat</a>`;
+    } else if (obsRef) {
+      specimenCell += ` <a class="community-taxon-link" href="${esc(obsRef.url)}" target="_blank" rel="noopener noreferrer" style="font-size:0.7rem">${esc(obsRef.label)}</a>`;
     }
 
     // Variants cell with expand chevron

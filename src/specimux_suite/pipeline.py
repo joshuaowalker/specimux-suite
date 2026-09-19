@@ -16,6 +16,7 @@ from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
 from .inat import apply_corrections, extract_inat_ids, fetch_community_taxa, fetch_genus_lineages
 from .inat_check import run_inat_check, write_corrections_tsv
+from .mo import extract_mo_ids, fetch_mo_taxa
 from .photos import photo_cache_dir, prefetch_photos
 from .progress import StageProgress
 from .util import clone_or_copy, parse_specimens_file
@@ -125,6 +126,7 @@ class Pipeline:
         self._draining = False  # True while waiting for specimux to run
         self._specimens_loaded = False
         self._inat_ids: dict[str, str] = {}
+        self._mo_ids: dict[str, str] = {}
         self.cmd_queue: queue.Queue = queue.Queue()
         self._file_queue: queue.Queue[Path] = queue.Queue()
         self._console: ConsoleUI | None = None
@@ -149,12 +151,13 @@ class Pipeline:
             logger.info(f"Loaded {len(specimens)} specimens from index file")
 
             self._inat_ids = extract_inat_ids(specimens)
+            self._mo_ids = extract_mo_ids(specimens)
             # In blocking mode prefetch_inat does this work synchronously
             # with progress bars before the web UI opens. Otherwise fetch
             # asynchronously on a daemon thread, not the worker pool: a slow
             # fetch must never hold a consensus slot or block executor
             # shutdown on exit.
-            if self._inat_ids and not self.config.inat_blocking:
+            if (self._inat_ids or self._mo_ids) and not self.config.inat_blocking:
                 threading.Thread(
                     target=self._fetch_inat_taxa, args=(dict(self._inat_ids),),
                     name="inat-fetch", daemon=True,
@@ -177,15 +180,31 @@ class Pipeline:
             target=self._lineage_fetcher, name="lineage-fetch", daemon=True,
         ).start()
 
+    def _fetch_mo_taxa(self, mo_ids: dict[str, str], progress=None) -> dict:
+        """Fetch Mushroom Observer field IDs and emit specimens.taxa.
+
+        Returns the taxa fetched (for the photo prefetch). MO specimens get
+        no ID audit — see mo.py for the deliberate scope.
+        """
+        if not mo_ids:
+            return {}
+        taxa = fetch_mo_taxa(
+            mo_ids, cache_dir=self.config.output_dir,
+            abort=self._shutdown, progress=progress,
+        )
+        if taxa:
+            self.event_log.emit("specimens.taxa", {"taxa": taxa})
+        return taxa
+
     def prefetch_inat(self, show_progress: bool = True) -> None:
-        """Blocking startup fetch of all iNaturalist data, with progress.
+        """Blocking startup fetch of all field-ID data, with progress.
 
         Runs before the web server starts so the dashboard and /present
-        open fully populated: field IDs and photos, the iNat ID audit, and
-        (on restart) the lineages backing taxonomy agreement. Every stage
-        is cached per output dir, so a restart's prefetch is near-instant.
-        Ctrl+C skips whatever remains and falls back to the background
-        fetch path.
+        open fully populated: iNaturalist field IDs and photos, the iNat ID
+        audit, Mushroom Observer field IDs, and (on restart) the lineages
+        backing taxonomy agreement. Every stage is cached per output dir,
+        so a restart's prefetch is near-instant. Ctrl+C skips whatever
+        remains and falls back to the background fetch path.
         """
         self._load_specimens()
         # Replayed admin corrections win over the obs id embedded in the
@@ -217,6 +236,14 @@ class Pipeline:
                 except Exception as e:
                     logger.warning(f"iNat ID check failed: {e}")
                 bar.finish(note="done")
+            if self._mo_ids:
+                bar = StageProgress("Field IDs (Mushroom Observer)", enabled=show_progress)
+                try:
+                    mo_taxa = self._fetch_mo_taxa(dict(self._mo_ids), progress=bar.update)
+                    taxa = {**taxa, **mo_taxa}
+                except Exception as e:
+                    logger.warning(f"Mushroom Observer fetch failed: {e}")
+                bar.finish()
             # Restart backfill: resolve the lineages seeded from replayed
             # identifications now, before the fetcher thread starts.
             genera = []
@@ -255,7 +282,7 @@ class Pipeline:
                 suite_logger.setLevel(prev_level)
             print(file=sys.stderr)
             logger.info("Skipping the rest of the iNat prefetch — continuing in the background")
-            if self._inat_ids:
+            if self._inat_ids or self._mo_ids:
                 threading.Thread(
                     target=self._fetch_inat_taxa, args=(dict(self._inat_ids),),
                     name="inat-fetch", daemon=True,
@@ -266,28 +293,41 @@ class Pipeline:
             self._ensure_lineage_thread()
 
     def _fetch_inat_taxa(self, inat_ids: dict[str, str]) -> None:
-        """Fetch community taxon from iNaturalist and emit event (daemon thread)."""
-        try:
-            # Replayed admin corrections win over the obs id embedded in the
-            # specimen name — without this, a restart's fetch would emit the
-            # mistyped observation's taxon and clobber the healed field ID.
-            inat_ids = apply_corrections(inat_ids, self.state.inat_corrections)
-            taxa = fetch_community_taxa(
-                inat_ids, cache_dir=self.config.output_dir, abort=self._shutdown,
-            )
-            if taxa:
-                self.event_log.emit("specimens.taxa", {"taxa": taxa})
-                logger.info(f"Fetched community taxon for {len(taxa)} specimens")
-        except Exception as e:
-            logger.warning(f"Failed to fetch iNaturalist taxa: {e}")
-            return
+        """Fetch field IDs (iNaturalist, then Mushroom Observer) and emit events (daemon thread)."""
+        taxa: dict = {}
+        if inat_ids:
+            try:
+                # Replayed admin corrections win over the obs id embedded in the
+                # specimen name — without this, a restart's fetch would emit the
+                # mistyped observation's taxon and clobber the healed field ID.
+                inat_ids = apply_corrections(inat_ids, self.state.inat_corrections)
+                taxa = fetch_community_taxa(
+                    inat_ids, cache_dir=self.config.output_dir, abort=self._shutdown,
+                )
+                if taxa:
+                    self.event_log.emit("specimens.taxa", {"taxa": taxa})
+                    logger.info(f"Fetched community taxon for {len(taxa)} specimens")
+            except Exception as e:
+                logger.warning(f"Failed to fetch iNaturalist taxa: {e}")
+                taxa = {}
         # With taxa in hand, audit the iNat IDs right away so the admin page
         # has suggestions during the run, not just at the end. Sequence
         # evidence is thin this early; the post-aggregate check refreshes it.
-        try:
-            self._run_inat_id_check()
-        except Exception as e:
-            logger.warning(f"iNat ID check failed: {e}")
+        if taxa:
+            try:
+                self._run_inat_id_check()
+            except Exception as e:
+                logger.warning(f"iNat ID check failed: {e}")
+        if self._mo_ids:
+            try:
+                mo_taxa = self._fetch_mo_taxa(dict(self._mo_ids))
+                if mo_taxa:
+                    logger.info(f"Fetched Mushroom Observer field IDs for {len(mo_taxa)} specimens")
+                taxa = {**taxa, **mo_taxa}
+            except Exception as e:
+                logger.warning(f"Mushroom Observer fetch failed: {e}")
+        if not taxa:
+            return
         # Photo prefetch rides the same daemon thread, after the taxa event is
         # out — display names shouldn't wait on ~MBs of images.
         try:
@@ -295,7 +335,7 @@ class Pipeline:
                 taxa, photo_cache_dir(self.config.output_dir), abort=self._shutdown,
             )
         except Exception as e:
-            logger.warning(f"iNaturalist photo prefetch failed: {e}")
+            logger.warning(f"Observation photo prefetch failed: {e}")
 
     def _queue_lineage_genus(self, hit_name: str) -> None:
         """Queue a hit name's genus (first token) for lineage resolution."""

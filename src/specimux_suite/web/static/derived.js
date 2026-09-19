@@ -16,6 +16,23 @@
   else root.SpecimuxDerived = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
 
+// Observation providers. A specimen ID embeds its field-observation id as
+// an `iNat<digits>` or `MO<digits>` tag (Mushroom Observer); the tag is
+// the only place the provider is recorded, so every page derives links
+// and labels from here. Returns {provider, id, url, label} or null.
+const OBSERVATION_PROVIDERS = {
+  inat: { label: 'iNat', url: id => `https://www.inaturalist.org/observations/${id}` },
+  mo: { label: 'MO', url: id => `https://mushroomobserver.org/obs/${id}` },
+};
+function observationRef(specimen_id) {
+  const sid = specimen_id || '';
+  let m = sid.match(/iNat(\d+)/);
+  if (m) return { provider: 'inat', id: m[1], url: OBSERVATION_PROVIDERS.inat.url(m[1]), label: OBSERVATION_PROVIDERS.inat.label };
+  m = sid.match(/(?<![A-Za-z])MO(\d{4,})/);  // ≥4 digits: see _MO_ID_RE in mo.py
+  if (m) return { provider: 'mo', id: m[1], url: OBSERVATION_PROVIDERS.mo.url(m[1]), label: OBSERVATION_PROVIDERS.mo.label };
+  return null;
+}
+
 // Ranks at or below genus: agreement here is effectively on-target even
 // when the name strings differ (iNat's tree often nests an outdated
 // binomial under the current genus). Ranks between order and genus are
@@ -253,7 +270,7 @@ function reprocessAssessment(s, reprocessRatio) {
 }
 
 return {
-  GENUS_OR_DEEPER_RANKS, NEAR_RANKS,
+  GENUS_OR_DEEPER_RANKS, NEAR_RANKS, OBSERVATION_PROVIDERS, observationRef,
   hasIdentification, hitIdentity, hitGenusLower, isHitOnTarget,
   communityGenusLower, clusterFilterRouting, activeSeqs, getActiveMatches,
   findTopMatch, getTopMatch, getTopHit, getTargetStatus, agreementRank,

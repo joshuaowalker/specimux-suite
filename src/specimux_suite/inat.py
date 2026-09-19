@@ -331,16 +331,17 @@ def fetch_community_taxa(
 _LINEAGE_SEARCH_DELAY_S = 0.6
 
 
-def _pick_genus_match(results: list[dict], genus: str) -> dict | None:
-    """Choose the right taxon for a genus name from taxa-search results.
+def _pick_genus_match(results: list[dict], genus: str, rank: str | None = "genus") -> dict | None:
+    """Choose the right taxon for a name from taxa-search results.
 
     Search is fuzzy and genus names are homonymous across nomenclature codes
     (e.g. Morus the mulberry vs Morus the gannet), so: exact name match and
-    active only, prefer Fungi, then the most-observed.
+    active only, at `rank` (any rank when None), prefer Fungi, then the
+    most-observed.
     """
     exact = [t for t in results
              if (t.get("name") or "").lower() == genus.lower()
-             and t.get("rank") == "genus" and t.get("is_active", True)]
+             and (rank is None or t.get("rank") == rank) and t.get("is_active", True)]
     if not exact:
         return None
     exact.sort(key=lambda t: (
@@ -355,12 +356,18 @@ def fetch_genus_lineages(
     cache_dir: Path | None = None,
     abort=None,
     progress=None,
+    rank: str | None = "genus",
 ) -> dict[str, list[dict]]:
     """Resolve genus names to their iNaturalist lineages.
 
     Returns {genus_as_given: [{id, rank, name}, ...]} ordered root→genus
     (the genus itself is the last entry). A genus that can't be resolved
     maps to [] — cached too, so it isn't retried every run.
+
+    `rank=None` resolves a name at whatever rank iNat has it (e.g. a family
+    token like "Boletaceae" from a Mushroom Observer provisional name); those
+    lookups are cached under an "any:" key so they never shadow the
+    genus-rank entries the reference-hit lineages depend on.
     """
     cache: dict[str, list] = {}
     cache_file = cache_dir / "inat_lineage_cache.json" if cache_dir else None
@@ -371,10 +378,11 @@ def fetch_genus_lineages(
         except (json.JSONDecodeError, OSError):
             pass
 
+    key_prefix = "" if rank == "genus" else f"{rank or 'any'}:"
     result: dict[str, list[dict]] = {}
     to_fetch: list[str] = []
     for genus in genera:
-        key = genus.lower()
+        key = key_prefix + genus.lower()
         if key in cache:
             result[genus] = cache[key]
         elif genus:
@@ -392,12 +400,13 @@ def fetch_genus_lineages(
         if abort is not None and abort.is_set():
             logger.info("iNaturalist lineage fetch aborted (shutdown)")
             return result
-        url = f"{TAXA_API_URL}?q={urllib.parse.quote(genus)}&rank=genus&per_page=10"
+        rank_q = f"&rank={urllib.parse.quote(rank)}" if rank else ""
+        url = f"{TAXA_API_URL}?q={urllib.parse.quote(genus)}{rank_q}&per_page=10"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "specimux-suite/0.1"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
-            taxon = _pick_genus_match(data.get("results", []), genus)
+            taxon = _pick_genus_match(data.get("results", []), genus, rank)
             if taxon:
                 aids = [aid for aid in (taxon.get("ancestor_ids") or [])]
                 if taxon["id"] not in aids:
@@ -442,7 +451,7 @@ def fetch_genus_lineages(
         # fetch failed entirely stays uncached to retry later.
         if lineage or not aids:
             result[genus] = lineage
-            cache[genus.lower()] = lineage
+            cache[key_prefix + genus.lower()] = lineage
 
     if cache_file:
         try:
