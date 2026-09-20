@@ -52,6 +52,11 @@ dev = [
 specimux-suite = "specimux_suite.cli:main"
 specimux-replay = "specimux_suite.cli:replay_main"
 
+# Plugins the engine can load by name (--plugin NAME); other packages
+# register theirs in the same group
+[project.entry-points."specimux_suite.plugins"]
+forward = "specimux_suite.forward:forwarder_plugin"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -135,6 +135,17 @@ TGCATGCA...
 | `--settle-time` | `30` | Seconds to wait for a file to stabilize before processing |
 | `--presample` | `100` | Reads to subsample for incremental consensus (0 = unlimited) |
 
+### Plugins and event forwarding
+
+| Option | Default | Description |
+|---|---|---|
+| `--forward-events URL` | — | Mirror the run's events to an HTTP endpoint in batches (see below) |
+| `--forward-header 'Name: value'` | — | Header sent with every forwarded batch, e.g. an authorization token |
+| `--plugin NAME` | — | Load a plugin by entry-point name or `module:factory` path (repeatable) |
+| `--plugin-opt KEY=VALUE` | — | Option passed to every plugin's factory (repeatable) |
+
+A plugin is an object with `start(context)` and `shutdown()` that runs alongside the pipeline; the context gives it the event log, the state, the commands facade (every user action on the run: `watch`, `correct`, `finalize`, ...), the config and the output dir. Packages register plugins in the `specimux_suite.plugins` entry-point group. The suite ships one: the HTTP event forwarder, which POSTs the event log to a URL in version order, at least once, resuming from the last acknowledged version after a restart (`forward-ack.json` in the output dir). Each batch is JSON `{"events": [...], "from_version", "to_version"}` and a 2xx acknowledges it; the receiver dedupes by version. Use it to mirror a run to a read-only dashboard elsewhere.
+
 ## Pipeline
 
 ### Processing stages

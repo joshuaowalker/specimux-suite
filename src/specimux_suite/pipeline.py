@@ -19,6 +19,7 @@ from .inat import apply_corrections, extract_inat_ids, fetch_community_taxa, fet
 from .inat_check import run_inat_check, write_corrections_tsv
 from .mo import extract_mo_ids, fetch_mo_taxa
 from .photos import photo_cache_dir, prefetch_photos
+from .plugins import PluginContext
 from .progress import StageProgress
 from .util import clone_or_copy, parse_specimens_file
 from .runners.specimux_runner import SpecimuxRunner
@@ -138,6 +139,10 @@ class Pipeline:
         # Every user action on the run goes through the facade (web routes,
         # plugins, tests) — it is the only thing that emits action events.
         self.commands = Commands(self.event_log, self.state, control=self)
+        # Plugins ride along with the run: started when it begins, shut
+        # down when it ends (attach_plugin before run_*).
+        self.plugins: list = []
+        self._plugins_started: list = []
 
     def _load_specimens(self) -> None:
         """Parse the specimens file and emit specimens.loaded event.
@@ -466,6 +471,7 @@ class Pipeline:
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
         self._mode = "batch"
+        self._start_plugins()
         self.event_log.emit("pipeline.started", {
             "mode": "batch",
             "config_summary": self.config.summary(),
@@ -515,6 +521,7 @@ class Pipeline:
                 self._console = None
         finally:
             self._restore_sigint()
+            self._stop_plugins()
 
         if self._shutdown.is_set():
             logger.info("Batch pipeline stopped by user")
@@ -531,6 +538,7 @@ class Pipeline:
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
         self._mode = "live"
+        self._start_plugins()
         self.event_log.emit("pipeline.started", {
             "mode": "live",
             "config_summary": self.config.summary(),
@@ -611,10 +619,40 @@ class Pipeline:
             self._restore_sigint()
             watcher.stop()
             self._shutdown_executor()
+            self._stop_plugins()
 
     def shutdown(self) -> None:
         """Signal the pipeline to shut down."""
         self._shutdown.set()
+
+    # --- plugins ---
+
+    def attach_plugin(self, plugin) -> None:
+        """Register a plugin (start/shutdown object) to run alongside this run."""
+        self.plugins.append(plugin)
+
+    def plugin_context(self) -> "PluginContext":
+        return PluginContext(
+            event_log=self.event_log, state=self.state, commands=self.commands,
+            config=self.config, output_dir=self.config.output_dir,
+        )
+
+    def _start_plugins(self) -> None:
+        context = self.plugin_context()
+        for plugin in self.plugins:
+            try:
+                plugin.start(context)
+                self._plugins_started.append(plugin)
+            except Exception:
+                logger.exception(f"Plugin {type(plugin).__name__} failed to start")
+
+    def _stop_plugins(self) -> None:
+        while self._plugins_started:
+            plugin = self._plugins_started.pop()
+            try:
+                plugin.shutdown()
+            except Exception:
+                logger.exception(f"Plugin {type(plugin).__name__} failed to shut down")
 
     # --- RunControl (the commands facade's hooks) ---
 
