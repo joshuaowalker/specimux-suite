@@ -79,8 +79,8 @@ def test_shared_logic_only_delegates(page):
         "a one-line wrapper), or the parity harness can't guard it"
     )
     if "SpecimuxDerived" in text:
-        assert 'src="/static/derived.js"' in text, (
-            f"{page}: uses SpecimuxDerived but doesn't load /static/derived.js"
+        assert 'src="{{asset_base}}/static/derived.js"' in text, (
+            f"{page}: uses SpecimuxDerived but doesn't load derived.js via the asset base"
         )
 
 

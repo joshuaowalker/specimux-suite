@@ -24,7 +24,7 @@ _is_safe_name = is_safe_name  # kept for existing imports
 
 
 def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig,
-               commands: Commands) -> FastAPI:
+               commands: Commands, allowed_origins=()) -> FastAPI:
     """The viewer app for this run with the local command routes added."""
     share = None
     if config.share_url:
@@ -34,6 +34,7 @@ def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig
         config_summary=config.summary(),
         share=share,
         max_clients=config.share_max_clients,
+        allowed_origins=allowed_origins,
     )
     _add_mutation_routes(app, commands)
     return app
@@ -108,7 +109,7 @@ def _add_mutation_routes(app: FastAPI, commands: Commands) -> None:
                                request.headers.get("host"))
         if denial:
             return HTMLResponse(f"<h1>403</h1><p>{denial}.</p>", status_code=403)
-        return HTMLResponse(render_page("admin.html"))
+        return HTMLResponse(render_page("admin.html", app.state.viewer["runtime"]))
 
     @app.post("/api/commands")
     async def post_command(request: Request):

@@ -58,7 +58,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "specimux_suite.profiles" = ["*.yaml"]
 # The dashboard is served from package data — dropping these breaks the web UI
-"specimux_suite.web" = ["static/*.html", "static/vendor/*.js"]
+"specimux_suite.web" = ["static/*.html", "static/*.js", "static/vendor/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

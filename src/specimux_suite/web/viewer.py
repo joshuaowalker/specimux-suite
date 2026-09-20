@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Protocol
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -234,6 +235,8 @@ def create_viewer_app(
     config_summary: Optional[dict] = None,
     share: Optional[dict] = None,
     max_clients: int = 0,
+    runtime: Optional[dict] = None,
+    allowed_origins: Iterable[str] = (),
     title: str = "specimux-suite",
 ) -> FastAPI:
     """Build the read-only dashboard app for one run.
@@ -241,12 +244,23 @@ def create_viewer_app(
     ``config_summary`` and ``share`` ride along in ``/api/state`` when given
     (the pages read thresholds from the former and draw a QR code from the
     latter); ``max_clients`` caps concurrent SSE connections (0 = no cap).
+    ``runtime`` is injected into the pages this app serves (see
+    ``pages.py``; the defaults point everything at this app's own origin).
+    ``allowed_origins`` lists page origins that may call this API from a
+    browser with credentials — pages hosted elsewhere and pointed here by
+    their runtime config; empty means same-origin only.
     """
     paths = RunPaths(output_dir)
     app = FastAPI(title=title)
+    origins = list(allowed_origins)
+    if origins:
+        app.add_middleware(
+            CORSMiddleware, allow_origins=origins, allow_credentials=True,
+            allow_methods=["GET", "POST"], allow_headers=["*"],
+        )
     broadcaster = Broadcaster(event_log)
     app.state.viewer = {"event_log": event_log, "state": state, "paths": paths,
-                        "broadcaster": broadcaster}
+                        "broadcaster": broadcaster, "runtime": runtime}
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -267,12 +281,12 @@ def create_viewer_app(
     @app.get("/")
     async def index():
         """Serve the dashboard."""
-        return HTMLResponse(render_page("index.html"))
+        return HTMLResponse(render_page("index.html", runtime))
 
     @app.get("/present")
     async def present():
         """Serve the audience highlights screen (projector mode)."""
-        return HTMLResponse(render_page("present.html"))
+        return HTMLResponse(render_page("present.html", runtime))
 
     @app.get("/api/state")
     async def get_state():

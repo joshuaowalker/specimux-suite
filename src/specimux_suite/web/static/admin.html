@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script id="specimux-runtime" type="application/json">{}</script>
+<script src="{{asset_base}}/static/runtime.js"></script>
 <title>specimux-suite · admin</title>
 <style>
   /* Same palette as the dashboard — this is the operator's console. */
@@ -93,7 +95,7 @@
 <header>
   <h1>specimux-suite</h1>
   <span class="admin-tag">admin · localhost</span>
-  <a href="/">← dashboard</a>
+  <a href="{{page_base}}/">← dashboard</a>
   <div id="conn"></div>
 </header>
 <main id="sections"></main>
@@ -108,7 +110,7 @@ const state = { version: 0, specimens: {}, suggestions: [], corrections: {}, dis
 // requires it — it forces a CORS preflight that browsers refuse cross-origin).
 // The response is the command's outcome; rejected ones come back as 400.
 async function postCommand(command, args) {
-  const resp = await fetch('/api/commands', {
+  const resp = await SpecimuxRuntime.fetch('/api/commands', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Specimux-Admin': '1' },
     body: JSON.stringify({ command, ...(args || {}) }),
@@ -362,9 +364,12 @@ function applyEvent(event) {
 
 function connect() {
   const dot = document.getElementById('conn');
-  const es = new EventSource(`/events?after_version=${state.version}`);
+  const es = SpecimuxRuntime.eventSource(`/events?after_version=${state.version}`);
   es.onopen = () => dot.classList.remove('down');
-  es.onerror = () => { dot.classList.add('down'); es.close(); setTimeout(connect, 3000); };
+  es.onerror = () => {
+    dot.classList.add('down'); es.close();
+    SpecimuxRuntime.ready({ refresh: true }).catch(() => {}).then(() => setTimeout(connect, 3000));
+  };
   // EventSource only delivers named SSE events to registered listeners
   for (const type of ['inat.suggestions', 'inat.correction', 'inat.suggestion_dismissed', 'mo.unresolved', 'specimens.taxa', 'consensus.completed', 'identification.completed']) {
     es.addEventListener(type, (e) => {
@@ -377,7 +382,7 @@ function connect() {
 
 async function bootstrap() {
   try {
-    const snap = await (await fetch('/api/state')).json();
+    const snap = await (await SpecimuxRuntime.fetch('/api/state')).json();
     state.version = snap.version || 0;
     state.specimens = snap.specimens || {};
     state.suggestions = snap.inat_suggestions || [];
