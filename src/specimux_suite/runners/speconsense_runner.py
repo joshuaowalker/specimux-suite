@@ -2,12 +2,14 @@
 
 import logging
 import math
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
 
 from ..config import PipelineConfig
 from ..events import EventLog
+from ..util import publish_tree
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,9 @@ class SpeconsenseRunner:
         read_count = count_fastq_reads_fast(specimen_fastq)
 
         output_dir = self.config.consensus_output_dir / specimen_id
+        # speconsense rewrites <id>-all.fasta in place, which the dashboard
+        # serves; write to a staging dir and publish atomically instead.
+        staging = self.config.staging_dir / "consensus" / f"{specimen_id}.{job_id}"
 
         self.event_log.emit("consensus.started", {
             "specimen_id": specimen_id,
@@ -93,7 +98,7 @@ class SpeconsenseRunner:
             "read_count": read_count,
         })
 
-        cmd = self._build_command(specimen_fastq, output_dir, presample=presample)
+        cmd = self._build_command(specimen_fastq, staging, presample=presample)
         logger.info(f"Running speconsense for {specimen_id}: {' '.join(str(c) for c in cmd)}")
 
         try:
@@ -107,12 +112,16 @@ class SpeconsenseRunner:
 
             if result.returncode != 0:
                 logger.error(f"speconsense failed for {specimen_id}: {result.stderr}")
+                shutil.rmtree(staging, ignore_errors=True)
                 self._emit_failure(
                     specimen_id, job_id,
                     f"speconsense exited with code {result.returncode}",
                     result.stderr,
                 )
                 return []
+
+            # Everything in consensus/<id>/ belongs to this generation
+            publish_tree(staging, output_dir, prune=lambda rel: True)
 
             # Parse the -all.fasta output
             clusters = self._parse_clusters(output_dir, specimen_id)
@@ -136,9 +145,11 @@ class SpeconsenseRunner:
         except subprocess.TimeoutExpired:
             msg = f"speconsense timed out after {self.config.job_timeout}s (killed)"
             logger.error(f"{msg} for {specimen_id}")
+            shutil.rmtree(staging, ignore_errors=True)
             self._emit_failure(specimen_id, job_id, msg)
             return []
         except FileNotFoundError:
+            shutil.rmtree(staging, ignore_errors=True)
             msg = "speconsense not found on PATH"
             logger.error(msg)
             self.event_log.emit("pipeline.error", {

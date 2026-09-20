@@ -126,6 +126,12 @@ class PipelineConfig:
     def summarize_output_dir(self) -> Path:
         return self.output_dir / "summary"
 
+    @property
+    def staging_dir(self) -> Path:
+        """Where tools write before their output is published atomically
+        into the served directories (see ``util.publish_tree``)."""
+        return self.output_dir / ".staging"
+
     def resolve_summarize_thresholds(self) -> dict:
         """Resolve the effective ``--min-cer-factor`` / ``--max-err-factor``.
 

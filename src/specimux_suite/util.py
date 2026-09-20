@@ -6,11 +6,14 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable, Optional
 
 from . import __version__
 
-# Sent on every outbound HTTP request (iNaturalist, Mushroom Observer, photo hosts).
-USER_AGENT = f"specimux-suite/{__version__}"
+# Sent on every outbound HTTP request (iNaturalist, Mushroom Observer, photo
+# hosts). The contact URL is what those APIs ask for, so an operator who sees
+# unusual traffic can reach the project.
+USER_AGENT = f"specimux-suite/{__version__} (+https://github.com/joshuaowalker/specimux-suite)"
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +145,50 @@ def atomic_write(path: Path, content: bytes) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(content)
     os.replace(tmp, path)
+
+
+def publish_tree(staging: Path, final: Path,
+                 prune: Optional[Callable[[Path], bool]] = None) -> list[Path]:
+    """Publish a tool's output directory without ever exposing a partial file.
+
+    A tool that writes straight into a directory the dashboard serves
+    (``consensus/<id>/``, ``summary/``) truncates and rewrites files in
+    place, so a reader can see an empty or half-written FASTA. Instead the
+    tool writes into ``staging`` and this moves every file into ``final``
+    with a per-file atomic replace (rename within one filesystem), then
+    removes the files under ``final`` that ``prune`` claims for this
+    publication but were not just written (a previous generation's
+    leftovers), and removes ``staging``. Readers see each file either
+    whole-old or whole-new, and the directory never disappears.
+
+    Returns the published paths (relative to ``final``).
+    """
+    staging, final = Path(staging), Path(final)
+    published: list[Path] = []
+    for src in sorted(p for p in staging.rglob("*") if p.is_file()):
+        rel = src.relative_to(staging)
+        dst = final / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+        published.append(rel)
+    if prune is not None and final.exists():
+        keep = set(published)
+        for f in sorted(p for p in final.rglob("*") if p.is_file()):
+            rel = f.relative_to(final)
+            if rel not in keep and prune(rel):
+                f.unlink(missing_ok=True)
+    shutil.rmtree(staging, ignore_errors=True)
+    return published
+
+
+def owned_by(specimen_id: str) -> Callable[[Path], bool]:
+    """Prune predicate: files named for this specimen (``<id>``, ``<id>-...``,
+    ``<id>....``), the shape speconsense-summarize itself cleans."""
+    def prune(rel: Path) -> bool:
+        name = rel.name
+        return name == specimen_id or (
+            name.startswith(specimen_id) and name[len(specimen_id)] in "-.")
+    return prune
 
 
 def clone_or_copy(src: Path, dst: Path) -> None:

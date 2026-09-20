@@ -2,6 +2,7 @@
 
 import logging
 import queue
+import shutil
 import signal
 import sys
 import threading
@@ -57,6 +58,9 @@ class Pipeline:
         # its re-run would duplicate: roll them back before the scheduler
         # or a snapshot can read the per-specimen files.
         self.specimux.recover_interrupted()
+        # Tool output staged but never published belongs to jobs the
+        # previous process died inside; nothing is in flight now.
+        shutil.rmtree(config.staging_dir, ignore_errors=True)
         self.speconsense = SpeconsenseRunner(config, self.event_log)
         self.identify = IdentifyRunner(config, self.event_log) if config.reference_db else None
         self.summarize = SummarizeRunner(config, self.event_log)

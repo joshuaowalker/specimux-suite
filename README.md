@@ -283,6 +283,9 @@ output_dir/
 ├── mo_taxon_cache.json             # Cached Mushroom Observer observations (same shape)
 ├── inat_lineage_cache.json         # Cached genus lineages for taxonomy-level agreement
 ├── inat_photos/                    # Local photo cache (iNat + MO) for the dashboard and highlights screen
+├── specimux-inflight.json          # Present only while a demux runs; a restart rolls the demux back from it
+├── forward-ack.json                # With --forward-events: last event version the receiver acknowledged
+├── .staging/                       # Tool output before atomic publication into consensus/ and summary/
 ├── specimux/full/{pool}/
 │   └── {specimen_id}.fastq         # Demultiplexed reads per specimen
 ├── consensus/{specimen_id}/
