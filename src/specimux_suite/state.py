@@ -131,8 +131,15 @@ class PipelineState:
             if handler:
                 handler(self, event.data)
 
-    def rebuild(self, event_log: EventLog) -> None:
-        """Rebuild state by replaying all events."""
+    def rebuild(self, event_log: EventLog, heal: bool = True) -> None:
+        """Rebuild state by replaying all events.
+
+        ``heal`` applies the interrupted-run normalization at the end: right
+        for a restart or a sealed run, where nothing can still be running,
+        and wrong for a viewer replaying the log of an engine that is still
+        alive (a "running" specimen there is the truth). Viewers of a live
+        run pass ``heal=False``.
+        """
         with self._lock:
             for event in event_log.replay():
                 self.version = event.version
@@ -140,7 +147,8 @@ class PipelineState:
                 handler = self._handlers.get(event.type)
                 if handler:
                     handler(self, event.data)
-            self._normalize_interrupted()
+            if heal:
+                self._normalize_interrupted()
 
     def _normalize_interrupted(self) -> None:
         """Heal specimens stranded in CONSENSUS_RUNNING by a killed run.
