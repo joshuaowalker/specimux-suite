@@ -53,6 +53,10 @@ class Pipeline:
         self.scheduler = Scheduler(config, self.state)
 
         self.specimux = SpecimuxRunner(config, self.event_log)
+        # A demux the previous process died inside left appended reads that
+        # its re-run would duplicate: roll them back before the scheduler
+        # or a snapshot can read the per-specimen files.
+        self.specimux.recover_interrupted()
         self.speconsense = SpeconsenseRunner(config, self.event_log)
         self.identify = IdentifyRunner(config, self.event_log) if config.reference_db else None
         self.summarize = SummarizeRunner(config, self.event_log)
