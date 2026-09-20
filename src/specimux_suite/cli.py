@@ -158,7 +158,7 @@ def main():
     # Start web server in background (both modes)
     if not args.no_web:
         from .web.server import start_web_server
-        start_web_server(pipeline.event_log, pipeline.state, config)
+        start_web_server(pipeline.event_log, pipeline.state, config, pipeline.commands)
         if not args.no_open:
             url = f"http://localhost:{config.web_port}"
             # Only auto-open in a graphical session, and never on the main

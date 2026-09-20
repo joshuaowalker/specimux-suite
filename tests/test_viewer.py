@@ -91,8 +91,8 @@ def test_pages_and_static_served(tmp_path):
     r = c.get("/photos/123_large.jpg")
     assert r.status_code == 200
     assert "immutable" in r.headers["cache-control"]
-    # no mutation routes on the viewer itself
-    assert c.post("/api/watch/S1").status_code in (404, 405)
+    # no command route on the viewer itself
+    assert c.post("/api/commands", json={"command": "watch", "specimen_id": "S1"}).status_code in (404, 405)
 
 
 def test_sequence_not_yet_available_vs_unknown(tmp_path):

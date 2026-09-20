@@ -1,21 +1,19 @@
 """The local web server: the viewer app plus the routes that mutate a run.
 
 The read side (state, SSE, sequences, photos, pages) comes from the viewer
-factory in ``viewer.py``; this module adds what only the machine running
-the pipeline may do — toggling watches and the localhost-only admin page
-and its actions — and starts uvicorn.
+factory in ``viewer.py``; this module adds the one route that acts on the
+run, ``POST /api/commands`` over the commands facade (viewer commands open,
+admin commands localhost-only), the admin page, and starts uvicorn.
 """
 
 import logging
-import re
-import threading
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from ..commands import ALL_COMMANDS, VIEWER_COMMANDS, Commands
 from ..config import PipelineConfig
 from ..events import EventLog
-from ..inat_check import run_inat_check
 from ..state import PipelineState
 from .pages import render_page
 from .viewer import create_viewer_app, is_safe_name, serve_in_thread
@@ -25,8 +23,9 @@ logger = logging.getLogger(__name__)
 _is_safe_name = is_safe_name  # kept for existing imports
 
 
-def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig) -> FastAPI:
-    """The viewer app for this run with the local mutation routes added."""
+def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig,
+               commands: Commands) -> FastAPI:
+    """The viewer app for this run with the local command routes added."""
     share = None
     if config.share_url:
         share = {"url": config.share_url, "max_clients": config.share_max_clients}
@@ -36,7 +35,7 @@ def create_app(event_log: EventLog, state: PipelineState, config: PipelineConfig
         share=share,
         max_clients=config.share_max_clients,
     )
-    _add_mutation_routes(app, event_log, state, config)
+    _add_mutation_routes(app, commands)
     return app
 
 
@@ -91,8 +90,16 @@ def _check_admin(request: Request, mutating: bool = False):
     return None
 
 
-def _add_mutation_routes(app: FastAPI, event_log: EventLog, state: PipelineState,
-                         config: PipelineConfig) -> None:
+def _actor_for(request: Request) -> str:
+    """Who is acting, as the local server can tell: the operator at the
+    laptop, or a LAN viewer identified by address."""
+    client = request.client.host if request.client else None
+    if client in _LOCAL_CLIENTS:
+        return "operator"
+    return f"viewer:{client or 'unknown'}"
+
+
+def _add_mutation_routes(app: FastAPI, commands: Commands) -> None:
 
     @app.get("/admin")
     async def admin(request: Request):
@@ -103,78 +110,42 @@ def _add_mutation_routes(app: FastAPI, event_log: EventLog, state: PipelineState
             return HTMLResponse(f"<h1>403</h1><p>{denial}.</p>", status_code=403)
         return HTMLResponse(render_page("admin.html"))
 
-    @app.post("/api/admin/inat/correction")
-    async def admin_inat_correction(request: Request):
-        """Accept an iNat ID correction: emits inat.correction (pipeline heals)."""
-        deny = _check_admin(request, mutating=True)
-        if deny:
-            return deny
+    @app.post("/api/commands")
+    async def post_command(request: Request):
+        """Act on the run: ``{"command": name, ...args}``.
+
+        Viewer commands (watch, unwatch) are open to anyone who can see the
+        dashboard; the rest are admin (localhost + marker header). The
+        response is the facade's outcome; a rejected command is a 400 with
+        the reason (as ``error`` too, for the pages).
+        """
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError
         except Exception:
             return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-        specimen_id = body.get("specimen_id") or ""
-        new_obs_id = str(body.get("new_obs_id") or "")
-        if specimen_id not in state.specimens:
-            return JSONResponse(status_code=404, content={"error": "Specimen not found"})
-        if not new_obs_id.isdigit() or len(new_obs_id) > 12:
-            return JSONResponse(status_code=400, content={"error": "Invalid observation id"})
-        m = re.search(r"iNat(\d+)", specimen_id)
-        event_log.emit("inat.correction", {
-            "specimen_id": specimen_id,
-            "old_obs_id": m.group(1) if m else "",
-            "new_obs_id": new_obs_id,
-        })
-        return {"specimen_id": specimen_id, "new_obs_id": new_obs_id}
-
-    @app.post("/api/admin/inat/dismiss")
-    async def admin_inat_dismiss(request: Request):
-        """Mark a suggestion reviewed-no-change: emits inat.suggestion_dismissed."""
-        deny = _check_admin(request, mutating=True)
-        if deny:
-            return deny
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-        specimen_id = body.get("specimen_id") or ""
-        if specimen_id not in state.specimens:
-            return JSONResponse(status_code=404, content={"error": "Specimen not found"})
-        event_log.emit("inat.suggestion_dismissed", {"specimen_id": specimen_id})
-        return {"specimen_id": specimen_id, "dismissed": True}
-
-    @app.post("/api/admin/inat/rescan")
-    async def admin_inat_rescan(request: Request):
-        """Re-run the iNat ID audit in the background (network)."""
-        deny = _check_admin(request, mutating=True)
-        if deny:
-            return deny
-
-        def run():
-            try:
-                run_inat_check(state, event_log, config.summarize_output_dir)
-            except Exception:
-                logger.exception("iNat rescan failed")
-
-        threading.Thread(target=run, name="inat-rescan", daemon=True).start()
-        return {"started": True}
-
-    @app.post("/api/watch/{specimen_id}")
-    async def toggle_watch(specimen_id: str):
-        """Toggle watched state for a specimen."""
-        spec = state.specimens.get(specimen_id)
-        if not spec:
-            return JSONResponse(status_code=404, content={"error": "Specimen not found"})
-        new_watched = not spec.watched
-        event_log.emit("specimen.watched", {
-            "specimen_id": specimen_id,
-            "watched": new_watched,
-        })
-        return {"specimen_id": specimen_id, "watched": new_watched}
+        command = str(body.pop("command", "") or "")
+        if command not in ALL_COMMANDS:
+            return JSONResponse(status_code=400, content={"error": f"Unknown command: {command}"})
+        if command not in VIEWER_COMMANDS:
+            deny = _check_admin(request, mutating=True)
+            if deny:
+                return deny
+        body.pop("actor", None)  # the server knows who is asking
+        command_id = body.pop("command_id", None)
+        result = commands.dispatch(command, body, actor=_actor_for(request),
+                                   command_id=str(command_id) if command_id else None)
+        payload = result.to_dict()
+        if not result.ok:
+            payload["error"] = result.reason
+            return JSONResponse(status_code=400, content=payload)
+        return payload
 
 
-def start_web_server(event_log: EventLog, state: PipelineState, config: PipelineConfig):
+def start_web_server(event_log: EventLog, state: PipelineState, config: PipelineConfig,
+                     commands: Commands):
     """Start the web server in a background thread."""
-    app = create_app(event_log, state, config)
+    app = create_app(event_log, state, config, commands)
     serve_in_thread(app, config.web_host, config.web_port)
     logger.info(f"Web dashboard at http://{config.web_host}:{config.web_port}")

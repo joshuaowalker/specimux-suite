@@ -690,6 +690,16 @@ function scheduleRender() {
   });
 }
 
+// Every action on the run is a command; the server answers with its
+// outcome and the resulting event reconciles the page.
+function postCommand(command, args) {
+  return fetch('/api/commands', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, ...(args || {}) }),
+  }).catch(() => {});
+}
+
 // SSE connection
 let connFailures = 0;
 
@@ -1667,8 +1677,9 @@ function renderProcessing() {
       // Optimistic toggle so the tap responds instantly on flaky LAN wifi;
       // the specimen.watched event reconciles the authoritative state.
       const spec = state.specimens[btn.dataset.sid];
-      if (spec) { spec.watched = !spec.watched; scheduleRender(); }
-      fetch(`/api/watch/${encodeURIComponent(btn.dataset.sid)}`, { method: 'POST' });
+      if (!spec) return;
+      spec.watched = !spec.watched; scheduleRender();
+      postCommand(spec.watched ? 'watch' : 'unwatch', { specimen_id: btn.dataset.sid });
     });
   });
 }
@@ -1837,8 +1848,9 @@ function renderSummary() {
       // Optimistic toggle so the tap responds instantly on flaky LAN wifi;
       // the specimen.watched event reconciles the authoritative state.
       const spec = state.specimens[btn.dataset.sid];
-      if (spec) { spec.watched = !spec.watched; scheduleRender(); }
-      fetch(`/api/watch/${encodeURIComponent(btn.dataset.sid)}`, { method: 'POST' });
+      if (!spec) return;
+      spec.watched = !spec.watched; scheduleRender();
+      postCommand(spec.watched ? 'watch' : 'unwatch', { specimen_id: btn.dataset.sid });
     });
   });
 

@@ -104,13 +104,14 @@
 
 const state = { version: 0, specimens: {}, suggestions: [], corrections: {}, dismissed: new Set(), moUnresolved: [] };
 
-// Admin actions are ordinary JSON POSTs with a marker header (the server
+// Admin actions are commands: JSON POSTs with a marker header (the server
 // requires it — it forces a CORS preflight that browsers refuse cross-origin).
-async function adminPost(path, body) {
-  const resp = await fetch(path, {
+// The response is the command's outcome; rejected ones come back as 400.
+async function postCommand(command, args) {
+  const resp = await fetch('/api/commands', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Specimux-Admin': '1' },
-    body: JSON.stringify(body || {}),
+    body: JSON.stringify({ command, ...(args || {}) }),
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || resp.statusText);
@@ -284,7 +285,7 @@ sections.push({
 
 async function acceptCorrection(sid, obsId) {
   try {
-    await adminPost('/api/admin/inat/correction', { specimen_id: sid, new_obs_id: obsId });
+    await postCommand('correct', { specimen_id: sid, new_obs_id: obsId });
     toast(`Accepted ${obsId} — pipeline is applying it`);
   } catch (e) { toast(`Failed: ${e.message}`, true); }
 }
@@ -298,7 +299,7 @@ async function acceptManual(sid) {
 
 async function dismissSuggestion(sid) {
   try {
-    await adminPost('/api/admin/inat/dismiss', { specimen_id: sid });
+    await postCommand('dismiss', { specimen_id: sid });
     toast('Dismissed');
   } catch (e) { toast(`Failed: ${e.message}`, true); }
 }
@@ -306,7 +307,7 @@ async function dismissSuggestion(sid) {
 async function rescan(btn) {
   btn.disabled = true;
   try {
-    await adminPost('/api/admin/inat/rescan', {});
+    await postCommand('rescan');
     toast('Re-scan started — results arrive when it finishes');
   } catch (e) { toast(`Failed: ${e.message}`, true); }
   setTimeout(() => { btn.disabled = false; }, 5000);

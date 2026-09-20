@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
 from pathlib import Path
 
+from .commands import Commands
 from .config import PipelineConfig
 from .console import ConsoleUI
 from .events import EventLog
@@ -133,6 +134,10 @@ class Pipeline:
         self._exit_after_finalize = False
         self._sigint_count = 0
         self._old_sigint = None
+        self._mode: str | None = None  # "batch" | "live" once a run starts
+        # Every user action on the run goes through the facade (web routes,
+        # plugins, tests) — it is the only thing that emits action events.
+        self.commands = Commands(self.event_log, self.state, control=self)
 
     def _load_specimens(self) -> None:
         """Parse the specimens file and emit specimens.loaded event.
@@ -460,6 +465,7 @@ class Pipeline:
             logger.error(f"Required tools not found on PATH: {', '.join(missing)}")
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
+        self._mode = "batch"
         self.event_log.emit("pipeline.started", {
             "mode": "batch",
             "config_summary": self.config.summary(),
@@ -524,6 +530,7 @@ class Pipeline:
             logger.error(f"Required tools not found on PATH: {', '.join(missing)}")
             raise RuntimeError(f"Missing required tools: {', '.join(missing)}")
 
+        self._mode = "live"
         self.event_log.emit("pipeline.started", {
             "mode": "live",
             "config_summary": self.config.summary(),
@@ -608,6 +615,36 @@ class Pipeline:
     def shutdown(self) -> None:
         """Signal the pipeline to shut down."""
         self._shutdown.set()
+
+    # --- RunControl (the commands facade's hooks) ---
+
+    def request_finalize(self) -> str | None:
+        """Queue finalization for the live main loop (same path as [F]/Ctrl+C)."""
+        if self._mode != "live":
+            return "Finalize applies to live runs only"
+        if self._shutdown.is_set():
+            return "The run is shutting down"
+        self.cmd_queue.put("finalize")
+        return None
+
+    def request_abort(self) -> str | None:
+        """Stop the run: running jobs finish, queued ones are dropped."""
+        if self._shutdown.is_set():
+            return "The run is already shutting down"
+        logger.info("Abort requested, shutting down")
+        self._shutdown.set()
+        return None
+
+    def rescan_inat(self) -> str | None:
+        """Re-run the iNat ID audit in the background (network)."""
+        def run():
+            try:
+                self._run_inat_id_check()
+            except Exception:
+                logger.exception("iNat rescan failed")
+
+        threading.Thread(target=run, name="inat-rescan", daemon=True).start()
+        return None
 
     def _install_sigint(self, mode: str) -> None:
         """Install a SIGINT handler for graceful Ctrl+C behavior.

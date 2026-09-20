@@ -1,6 +1,7 @@
 """Pipeline state — in-memory materialized view rebuilt from events."""
 
 import logging
+from collections import deque
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
@@ -118,9 +119,13 @@ class PipelineState:
         # {ts, input_cum, matched_cum, counts: {sid: cumulative reads}}.
         # Decimated by halving beyond _DEMUX_HISTORY_MAX entries.
         self.demux_history: list[dict] = []
+        # The most recent command outcomes ({command_id, command, actor,
+        # outcome, reason, args, ts}), newest last: the audit trail's tail.
+        self.command_outcomes: deque = deque(maxlen=self._COMMAND_OUTCOMES_MAX)
         self._event_ts: Optional[str] = None  # ts of the event being applied
 
     _DEMUX_HISTORY_MAX = 512
+    _COMMAND_OUTCOMES_MAX = 200
 
     def apply(self, event: Event) -> None:
         """Apply a single event to update state (thread-safe)."""
@@ -205,6 +210,7 @@ class PipelineState:
                 "inat_corrections": {k: dict(v) for k, v in self.inat_corrections.items()},
                 "inat_dismissed": sorted(self.inat_dismissed),
                 "mo_unresolved": [dict(u) for u in self.mo_unresolved],
+                "command_outcomes": [dict(o) for o in self.command_outcomes],
                 "specimens": {
                     sid: _specimen_to_dict(s) for sid, s in self.specimens.items()
                 },
@@ -386,6 +392,11 @@ class PipelineState:
         )
         spec.variants = data.get("variants", [])
 
+    def _on_command_outcome(self, data: dict):
+        rec = {k: data.get(k) for k in ("command_id", "command", "actor", "outcome", "reason", "args")}
+        rec["ts"] = self._event_ts
+        self.command_outcomes.append(rec)
+
     def _on_specimen_watched(self, data: dict):
         spec = self.get_specimen(data["specimen_id"])
         spec.watched = data.get("watched", True)
@@ -418,6 +429,7 @@ class PipelineState:
         "summarize.started": _on_summarize_started,
         "summarize.completed": _on_summarize_completed,
         "specimen.watched": _on_specimen_watched,
+        "command.outcome": _on_command_outcome,
         "pipeline.error": _on_pipeline_error,
     }
 
