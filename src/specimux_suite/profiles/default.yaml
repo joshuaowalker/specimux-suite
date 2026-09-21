@@ -1,5 +1,5 @@
 # Default suite profile — matches built-in defaults
-specimux-suite-version: "0.1.*"
+specimux-suite-version: "*"   # bundled: always the installed version
 description: "Default pipeline settings"
 
 suite:

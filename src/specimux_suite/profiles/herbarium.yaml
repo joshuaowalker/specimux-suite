@@ -1,5 +1,5 @@
 # Settings optimized for herbarium specimens with degraded DNA
-specimux-suite-version: "0.1.*"
+specimux-suite-version: "*"   # bundled: always the installed version
 description: "Herbarium specimens with relaxed consensus thresholds"
 
 suite:
