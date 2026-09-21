@@ -103,8 +103,9 @@ class _HostServer:
     API origin, plus a token endpoint and a fake session endpoint that
     record what the page sent."""
 
-    def __init__(self, port: int, api_origin: str, with_session: bool):
+    def __init__(self, port: int, api_origin: str, with_session: bool, token_status: int = 200):
         self.port = port
+        self.token_status = token_status
         self.origin = f"http://127.0.0.1:{self.port}"
         self.calls: list[tuple[str, str, dict]] = []
         runtime = {"apiBase": api_origin, "assetBase": api_origin, "pageBase": ""}
@@ -129,8 +130,11 @@ class _HostServer:
                 host.calls.append(("GET", self.path, dict(self.headers)))
                 if self.path == "/":
                     self._send(200, host.html, "text/html; charset=utf-8")
-                elif self.path == "/token":
-                    self._send(200, json.dumps({"token": "tok-123", "expires_in": 600}).encode())
+                elif self.path.startswith("/token"):
+                    if host.token_status != 200:
+                        self._send(host.token_status, b'{"error": "log in first"}')
+                    else:
+                        self._send(200, json.dumps({"token": "tok-123", "expires_in": 600}).encode())
                 else:
                     self._send(404, b"{}")
 
@@ -229,6 +233,23 @@ def test_dashboard_served_from_a_foreign_origin(tmp_path, browser, with_session)
         assert session_headers.get("Authorization") == "Bearer tok-123"
     else:
         assert host_paths == [("GET", "/")]
+    page.close()
+
+
+def test_same_origin_token_endpoint_refusing_sends_the_page_through_the_host(tmp_path, browser):
+    """A same-origin token endpoint answering 401 (the host does not know
+    this browser) makes the page navigate there with a return URL, the
+    host's chance to log the user in and bounce back with a token."""
+    host_port = _free_port()
+    api_origin, _, _ = _api(tmp_path, f"http://127.0.0.1:{host_port}")
+    host = _HostServer(host_port, api_origin, with_session=True, token_status=401)
+    page = browser.new_page()
+    page.goto(host.origin + "/")
+    page.wait_for_url(lambda u: "return=" in u, timeout=10000)
+    from urllib.parse import parse_qs, urlsplit
+    assert urlsplit(page.url).path == "/token"
+    assert parse_qs(urlsplit(page.url).query)["return"] == [host.origin + "/"]
+    assert [(m, p.split("?")[0]) for m, p, _ in host.calls] == [("GET", "/"), ("GET", "/token"), ("GET", "/token")]
     page.close()
 
 

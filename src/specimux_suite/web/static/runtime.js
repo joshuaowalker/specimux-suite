@@ -124,6 +124,11 @@
       return navigateToAuthorize();
     }
     const tokResp = await fetch(rt.tokenEndpoint, { credentials: 'same-origin' });
+    if (tokResp.status === 401 || tokResp.status === 403) {
+      // the host does not know this browser (no login there): go through
+      // the host's own front door and come back with a token
+      return navigateToAuthorize();
+    }
     if (!tokResp.ok) throw new Error(`token endpoint: ${tokResp.status}`);
     const tok = await tokResp.json();
     await postSession(tok.token);
