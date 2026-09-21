@@ -17,7 +17,7 @@ import re
 import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -229,4 +229,154 @@ def test_dashboard_served_from_a_foreign_origin(tmp_path, browser, with_session)
         assert session_headers.get("Authorization") == "Bearer tok-123"
     else:
         assert host_paths == [("GET", "/")]
+    page.close()
+
+
+# --- the fragment handoff (a run API serving its own pages) ---
+
+class _SessionApi:
+    """A stand-in run API on one origin that serves the page, requires a
+    session cookie for the API, exchanges a bearer token for that cookie,
+    and keeps an SSE connection open; plus, on a second origin, a host's
+    authorize route that bounces back with a token in the fragment."""
+
+    def __init__(self, port: int, host_port: int, snapshot: dict):
+        self.origin = f"http://127.0.0.1:{port}"
+        self.host_origin = f"http://127.0.0.1:{host_port}"
+        self.calls: list[tuple[str, str, dict]] = []
+        self.snapshot = snapshot
+        runtime = {"apiBase": self.origin, "assetBase": self.origin, "pageBase": "",
+                   "tokenEndpoint": f"{self.host_origin}/authorize",
+                   "sessionEndpoint": f"{self.origin}/session"}
+        self.html = render_page("index.html", runtime).encode()
+        api = self
+
+        class Api(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body, ctype="application/json", extra=()):
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                for k, v in extra:
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _session(self):
+                return "specimux_session=ok" in (self.headers.get("Cookie") or "")
+
+            def do_GET(self):
+                api.calls.append(("GET", self.path, dict(self.headers)))
+                path = self.path.split("?")[0]
+                if path == "/":
+                    self._send(200, api.html, "text/html; charset=utf-8")
+                elif path.startswith("/static/"):
+                    f = STATIC_DIR / path[len("/static/"):]
+                    self._send(200, f.read_bytes(), "text/javascript" if f.suffix == ".js" else "text/css")
+                elif not self._session():
+                    self._send(401, b'{"error": "A run session is required"}')
+                elif path == "/api/state":
+                    self._send(200, json.dumps(api.snapshot).encode())
+                elif path == "/api/viewers":
+                    self._send(200, b'{"sse_clients": 0}')
+                elif path == "/events":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(b": open\n\n")
+                    self.wfile.flush()
+                    time.sleep(30)   # hold the stream open for the test's life
+                else:
+                    self._send(404, b"{}")
+
+            def do_POST(self):
+                api.calls.append(("POST", self.path, dict(self.headers)))
+                if self.path == "/session":
+                    auth = self.headers.get("Authorization") or ""
+                    if auth == "Bearer tok-good":
+                        self._send(200, b'{"expires_in": 43200}',
+                                   extra=[("Set-Cookie", "specimux_session=ok; Path=/; HttpOnly; SameSite=Lax")])
+                    else:
+                        self._send(401, b'{"error": "bad token"}')
+                else:
+                    self._send(404, b"{}")
+
+        class Host(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                api.calls.append(("GET", "host:" + self.path, dict(self.headers)))
+                from urllib.parse import parse_qs, urlsplit
+                q = parse_qs(urlsplit(self.path).query)
+                back = q.get("return", [""])[0]
+                self.send_response(302)
+                self.send_header("Location", back + "#token=tok-good")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self.api_server = ThreadingHTTPServer(("127.0.0.1", port), Api)
+        self.api_server.daemon_threads = True
+        self.host_server = HTTPServer(("127.0.0.1", host_port), Host)
+        threading.Thread(target=self.api_server.serve_forever, daemon=True).start()
+        threading.Thread(target=self.host_server.serve_forever, daemon=True).start()
+
+
+def _snapshot(tmp_path) -> dict:
+    log = EventLog(tmp_path / "events.jsonl")
+    log.emit("pipeline.started", {"mode": "batch", "config_summary": {"min_reads": 10}})
+    log.emit("specimux.completed", {"specimens": {"S1": 40, "S2": 12}})
+    _, state = load_run(tmp_path / "events.jsonl")
+    return state.to_dict()
+
+
+@pytest.mark.parametrize("entry", ["bounce", "fragment", "stale-fragment"])
+def test_cross_origin_token_endpoint_is_a_bounce_with_a_fragment_token(tmp_path, browser, entry):
+    """The page opened without a session navigates to the host's authorize
+    URL with a return parameter, comes back with #token=, exchanges it for
+    the cookie, strips the fragment, and loads. Opened with a fragment
+    token already (a link from the host), it exchanges without leaving. A
+    stale fragment token is exchanged, refused, and then the bounce."""
+    api = _SessionApi(_free_port(), _free_port(), _snapshot(tmp_path))
+    page = browser.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    # the 401s that drive the bounce are logged by the browser as resource errors
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "401" not in m.text else None)
+
+    start = {"bounce": api.origin + "/", "fragment": api.origin + "/#token=tok-good",
+             "stale-fragment": api.origin + "/#token=tok-old"}[entry]
+    page.goto(start)
+    try:
+        page.wait_for_function("typeof state !== 'undefined' && state.version > 0", timeout=10000)
+    except Exception:
+        raise AssertionError(f"dashboard never loaded; errors={errors} "
+                             f"calls={[(m, p) for m, p, _ in api.calls]}")
+    assert page.evaluate("Object.keys(state.specimens).sort()") == ["S1", "S2"]
+    assert page.url == api.origin + "/", "the token must not stay in the address bar"
+    assert not errors, errors
+
+    paths = [(m, p.split("?")[0]) for m, p, _ in api.calls]
+    session_auths = [h.get("Authorization") for m, p, h in api.calls if p == "/session"]
+    authorize_calls = [(p, h) for m, p, h in api.calls if p.startswith("host:/authorize")]
+    if entry == "bounce":
+        # api/state without a session → 401 → probe → authorize → back with a token
+        assert paths.index(("GET", "/api/state")) < paths.index(("GET", "host:/authorize"))
+        assert len(authorize_calls) == 1
+        from urllib.parse import parse_qs, urlsplit
+        assert parse_qs(urlsplit(authorize_calls[0][0][len("host:"):]).query)["return"] == [api.origin + "/"]
+        assert session_auths == ["Bearer tok-good"]
+    elif entry == "fragment":
+        assert authorize_calls == []
+        assert session_auths == ["Bearer tok-good"]
+    else:
+        assert session_auths == ["Bearer tok-old", "Bearer tok-good"]
+        assert len(authorize_calls) == 1
+    # the API was only ever answered with the cookie after the exchange
+    assert ("GET", "/events") in paths
     page.close()
