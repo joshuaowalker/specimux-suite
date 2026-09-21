@@ -146,6 +146,8 @@ TGCATGCA...
 
 A plugin is an object with `start(context)` and `shutdown()` that runs alongside the pipeline; the context gives it the event log, the state, the commands facade (every user action on the run: `watch`, `correct`, `finalize`, ...), the config and the output dir. Packages register plugins in the `specimux_suite.plugins` entry-point group. The suite ships one: the HTTP event forwarder, which POSTs the event log to a URL in version order, at least once, resuming from the last acknowledged version after a restart (`forward-ack.json` in the output dir). Each batch is JSON `{"events": [...], "from_version", "to_version"}` and a 2xx acknowledges it; the receiver dedupes by version. Use it to mirror a run to a read-only dashboard elsewhere.
 
+This interface (plugins, the forwarder, the viewer app factory and the pages' injected runtime config) exists so the suite can be hosted: a separate project, specimux-cloud, runs the pipeline as a cloud service and serves the same dashboard from a run API. The suite itself stays a local tool and has no cloud dependency.
+
 ## Pipeline
 
 ### Processing stages

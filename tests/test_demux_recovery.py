@@ -8,7 +8,7 @@ runner records each output file's length before a demux and a restart
 rolls the outputs back to that manifest (``recover_interrupted``), which
 ``Pipeline.__init__`` does before anything reads the specimen files.
 
-The acceptance test is the one CLOUD.md names for milestone 1: kill the
+The acceptance test is the one the cloud design names for milestone 1: kill the
 process during demux after outputs are written but before the completion
 event, restart, assert no duplicated reads.
 """
