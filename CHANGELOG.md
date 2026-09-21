@@ -5,6 +5,24 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## 0.3.1 — 2026-09-21
+
+Two fixes found while putting the hosted dashboard in front of a real
+browser.
+
+- Bundled profiles load under any suite version. The bundled `default`
+  and `herbarium` profiles still pinned 0.1.x, so `--profile default`
+  refused to load on 0.2.1 and 0.3.0 with "Profile 'default' requires
+  specimux-suite version 0.1.*". Bundled profiles ship with the
+  installed version, so their pin is no longer checked; user profiles
+  keep the check.
+- The pages' runtime handles a cross-origin token endpoint: the page
+  navigates to the host's authorize URL with a return parameter and
+  comes back with the run token in the URL fragment, which it exchanges
+  for the session cookie and strips from history. A same-origin token
+  endpoint that answers 401 takes the same route, through the host's
+  login. Only a hosted run API uses this; local runs are unaffected.
+
 ## 0.3.0 — 2026-09-21
 
 The extension release: the pieces a hosting service needs to run the

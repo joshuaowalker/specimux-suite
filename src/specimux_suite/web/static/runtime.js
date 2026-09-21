@@ -7,11 +7,21 @@
 // eventSource / apiUrl, never a relative path, so a host that serves the
 // pages on its own origin can point them at a run API elsewhere.
 //
-// Session protocol (only when tokenEndpoint is set): the page fetches a
-// run token from its own origin (tokenEndpoint, with the page's cookies),
-// exchanges it at sessionEndpoint (Bearer token, credentials included) for
-// a run API cookie, and repeats before the token expires or when the API
-// answers 401. Plain script, no module: pages load it first.
+// Session protocol (only when tokenEndpoint and sessionEndpoint are set):
+// the page obtains a short-lived run token and exchanges it at
+// sessionEndpoint (POST, Bearer token, credentials included) for a run API
+// session cookie. Where the token comes from depends on tokenEndpoint:
+//
+// - same-origin: fetched as JSON ({"token", "expires_in"}) with the page's
+//   own cookies, and re-fetched before it expires or when the API answers
+//   401 (a host that proxies the page onto its origin);
+// - cross-origin: the page navigates there (top level, with a `return`
+//   parameter naming this page), the host authorizes the user and comes
+//   back to the return URL with `#token=...` in the fragment, which the page
+//   exchanges and strips from history. A 401 later sends the page back the
+//   same way. A run API that serves its own pages uses this form.
+//
+// Plain script, no module: pages load it first.
 (function () {
   'use strict';
 
@@ -33,17 +43,95 @@
   // --- session ---
   let sessionPromise = null;   // in-flight exchange, shared by all callers
   let refreshTimer = null;
+  let leaving = false;         // navigating to the authorize URL: stop here
 
-  async function exchange() {
-    const tokResp = await fetch(rt.tokenEndpoint, { credentials: 'same-origin' });
-    if (!tokResp.ok) throw new Error(`token endpoint: ${tokResp.status}`);
-    const tok = await tokResp.json();
-    const sessResp = await fetch(rt.sessionEndpoint, {
+  function sameOrigin(url) {
+    try { return new URL(url, window.location.href).origin === window.location.origin; }
+    catch (e) { return false; }
+  }
+
+  // A token handed over in the URL fragment by the host's authorize route.
+  // Taken once, and removed from the address bar and history at once.
+  let fragmentToken = null;
+  (function takeFragmentToken() {
+    const m = /(?:^#|&)token=([^&]+)/.exec(window.location.hash || '');
+    if (!m) return;
+    fragmentToken = decodeURIComponent(m[1]);
+    const rest = (window.location.hash || '').replace(/(?:^#|&)token=[^&]+/, '').replace(/^#&/, '#');
+    try {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search + (rest === '#' ? '' : rest));
+    } catch (e) { /* history unavailable: the fragment stays, harmlessly */ }
+  })();
+
+  // Send the browser to the host's authorize URL, which comes back to this
+  // page with a fresh token. Guarded so a host that keeps handing out
+  // tokens the API refuses cannot bounce the page forever.
+  const BOUNCE_KEY = 'specimux-authorize-bounce';
+  function navigateToAuthorize() {
+    let last = 0;
+    try { last = Number(window.sessionStorage.getItem(BOUNCE_KEY) || 0); } catch (e) { /* no storage */ }
+    if (Date.now() - last < 10000) {
+      throw new Error('authorization bounced back without a usable token');
+    }
+    try { window.sessionStorage.setItem(BOUNCE_KEY, String(Date.now())); } catch (e) { /* no storage */ }
+    const u = new URL(rt.tokenEndpoint, window.location.href);
+    u.searchParams.set('return', window.location.href.split('#')[0]);
+    leaving = true;
+    window.location.assign(u.toString());
+    return new Promise(() => {});   // the page is leaving; nothing resolves
+  }
+
+  async function postSession(token) {
+    const resp = await fetch(rt.sessionEndpoint, {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Authorization': `Bearer ${tok.token}` },
+      headers: { 'Authorization': `Bearer ${token}` },
     });
-    if (!sessResp.ok) throw new Error(`session endpoint: ${sessResp.status}`);
+    if (!resp.ok) throw new Error(`session endpoint: ${resp.status}`);
+    let body = {};
+    try { body = await resp.json(); } catch (e) { body = {}; }
+    return body;
+  }
+
+  // In the cross-origin form the page may already hold a session cookie
+  // (a reload, a second tab), so it asks the API before bouncing: a tiny
+  // GET that every viewer serves, 401 meaning "no session".
+  async function hasSession() {
+    try {
+      const resp = await fetch(rt.apiUrl('/api/viewers'), { credentials: 'include' });
+      return resp.status !== 401;
+    } catch (e) { return true; }   // a network failure is not a missing session
+  }
+
+  async function exchange(refresh) {
+    if (leaving) return new Promise(() => {});
+    if (fragmentToken) {
+      const token = fragmentToken;
+      fragmentToken = null;
+      try {
+        await postSession(token);
+        return;
+      } catch (e) {
+        // an expired or foreign token in the fragment: fall through and
+        // obtain one the normal way
+      }
+    }
+    if (!sameOrigin(rt.tokenEndpoint)) {
+      // First call: trust an existing cookie and let a 401 bring us back
+      // here with refresh. Refresh (a 401, an SSE error): confirm the
+      // session is really gone before leaving the page.
+      if (!refresh || await hasSession()) return;
+      return navigateToAuthorize();
+    }
+    const tokResp = await fetch(rt.tokenEndpoint, { credentials: 'same-origin' });
+    if (tokResp.status === 401 || tokResp.status === 403) {
+      // the host does not know this browser (no login there): go through
+      // the host's own front door and come back with a token
+      return navigateToAuthorize();
+    }
+    if (!tokResp.ok) throw new Error(`token endpoint: ${tokResp.status}`);
+    const tok = await tokResp.json();
+    await postSession(tok.token);
     // Re-exchange at 80% of the token's life (default 10 minutes).
     const ttl = Number(tok.expires_in) > 0 ? Number(tok.expires_in) : 600;
     clearTimeout(refreshTimer);
@@ -55,9 +143,10 @@
   // exchange; {refresh: true} forces a new one (expiry, a 401).
   rt.ready = (opts) => {
     if (!rt.tokenEndpoint || !rt.sessionEndpoint) return Promise.resolve();
-    if (opts && opts.refresh) sessionPromise = null;
+    const refresh = !!(opts && opts.refresh);
+    if (refresh) sessionPromise = null;
     if (!sessionPromise) {
-      sessionPromise = exchange().catch((e) => { sessionPromise = null; throw e; });
+      sessionPromise = exchange(refresh).catch((e) => { sessionPromise = null; throw e; });
     }
     return sessionPromise;
   };

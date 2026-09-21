@@ -11,9 +11,13 @@ proxies them onto its own origin):
    content is replaced with the runtime config the pages read at load
    (``static/runtime.js``): ``apiBase`` (where ``/api/...``, ``/events``
    and ``/photos/...`` live), ``assetBase``, ``pageBase``, and, when the
-   API needs a session, ``tokenEndpoint`` (same-origin, returns
-   ``{"token", "expires_in"}``) and ``sessionEndpoint`` (the API's token
-   exchange). Locally the endpoints are null.
+   API needs a session, ``tokenEndpoint`` and ``sessionEndpoint`` (the
+   API's token exchange, ``POST`` with a Bearer run token, which sets the
+   session cookie). A same-origin token endpoint is fetched as JSON
+   (``{"token", "expires_in"}``); a cross-origin one is the host's
+   authorize URL, which the page navigates to with a ``return`` query
+   parameter and which comes back with ``#token=...`` in the fragment
+   (see ``static/runtime.js``). Locally the endpoints are null.
 
 Every API and asset reference in the pages goes through one of these;
 ``tests/test_pages.py`` fails on a root-relative URL that does not.

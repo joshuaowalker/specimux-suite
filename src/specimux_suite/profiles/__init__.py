@@ -112,10 +112,12 @@ class SuiteProfile:
         if user_path.exists():
             return cls._load_from_path(user_path, name, check_version)
 
-        # Fall back to bundled profile
+        # Fall back to bundled profile. Bundled profiles ship with this very
+        # version, so the version pin is never checked for them (a stale pin
+        # once made `--profile default` refuse to load).
         bundled_path = _get_bundled_profile_path(name)
         if bundled_path is not None:
-            return cls._load_from_path(bundled_path, name, check_version)
+            return cls._load_from_path(bundled_path, name, check_version=False)
 
         # Profile not found - provide helpful error
         available = list_profiles()
