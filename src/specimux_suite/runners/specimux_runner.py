@@ -10,9 +10,19 @@ from pathlib import Path
 
 from ..config import PipelineConfig
 from ..events import EventLog
-from ..util import count_fastq_reads_fast, scan_specimen_reads
+from ..util import atomic_write, count_fastq_reads_fast, scan_specimen_reads
 
 logger = logging.getLogger(__name__)
+
+# The demux commit boundary. specimux appends reads to per-specimen FASTQs
+# and the runner emits specimux.completed afterwards; a run that dies in
+# between leaves appended reads that a restart (which re-runs any file not
+# marked processed) would append again. So before each demux the runner
+# records every output file's length in this manifest, and a restart that
+# finds it truncates the outputs back (appends only grow files, so this is
+# exact) and removes files the interrupted demux created. The manifest is
+# removed once the completion event is out.
+INFLIGHT_FILENAME = "specimux-inflight.json"
 
 
 class SpecimuxRunner:
@@ -25,6 +35,76 @@ class SpecimuxRunner:
         # scan O(new data) instead of recounting every specimen file.
         self._scan_cache: dict[str, tuple[int, int]] = {}
 
+    @property
+    def inflight_path(self) -> Path:
+        return self.config.output_dir / INFLIGHT_FILENAME
+
+    def record_inflight(self, job_id: str, fastq_path: Path) -> None:
+        """Write the manifest of output-file lengths before a demux starts."""
+        output_dir = self.config.specimux_output_dir
+        lengths = {}
+        if output_dir.exists():
+            for f in output_dir.rglob("*"):
+                if f.is_file():
+                    lengths[str(f.relative_to(output_dir))] = f.stat().st_size
+        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write(self.inflight_path, json.dumps({
+            "job_id": job_id,
+            "file_path": str(fastq_path),
+            "lengths": lengths,
+        }).encode("utf-8"))
+
+    def clear_inflight(self) -> None:
+        try:
+            self.inflight_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f"Could not remove {self.inflight_path}: {e}")
+
+    def recover_interrupted(self) -> dict | None:
+        """Roll the specimux output back to the state before an interrupted demux.
+
+        Call at startup, before anything reads the per-specimen files. Does
+        nothing without a manifest. Returns a summary of what was undone.
+        """
+        try:
+            manifest = json.loads(self.inflight_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            logger.warning(f"Unreadable demux manifest {self.inflight_path}: {e}")
+            return None
+
+        output_dir = self.config.specimux_output_dir
+        lengths: dict[str, int] = manifest.get("lengths", {})
+        truncated, removed = [], []
+        for rel, size in lengths.items():
+            f = output_dir / rel
+            try:
+                current = f.stat().st_size
+            except FileNotFoundError:
+                continue
+            if current > size:
+                with open(f, "r+b") as fh:
+                    fh.truncate(size)
+                truncated.append(rel)
+            elif current < size:
+                logger.warning(f"{f} is shorter ({current}) than the demux manifest "
+                               f"recorded ({size}); leaving it")
+        if output_dir.exists():
+            for f in sorted(output_dir.rglob("*")):
+                if f.is_file() and str(f.relative_to(output_dir)) not in lengths:
+                    f.unlink()
+                    removed.append(str(f.relative_to(output_dir)))
+        self.clear_inflight()
+        self._scan_cache.clear()
+        summary = {"file_path": manifest.get("file_path"), "job_id": manifest.get("job_id"),
+                   "truncated": truncated, "removed": removed}
+        logger.warning(
+            f"Rolled back an interrupted demux of {manifest.get('file_path')}: "
+            f"{len(truncated)} file(s) truncated, {len(removed)} removed; "
+            "it will be demuxed again")
+        return summary
+
     def run(self, fastq_path: Path, threads: int | None = None) -> dict[str, dict]:
         """Run specimux on a FASTQ file.
 
@@ -36,6 +116,12 @@ class SpecimuxRunner:
         job_id = str(uuid.uuid4())[:8]
         output_dir = self.config.specimux_output_dir
         input_reads = count_fastq_reads_fast(fastq_path)
+
+        # A manifest here means the previous demux never reached its
+        # completion event (startup recovery should have handled it; this
+        # is the same rollback, idempotent)
+        self.recover_interrupted()
+        self.record_inflight(job_id, fastq_path)
 
         self.event_log.emit("specimux.started", {
             "job_id": job_id,
@@ -90,6 +176,7 @@ class SpecimuxRunner:
                     "specimens": {},
                     "file_path": str(fastq_path),
                 })
+                self.clear_inflight()
                 return {}
             finally:
                 # Stop monitor
@@ -109,6 +196,7 @@ class SpecimuxRunner:
                     "specimens": {},
                     "file_path": str(fastq_path),
                 })
+                self.clear_inflight()
                 return {}
 
             # Scan output directory for specimen read counts
@@ -124,6 +212,8 @@ class SpecimuxRunner:
                 "input_reads": input_reads,
                 "matched_reads": matched_reads,
             })
+            # The commit point: the event is durable, the appends are final
+            self.clear_inflight()
 
             # Emit per-specimen updates
             for sid, info in specimens.items():
@@ -143,6 +233,7 @@ class SpecimuxRunner:
                 "component": "specimux",
                 "message": msg,
             })
+            self.clear_inflight()  # nothing ran, nothing to roll back
             return {}
         finally:
             # Clean up progress file

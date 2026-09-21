@@ -2,12 +2,14 @@
 
 import json
 import logging
+import shutil
 import uuid
 import subprocess
 from pathlib import Path
 
 from ..config import PipelineConfig
 from ..events import EventLog
+from ..util import owned_by, publish_tree
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +41,12 @@ class SummarizeRunner:
 
         source_dir = self.config.consensus_output_dir / specimen_id
         summary_dir = self.config.summarize_output_dir
+        # The tool cleans and rewrites this specimen's files in the shared
+        # summary dir, which the dashboard serves; it writes to a staging
+        # dir instead and the result is published atomically per file.
+        staging = self.config.staging_dir / "summary" / f"{specimen_id}.{job_id}"
 
-        cmd = self._build_command(source_dir, summary_dir, specimen_id)
+        cmd = self._build_command(source_dir, staging, specimen_id)
         logger.info(f"Running summarize for {specimen_id}: {' '.join(str(c) for c in cmd)}")
 
         try:
@@ -54,6 +60,7 @@ class SummarizeRunner:
 
             if result.returncode != 0:
                 logger.error(f"speconsense-summarize failed for {specimen_id}: {result.stderr}")
+                shutil.rmtree(staging, ignore_errors=True)
                 self.event_log.emit("pipeline.error", {
                     "component": "summarize",
                     "specimen_id": specimen_id,
@@ -61,6 +68,9 @@ class SummarizeRunner:
                     "details": result.stderr[-2000:] if result.stderr else "",
                 })
                 return []
+
+            # New files in, then this specimen's previous generation out
+            publish_tree(staging, summary_dir, prune=owned_by(specimen_id))
 
             # Parse JSON from stdout
             variants = self._parse_output(result.stdout, specimen_id)
@@ -78,6 +88,7 @@ class SummarizeRunner:
         except subprocess.TimeoutExpired:
             msg = f"speconsense-summarize timed out after {self.config.job_timeout}s (killed)"
             logger.error(f"{msg} for {specimen_id}")
+            shutil.rmtree(staging, ignore_errors=True)
             self.event_log.emit("pipeline.error", {
                 "component": "summarize",
                 "specimen_id": specimen_id,
@@ -85,6 +96,7 @@ class SummarizeRunner:
             })
             return []
         except FileNotFoundError:
+            shutil.rmtree(staging, ignore_errors=True)
             msg = "speconsense-summarize not found on PATH"
             logger.error(msg)
             self.event_log.emit("pipeline.error", {

@@ -46,11 +46,20 @@ dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
+    # The web tests talk to a live uvicorn thread with httpx; starlette's
+    # TestClient needs httpx before 1.0 and the httpx2 package from 1.0 on
+    "httpx>=0.27,<0.29",
+    "httpx2>=2.0",
 ]
 
 [project.scripts]
 specimux-suite = "specimux_suite.cli:main"
 specimux-replay = "specimux_suite.cli:replay_main"
+
+# Plugins the engine can load by name (--plugin NAME); other packages
+# register theirs in the same group
+[project.entry-points."specimux_suite.plugins"]
+forward = "specimux_suite.forward:forwarder_plugin"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -58,7 +67,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "specimux_suite.profiles" = ["*.yaml"]
 # The dashboard is served from package data — dropping these breaks the web UI
-"specimux_suite.web" = ["static/*.html", "static/vendor/*.js"]
+"specimux_suite.web" = ["static/*.html", "static/*.js", "static/vendor/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

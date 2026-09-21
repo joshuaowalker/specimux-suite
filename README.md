@@ -135,6 +135,19 @@ TGCATGCA...
 | `--settle-time` | `30` | Seconds to wait for a file to stabilize before processing |
 | `--presample` | `100` | Reads to subsample for incremental consensus (0 = unlimited) |
 
+### Plugins and event forwarding
+
+| Option | Default | Description |
+|---|---|---|
+| `--forward-events URL` | — | Mirror the run's events to an HTTP endpoint in batches (see below) |
+| `--forward-header 'Name: value'` | — | Header sent with every forwarded batch, e.g. an authorization token |
+| `--plugin NAME` | — | Load a plugin by entry-point name or `module:factory` path (repeatable) |
+| `--plugin-opt KEY=VALUE` | — | Option passed to every plugin's factory (repeatable) |
+
+A plugin is an object with `start(context)` and `shutdown()` that runs alongside the pipeline; the context gives it the event log, the state, the commands facade (every user action on the run: `watch`, `correct`, `finalize`, ...), the config and the output dir. Packages register plugins in the `specimux_suite.plugins` entry-point group. The suite ships one: the HTTP event forwarder, which POSTs the event log to a URL in version order, at least once, resuming from the last acknowledged version after a restart (`forward-ack.json` in the output dir). Each batch is JSON `{"events": [...], "from_version", "to_version"}` and a 2xx acknowledges it; the receiver dedupes by version. Use it to mirror a run to a read-only dashboard elsewhere.
+
+This interface (plugins, the forwarder, the viewer app factory and the pages' injected runtime config) exists so the suite can be hosted: a separate project, specimux-cloud, runs the pipeline as a cloud service and serves the same dashboard from a run API. The suite itself stays a local tool and has no cloud dependency.
+
 ## Pipeline
 
 ### Processing stages
@@ -272,6 +285,9 @@ output_dir/
 ├── mo_taxon_cache.json             # Cached Mushroom Observer observations (same shape)
 ├── inat_lineage_cache.json         # Cached genus lineages for taxonomy-level agreement
 ├── inat_photos/                    # Local photo cache (iNat + MO) for the dashboard and highlights screen
+├── specimux-inflight.json          # Present only while a demux runs; a restart rolls the demux back from it
+├── forward-ack.json                # With --forward-events: last event version the receiver acknowledged
+├── .staging/                       # Tool output before atomic publication into consensus/ and summary/
 ├── specimux/full/{pool}/
 │   └── {specimen_id}.fastq         # Demultiplexed reads per specimen
 ├── consensus/{specimen_id}/

@@ -148,6 +148,17 @@ def main():
     from .pipeline import Pipeline
     pipeline = Pipeline(config)
 
+    from .plugins import load_plugin, parse_options
+    plugin_options = parse_options(args.plugin_opt)
+    if args.forward_events:
+        plugin_options.setdefault("forward_url", args.forward_events)
+        if args.forward_header:
+            plugin_options.setdefault("forward_header", args.forward_header)
+        if "forward" not in args.plugin:
+            args.plugin.append("forward")
+    for name in args.plugin:
+        pipeline.attach_plugin(load_plugin(name, plugin_options))
+
     # Blocking iNat prefetch (default): fetch field IDs, audit, lineages,
     # and photos with progress bars BEFORE the web server starts and the
     # browser opens, so the dashboard and /present come up fully populated.
@@ -158,7 +169,7 @@ def main():
     # Start web server in background (both modes)
     if not args.no_web:
         from .web.server import start_web_server
-        start_web_server(pipeline.event_log, pipeline.state, config)
+        start_web_server(pipeline.event_log, pipeline.state, config, pipeline.commands)
         if not args.no_open:
             url = f"http://localhost:{config.web_port}"
             # Only auto-open in a graphical session, and never on the main
@@ -235,6 +246,16 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Minimum coverage (max of query/target) for identification hits (default: 0.5)")
     parser.add_argument("--no-open", action="store_true",
                         help="Don't auto-open the dashboard in a browser")
+    parser.add_argument("--plugin", action="append", default=[], metavar="NAME",
+                        help="Load a plugin by entry-point name or module:factory path "
+                             "(repeatable); see plugins.py")
+    parser.add_argument("--plugin-opt", action="append", default=[], metavar="KEY=VALUE",
+                        help="Option passed to every plugin's factory (repeatable)")
+    parser.add_argument("--forward-events", type=str, default=None, metavar="URL",
+                        help="Mirror the run's events to this HTTP endpoint in batches "
+                             "(the suite's own forward plugin)")
+    parser.add_argument("--forward-header", type=str, default=None, metavar="'Name: value'",
+                        help="Header sent with every forwarded batch (e.g. authorization)")
     parser.add_argument("--inat-background", action="store_true",
                         help="Fetch iNaturalist data (field IDs, ID audit, photos) in the "
                              "background instead of blocking with progress bars at startup; "

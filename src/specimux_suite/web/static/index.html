@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script id="specimux-runtime" type="application/json">{}</script>
+<script src="{{asset_base}}/static/runtime.js"></script>
 <title>specimux-suite Dashboard</title>
 <style>
 :root {
@@ -518,12 +520,12 @@ col.col-sum-reads { width: 12%; }
   <button class="tab-btn" data-tab="summary">Summary</button>
   <button class="tab-btn" data-tab="forecast">Forecast</button>
   <!-- Destinations, not views: same nav bar, right-aligned, never underlined -->
-  <a class="tab-link" href="/present" target="_blank" rel="noopener" title="Open the audience highlights screen — full-bleed cards for a projector">Highlights ↗</a>
-  <a class="tab-link" id="admin-link" href="/admin" hidden title="Admin actions — available only on the machine running the pipeline">Admin</a>
+  <a class="tab-link" href="{{page_base}}/present" target="_blank" rel="noopener" title="Open the audience highlights screen — full-bleed cards for a projector">Highlights ↗</a>
+  <a class="tab-link" id="admin-link" href="{{page_base}}/admin" hidden title="Admin actions — available only on the machine running the pipeline">Admin</a>
 </div>
 
-<script src="/static/vendor/qrcode.min.js"></script>
-<script src="/static/derived.js"></script>
+<script src="{{asset_base}}/static/vendor/qrcode.min.js"></script>
+<script src="{{asset_base}}/static/derived.js"></script>
 
 <div id="tab-processing" class="tab-content active">
 <div class="controls">
@@ -690,12 +692,22 @@ function scheduleRender() {
   });
 }
 
+// Every action on the run is a command; the server answers with its
+// outcome and the resulting event reconciles the page.
+function postCommand(command, args) {
+  return SpecimuxRuntime.fetch('/api/commands', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, ...(args || {}) }),
+  }).catch(() => {});
+}
+
 // SSE connection
 let connFailures = 0;
 
 function connect() {
   const badge = document.getElementById('status-badge');
-  const es = new EventSource(`/events?after_version=${state.version}`);
+  const es = SpecimuxRuntime.eventSource(`/events?after_version=${state.version}`);
 
   es.onopen = () => {
     badge.className = 'connected';
@@ -714,7 +726,8 @@ function connect() {
       document.getElementById('conn-banner').classList.add('visible');
     }
     es.close();
-    setTimeout(connect, 3000);
+    // The run API cookie may have expired: refresh the session before reconnecting
+    SpecimuxRuntime.ready({ refresh: true }).catch(() => {}).then(() => setTimeout(connect, 3000));
   };
 
   es.onmessage = (e) => {
@@ -946,7 +959,7 @@ async function toggleSequence(specimenId, seqName, btn) {
   if (existing) { existing.remove(); btn.textContent = btn.dataset.label || 'seq'; return; }
   try {
     btn.textContent = '\u2026';
-    const resp = await fetch(`/api/sequence/${encodeURIComponent(specimenId)}/${encodeURIComponent(seqName)}`);
+    const resp = await SpecimuxRuntime.fetch(`/api/sequence/${encodeURIComponent(specimenId)}/${encodeURIComponent(seqName)}`);
     if (!resp.ok) { btn.textContent = '\u2717'; setTimeout(() => btn.textContent = 'seq', 2000); return; }
     const data = await resp.json();
     const span = document.createElement('span');
@@ -1667,8 +1680,9 @@ function renderProcessing() {
       // Optimistic toggle so the tap responds instantly on flaky LAN wifi;
       // the specimen.watched event reconciles the authoritative state.
       const spec = state.specimens[btn.dataset.sid];
-      if (spec) { spec.watched = !spec.watched; scheduleRender(); }
-      fetch(`/api/watch/${encodeURIComponent(btn.dataset.sid)}`, { method: 'POST' });
+      if (!spec) return;
+      spec.watched = !spec.watched; scheduleRender();
+      postCommand(spec.watched ? 'watch' : 'unwatch', { specimen_id: btn.dataset.sid });
     });
   });
 }
@@ -1837,8 +1851,9 @@ function renderSummary() {
       // Optimistic toggle so the tap responds instantly on flaky LAN wifi;
       // the specimen.watched event reconciles the authoritative state.
       const spec = state.specimens[btn.dataset.sid];
-      if (spec) { spec.watched = !spec.watched; scheduleRender(); }
-      fetch(`/api/watch/${encodeURIComponent(btn.dataset.sid)}`, { method: 'POST' });
+      if (!spec) return;
+      spec.watched = !spec.watched; scheduleRender();
+      postCommand(spec.watched ? 'watch' : 'unwatch', { specimen_id: btn.dataset.sid });
     });
   });
 
@@ -2009,7 +2024,7 @@ if (['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
 }
 
 // Initial load
-fetch('/api/state').then(r => r.json()).then(data => {
+SpecimuxRuntime.fetch('/api/state').then(r => r.json()).then(data => {
   if (data.specimens) {
     state.specimens = data.specimens;
     state.version = data.version || 0;
@@ -2045,7 +2060,7 @@ function updateViewerCount(n) {
 
 // Periodically refresh viewer count (lightweight endpoint, not full state)
 setInterval(() => {
-  fetch('/api/viewers').then(r => r.json()).then(data => {
+  SpecimuxRuntime.fetch('/api/viewers').then(r => r.json()).then(data => {
     if (data.sse_clients != null) updateViewerCount(data.sse_clients);
   }).catch(() => {});
 }, 10000);
