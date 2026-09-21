@@ -5,6 +5,62 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## 0.3.0 — 2026-09-21
+
+The extension release: the pieces a hosting service needs to run the
+pipeline elsewhere and show the same dashboard, plus two restart-safety
+fixes found while designing it. Local use is unchanged apart from the
+new options.
+
+### Extension interface
+
+- The dashboard's read side is now a library: `create_viewer_app` in
+  `web/viewer.py` builds the state, SSE, specimen, sequence, photo and
+  page routes from any event source, with no pipeline attached, so one
+  process can host many runs. `load_run` opens a past log with or
+  without interrupted-run healing; `tests/tools/serve_fixture.py` uses
+  it. A sequence the log has announced but the disk does not yet hold
+  answers 503 with Retry-After instead of 404.
+- Every user action on a run (`watch`, `unwatch`, `correct`, `dismiss`,
+  `rescan`, `finalize`, `abort`) is a method on a commands facade
+  (`commands.py`) and one route, `POST /api/commands`, replaces the
+  per-action routes (`/api/watch/...`, `/api/admin/inat/...`). Mutation
+  events carry `actor` and `command_id`; every command closes with a
+  `command.outcome` event (applied, rejected with reason, or noop), and a
+  redelivered command id is a silent noop, so the event log is the audit
+  trail. Viewer commands stay open, admin commands stay localhost-only.
+- Plugins: `--plugin NAME` (entry-point group `specimux_suite.plugins`
+  or a `module:factory` path) loads objects that run alongside the
+  pipeline with the event log, state, commands facade and config;
+  `--plugin-opt KEY=VALUE` passes options.
+- Event forwarding: `--forward-events URL` mirrors the run's events to
+  an HTTP endpoint in version order, at least once, resuming from the
+  last acknowledged version after a restart (`forward-ack.json`);
+  `--forward-header` adds an authorization header.
+- Pages take an injected runtime config (API, asset and page bases,
+  token and session endpoints) through `static/runtime.js`, so the
+  dashboard can be served under a prefix or from another origin; the
+  viewer accepts an allowed-origins list for CORS. A Playwright test
+  runs the dashboard from a foreign origin.
+
+### Restart safety
+
+- Demux commit boundary: a run killed after specimux appended reads but
+  before `specimux.completed` used to re-append every read on restart.
+  The runner now records output-file lengths in `specimux-inflight.json`
+  before each demux and startup rolls an interrupted demux back to them.
+- Atomic publication: speconsense and speconsense-summarize rewrite the
+  files the dashboard serves in place; they now write to `.staging/`
+  and are published per file atomically, so a reader sees a whole old
+  or whole new generation, never a partial one. A failed tool leaves the
+  published generation untouched.
+
+### Other
+
+- The User-Agent for outbound API calls carries the project URL.
+- Dev extras declare the HTTP clients the web tests need (`httpx`, and
+  `httpx2` for starlette 1.x).
+
 ## 0.2.1 — 2026-09-19
 
 Mushroom Observer joins iNaturalist as a field-ID source.
