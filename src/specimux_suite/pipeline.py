@@ -37,6 +37,23 @@ def _check_tool_on_path(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+
+def _link_photo_cache(output_dir: Path, mirror_dir: Path) -> None:
+    """With a mirror, the photo cache lives there (a dashboard serves it,
+    and photos are written once each); the run reaches it through a link
+    at its usual place in the output dir."""
+    from .photos import photo_cache_dir
+    target = photo_cache_dir(mirror_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    link = photo_cache_dir(output_dir)
+    if link.is_symlink() or not link.exists():
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(target.resolve(), target_is_directory=True)
+    else:
+        logger.warning(f"{link} is a directory; photos stay there instead of in the mirror")
+
 class Pipeline:
     """Main pipeline orchestrator."""
 
@@ -53,6 +70,8 @@ class Pipeline:
 
         self.scheduler = Scheduler(config, self.state)
 
+        if config.mirror_dir is not None:
+            _link_photo_cache(config.output_dir, config.mirror_dir)
         self.specimux = SpecimuxRunner(config, self.event_log)
         # A demux the previous process died inside left appended reads that
         # its re-run would duplicate: roll them back before the scheduler

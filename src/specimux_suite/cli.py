@@ -121,6 +121,8 @@ def main():
         reads_file=getattr(args, "reads", None),
         watch_dir=getattr(args, "watch_dir", None),
         output_dir=args.output_dir,
+        event_log_path=args.event_log,
+        mirror_dir=args.mirror_dir,
         reference_db=args.reference_db,
         min_reads=args.min_reads,
         reprocess_ratio=args.reprocess_ratio,
@@ -218,6 +220,12 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="List available suite profiles and exit")
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("specimux-suite-output"),
                         help="Output directory (default: specimux-suite-output)")
+    parser.add_argument("--event-log", type=Path, default=None,
+                        help="Event log path (default: events.jsonl in the output dir, or in --mirror-dir)")
+    parser.add_argument("--mirror-dir", type=Path, default=None,
+                        help="Copy what a dashboard reads (event log, consensus and summary FASTAs, "
+                             "photos) here as it is published; the rest stays in the output dir. "
+                             "For a run on local disk served from shared storage")
     parser.add_argument("--reference-db", type=Path, default=None,
                         help="Reference FASTA for identification")
     parser.add_argument("--min-reads", type=int, default=10,
