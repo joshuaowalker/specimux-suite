@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import threading
 import subprocess
 import sys
 from pathlib import Path
@@ -179,6 +180,33 @@ def publish_tree(staging: Path, final: Path,
                 f.unlink(missing_ok=True)
     shutil.rmtree(staging, ignore_errors=True)
     return published
+
+
+def mirror_files(root: Path, rels: list[Path], mirror_root: Path,
+                 prune: Optional[Callable[[Path], bool]] = None) -> None:
+    """Copy ``root/<rel>`` to ``mirror_root/<rel>`` for each rel, so a
+    reader of the mirror sees each file whole-old or whole-new.
+
+    The mirror is typically on another filesystem (``--mirror-dir``: the
+    shared storage a hosted dashboard reads, while the run works on local
+    disk), so each file is copied to a temporary name beside its target and
+    renamed there. ``prune`` then removes mirror files it claims that were
+    not just copied (a previous generation's leftovers)."""
+    root, mirror_root = Path(root), Path(mirror_root)
+    copied = set()
+    for rel in rels:
+        rel = Path(rel)
+        dst = mirror_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_name(f".{dst.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        shutil.copyfile(root / rel, tmp)
+        os.replace(tmp, dst)
+        copied.add(rel)
+    if prune is not None and mirror_root.exists():
+        for f in sorted(p for p in mirror_root.rglob("*") if p.is_file()):
+            rel = f.relative_to(mirror_root)
+            if rel not in copied and not f.name.endswith(".tmp") and prune(rel):
+                f.unlink(missing_ok=True)
 
 
 def owned_by(specimen_id: str) -> Callable[[Path], bool]:

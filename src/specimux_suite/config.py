@@ -32,7 +32,12 @@ class PipelineConfig:
 
     # Output
     output_dir: Path = Path("specimux-suite-output")
-    event_log_path: Optional[Path] = None  # defaults to output_dir/events.jsonl
+    event_log_path: Optional[Path] = None  # defaults to output_dir/events.jsonl (mirror_dir's with one)
+    # Where a hosted dashboard reads a run working on local disk: the event
+    # log, each specimen's consensus FASTA, the summary FASTAs and the photo
+    # cache go here as they are published (util.mirror_files); everything
+    # else stays in output_dir. None: output_dir is served as it is.
+    mirror_dir: Optional[Path] = None
 
     # Identification
     reference_db: Optional[Path] = None
@@ -99,8 +104,11 @@ class PipelineConfig:
         self.output_dir = Path(self.output_dir)
         if self.reference_db:
             self.reference_db = Path(self.reference_db)
+        if self.mirror_dir is not None:
+            self.mirror_dir = Path(self.mirror_dir)
         if self.event_log_path is None:
-            self.event_log_path = self.output_dir / "events.jsonl"
+            self.event_log_path = (self.mirror_dir or self.output_dir) / "events.jsonl"
+        self.event_log_path = Path(self.event_log_path)
         if self.workers <= 0:
             # sched_getaffinity respects cgroup/taskset/SLURM CPU limits on
             # Linux; os.cpu_count() reports host cores (macOS has no affinity).

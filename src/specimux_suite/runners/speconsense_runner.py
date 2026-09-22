@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..config import PipelineConfig
 from ..events import EventLog
-from ..util import publish_tree
+from ..util import mirror_files, publish_tree
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,12 @@ class SpeconsenseRunner:
 
             # Everything in consensus/<id>/ belongs to this generation
             publish_tree(staging, output_dir, prune=lambda rel: True)
+            if self.config.mirror_dir is not None:
+                served = Path(specimen_id) / f"{specimen_id}-all.fasta"
+                if (self.config.consensus_output_dir / served).exists():
+                    mirror_files(self.config.consensus_output_dir, [served],
+                                 self.config.mirror_dir / "consensus",
+                                 prune=lambda rel: rel.parts[0] == specimen_id)
 
             # Parse the -all.fasta output
             clusters = self._parse_clusters(output_dir, specimen_id)
