@@ -5,6 +5,23 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## 0.3.2 — 2026-09-22
+
+For hosted runs on local disk, found in the first full-scale cloud run:
+on a network filesystem the demux ran about 200 reads per second with
+the CPU idle, against 39,000 on local disk.
+
+- `--mirror-dir DIR` copies what a dashboard reads into DIR as it is
+  published: the event log, each specimen's consensus FASTA, the summary
+  FASTAs and the photo cache. The run itself works in the output dir, so
+  a hosted engine can keep that on local disk and serve the dashboard
+  from shared storage. Each file is replaced atomically and lands before
+  the event that announces it.
+- `--event-log PATH` sets where the event log is written (by default the
+  output dir, or the mirror dir when there is one).
+
+Local use is unchanged.
+
 ## 0.3.1 — 2026-09-21
 
 Two fixes found while putting the hosted dashboard in front of a real
