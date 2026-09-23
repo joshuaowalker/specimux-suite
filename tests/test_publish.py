@@ -180,3 +180,30 @@ def test_failed_tool_leaves_the_published_generation_alone(tmp_path, monkeypatch
 def test_user_agent_carries_a_contact_url():
     assert USER_AGENT.startswith("specimux-suite/")
     assert "(+https://github.com/joshuaowalker/specimux-suite)" in USER_AGENT
+
+
+def test_the_prune_only_examines_the_specimens_own_names(tmp_path):
+    """A shared summary dir grows to tens of thousands of files; the prune
+    looks only at names starting with the specimen id (owned_by implies
+    that prefix), so publishing stays cheap late in a run."""
+    final, staging = tmp_path / "summary", tmp_path / "staging"
+    (final / "variants").mkdir(parents=True)
+    for i in range(300):
+        (final / f"S{i}-1.v1-RiC5.fasta").write_text("x")
+        (final / "variants" / f"S{i}-1.v1-RiC5.fasta").write_text("x")
+    (final / "S7-1.v1-RiC3.fasta").write_text("stale")
+    (final / "variants" / "S7-1.v1-RiC3.fasta").write_text("stale")
+    staging.mkdir()
+    (staging / "S7-1.v1-RiC9.fasta").write_text("new")
+    seen = []
+    owned = owned_by("S7")
+    publish_tree(staging, final, prune=lambda rel: seen.append(rel) or owned(rel), prefix="S7")
+    assert all(r.name.startswith("S7") for r in seen)          # S70..S79 are candidates, not S1..
+    assert not (final / "S7-1.v1-RiC3.fasta").exists() and not (final / "variants" / "S7-1.v1-RiC3.fasta").exists()
+    assert not (final / "S7-1.v1-RiC5.fasta").exists()         # S7's previous generation
+    assert (final / "S70-1.v1-RiC5.fasta").exists()            # S70 is not S7's
+    assert (final / "S7-1.v1-RiC9.fasta").read_text() == "new"
+    assert not (final / "variants" / "S7-1.v1-RiC5.fasta").exists()
+    # 600 + 2 stale, less S7's four old files, plus the new one
+    assert sum(1 for p in final.rglob("*") if p.is_file()) == 599
+

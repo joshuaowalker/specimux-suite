@@ -70,13 +70,14 @@ class SummarizeRunner:
                 return []
 
             # New files in, then this specimen's previous generation out
-            published = publish_tree(staging, summary_dir, prune=owned_by(specimen_id))
+            published = publish_tree(staging, summary_dir, prune=owned_by(specimen_id), prefix=specimen_id)
             if self.config.mirror_dir is not None:
                 # the dashboard reads the top-level <variant>-RiC*.fasta
                 owned = owned_by(specimen_id)
                 mirror_files(summary_dir, [r for r in published if len(r.parts) == 1 and r.suffix == ".fasta"],
                              self.config.mirror_dir / "summary",
-                             prune=lambda rel: len(rel.parts) == 1 and rel.suffix == ".fasta" and owned(rel))
+                             prune=lambda rel: len(rel.parts) == 1 and rel.suffix == ".fasta" and owned(rel),
+                             prefix=specimen_id)
 
             # Parse JSON from stdout
             variants = self._parse_output(result.stdout, specimen_id)
