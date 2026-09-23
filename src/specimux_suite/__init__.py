@@ -1,3 +1,3 @@
 """specimux-suite: orchestration and UX for the Mycomap barcoding pipeline."""
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"

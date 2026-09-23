@@ -60,8 +60,17 @@ class FileStabilityChecker:
             time.sleep(self.check_interval)
 
 
+def _file_key(path) -> str:
+    """One name per file: a watch dir reached through a symlink (macOS's
+    /tmp and /var are links into /private) is reported by the filesystem
+    events under its real path and by the directory scan under the given
+    one, and the two must not count as two files."""
+    return os.path.realpath(str(path))
+
+
 class ProcessedFilesTracker:
-    """Track which files have been processed to avoid reprocessing."""
+    """Track which files have been processed to avoid reprocessing, by
+    real path (``_file_key``)."""
 
     def __init__(self):
         self._processed: set[str] = set()
@@ -69,17 +78,27 @@ class ProcessedFilesTracker:
 
     def is_processed(self, path: Path) -> bool:
         with self._lock:
-            return str(path) in self._processed
+            return _file_key(path) in self._processed
 
     def mark_processed(self, path: Path) -> None:
         with self._lock:
-            self._processed.add(str(path))
+            self._processed.add(_file_key(path))
+
+    def claim(self, path: Path) -> bool:
+        """Mark the file processed; False if it already was. One step, so
+        two threads that noticed the same file cannot both process it."""
+        key = _file_key(path)
+        with self._lock:
+            if key in self._processed:
+                return False
+            self._processed.add(key)
+            return True
 
     def seed(self, paths) -> None:
         """Bulk-add paths already known to be processed (e.g. from event replay)."""
         with self._lock:
             for p in paths:
-                self._processed.add(str(p))
+                self._processed.add(_file_key(p))
 
 
 class _FastqHandler(FileSystemEventHandler):
@@ -178,7 +197,7 @@ class FileWatcher:
 
     def _handle_file(self, path: Path) -> None:
         """Handle a detected file — check stability in a separate thread."""
-        path_str = str(path)
+        path_str = _file_key(path)
         if self._tracker.is_processed(path):
             return
 
@@ -209,10 +228,8 @@ class FileWatcher:
             logger.warning(f"File disappeared: {path}")
             return
 
-        if self._tracker.is_processed(path):
+        if not self._tracker.claim(path):
             return
-
-        self._tracker.mark_processed(path)
 
         size = path.stat().st_size
         logger.info(f"File stable: {path.name} ({size} bytes)")
