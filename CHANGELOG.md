@@ -5,6 +5,17 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## 0.3.3 — 2026-09-23
+
+A faster end of run, for everyone. Publishing each specimen's summary
+pruned its stale files by examining every file in the summary directory,
+which grows to tens of thousands of files over a large run; by the end
+each publish cost most of a second of Python, serialized across the
+summarize threads. On a million reads the summaries after consensus took
+about 13 minutes with the CPU mostly idle. The prune now looks only at
+files named for the specimen: the same run's summaries after consensus
+took 77 seconds, and the whole run went from 32 to 20 minutes.
+
 ## 0.3.2 — 2026-09-22
 
 For hosted runs on local disk, found in the first full-scale cloud run:

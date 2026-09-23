@@ -148,8 +148,32 @@ def atomic_write(path: Path, content: bytes) -> None:
     os.replace(tmp, path)
 
 
+def _files_under(root: Path, prefix: Optional[str] = None) -> list[Path]:
+    """Files under ``root`` (paths relative to it). With ``prefix``, only
+    files whose name starts with it: the scan stays in ``os.scandir``
+    (names only) and builds a path for a match alone. A summary dir grows
+    to tens of thousands of files over a run, and examining each one per
+    specimen published made the end of a run quadratic (0.8 s of Python
+    per specimen at 29,000 files, serialized across summarize threads)."""
+    out: list[Path] = []
+    stack = [(Path(root), Path())]
+    while stack:
+        d, rel = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append((Path(entry.path), rel / entry.name))
+                    elif (prefix is None or entry.name.startswith(prefix)) and entry.is_file():
+                        out.append(rel / entry.name)
+        except FileNotFoundError:
+            continue
+    return sorted(out)
+
+
 def publish_tree(staging: Path, final: Path,
-                 prune: Optional[Callable[[Path], bool]] = None) -> list[Path]:
+                 prune: Optional[Callable[[Path], bool]] = None,
+                 prefix: Optional[str] = None) -> list[Path]:
     """Publish a tool's output directory without ever exposing a partial file.
 
     A tool that writes straight into a directory the dashboard serves
@@ -161,6 +185,10 @@ def publish_tree(staging: Path, final: Path,
     publication but were not just written (a previous generation's
     leftovers), and removes ``staging``. Readers see each file either
     whole-old or whole-new, and the directory never disappears.
+
+    ``prefix`` narrows the prune to files whose name starts with it (a
+    specimen's own files are named for it; see ``owned_by``), so the prune
+    does not examine every file of a large shared directory.
 
     Returns the published paths (relative to ``final``).
     """
@@ -174,16 +202,16 @@ def publish_tree(staging: Path, final: Path,
         published.append(rel)
     if prune is not None and final.exists():
         keep = set(published)
-        for f in sorted(p for p in final.rglob("*") if p.is_file()):
-            rel = f.relative_to(final)
+        for rel in _files_under(final, prefix):
             if rel not in keep and prune(rel):
-                f.unlink(missing_ok=True)
+                (final / rel).unlink(missing_ok=True)
     shutil.rmtree(staging, ignore_errors=True)
     return published
 
 
 def mirror_files(root: Path, rels: list[Path], mirror_root: Path,
-                 prune: Optional[Callable[[Path], bool]] = None) -> None:
+                 prune: Optional[Callable[[Path], bool]] = None,
+                 prefix: Optional[str] = None) -> None:
     """Copy ``root/<rel>`` to ``mirror_root/<rel>`` for each rel, so a
     reader of the mirror sees each file whole-old or whole-new.
 
@@ -203,10 +231,9 @@ def mirror_files(root: Path, rels: list[Path], mirror_root: Path,
         os.replace(tmp, dst)
         copied.add(rel)
     if prune is not None and mirror_root.exists():
-        for f in sorted(p for p in mirror_root.rglob("*") if p.is_file()):
-            rel = f.relative_to(mirror_root)
-            if rel not in copied and not f.name.endswith(".tmp") and prune(rel):
-                f.unlink(missing_ok=True)
+        for rel in _files_under(mirror_root, prefix):
+            if rel not in copied and not rel.name.endswith(".tmp") and prune(rel):
+                (mirror_root / rel).unlink(missing_ok=True)
 
 
 def owned_by(specimen_id: str) -> Callable[[Path], bool]:
