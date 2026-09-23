@@ -5,7 +5,9 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
-## Unreleased
+## 0.3.4 — 2026-09-23
+
+A live-mode fix.
 
 - **Live mode no longer demultiplexes a file twice when the watch
   directory is reached through a symlink.** On macOS `/tmp` and `/var` are
