@@ -5,6 +5,16 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## Unreleased
+
+- **Live mode no longer demultiplexes a file twice when the watch
+  directory is reached through a symlink.** On macOS `/tmp` and `/var` are
+  links into `/private`: the filesystem events named a new file by its
+  real path and the watcher's directory scan by the given one, the two
+  counted as different files, and the file's reads could be appended to
+  the specimen FASTQs twice (it depended on which saw the file first). The
+  watcher now knows a file by its real path and claims it in one step.
+
 ## 0.3.3 — 2026-09-23
 
 A faster end of run, for everyone. Publishing each specimen's summary
