@@ -5,6 +5,17 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## 0.3.6 — 2026-09-24
+
+- **A run without a reference database is summarized.** Summarizing was
+  chained behind identification, so without a reference (nothing
+  identifies) specimens stayed "consensus built", the summary step found
+  none eligible and the run ended with an empty summary directory and no
+  `summary.fasta`. Summarizing needs no reference: without one a specimen
+  is now summarized straight after consensus (live mode as it completes,
+  batch mode in the final round). Runs with a reference are unchanged.
+- GitHub Actions moved to their Node 24 releases.
+
 ## 0.3.5 — 2026-09-24
 
 - **Specimens with no reads say so.** A specimen that demultiplexing gave
