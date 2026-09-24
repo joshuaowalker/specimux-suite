@@ -1171,11 +1171,20 @@ class Pipeline:
         # can't re-trigger it.
         self._maybe_queue_incremental_summarize(specimen_id)
 
+    def _summarizable_status(self) -> tuple:
+        """Statuses a specimen with consensus is summarized from: after its
+        identification, or, in a run without a reference database (nothing
+        identifies), straight after consensus. Summarizing needs no
+        reference; without this a reference-less run never summarized."""
+        if self.identify is None:
+            return (SpecimenStatus.CONSENSUS_DONE, SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH)
+        return (SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH)
+
     def _maybe_queue_incremental_summarize(self, specimen_id: str) -> None:
         if not self.config.incremental_summarize or self._shutdown.is_set():
             return
         spec = self.state.get_specimen(specimen_id)
-        if spec.status not in (SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH):
+        if spec.status not in self._summarizable_status():
             return
         if not spec.clusters:
             return
@@ -1323,7 +1332,8 @@ class Pipeline:
         self._futures[specimen_id] = future
 
     def _run_summarize_round(self) -> None:
-        """Run summarize for all identified/no_match specimens, then aggregate."""
+        """Run summarize for all identified/no_match specimens (or, without a
+        reference database, all with consensus), then aggregate."""
         if self._shutdown.is_set():
             return
 
@@ -1339,7 +1349,7 @@ class Pipeline:
         eligible = [
             sid for sid, spec in self.state.specimens.items()
             if spec.clusters  # must have consensus output
-            and (spec.status in (SpecimenStatus.IDENTIFIED, SpecimenStatus.NO_MATCH)
+            and (spec.status in self._summarizable_status()
                  or (spec.status == SpecimenStatus.SUMMARIZED
                      and spec.summarize_consensus_version is not None
                      and spec.summarize_consensus_version != spec.consensus_version))
@@ -1497,6 +1507,9 @@ class Pipeline:
         for sid in completed:
             if self.identify:
                 self._submit_identification(sid)
+            else:
+                # no reference: nothing identifies, summarize straight away
+                self._maybe_queue_incremental_summarize(sid)
 
         # Check for new consensus work
         if completed or errored:

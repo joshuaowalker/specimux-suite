@@ -594,3 +594,50 @@ def test_finalize_runs_aggregate_when_lane_summarized_everything(tmp_path):
     pipeline2.summarize = MagicMock()
     pipeline2._run_summarize_round()
     pipeline2.summarize.run_aggregate.assert_not_called()
+
+
+def test_a_run_without_a_reference_is_summarized(tmp_path):
+    """Nothing identifies without a reference database, so specimens stay
+    CONSENSUS_DONE; they must still be summarized (regression: the round
+    only took identified/no_match specimens, and a reference-less run ended
+    with an empty summary and no aggregate)."""
+    pipeline = _quiet_pipeline(tmp_path)
+    assert pipeline.identify is None
+    log = pipeline.event_log
+    log.emit("consensus.completed", {"specimen_id": "A", "job_id": "c1",
+                                     "clusters": [{"name": "A-c0", "size": 90}]})
+    log.emit("consensus.completed", {"specimen_id": "B", "job_id": "c2", "clusters": []})
+    summarized = []
+    pipeline.summarize = MagicMock()
+    pipeline.summarize.run.side_effect = lambda sid, consensus_version=None: (
+        summarized.append(sid),
+        log.emit("summarize.completed", {"specimen_id": sid, "consensus_version": consensus_version,
+                                         "variants": []}),
+    ) and []
+    pipeline._run_summarize_round()
+    assert summarized == ["A"]                      # B has no consensus to summarize
+    pipeline.summarize.run_aggregate.assert_called_once()
+    assert pipeline.state.get_specimen("A").status.value == "summarized"
+    # with a reference, consensus alone is not enough: identification comes first
+    pipeline.identify = MagicMock()
+    from specimux_suite.state import SpecimenStatus
+    assert SpecimenStatus.CONSENSUS_DONE not in pipeline._summarizable_status()
+    pipeline._shutdown.set()
+    pipeline._executor.shutdown(wait=True)
+
+
+def test_live_consensus_without_a_reference_goes_to_the_summarize_lane(tmp_path):
+    from concurrent.futures import Future
+    pipeline = _quiet_pipeline(tmp_path)
+    pipeline.event_log.emit("consensus.completed", {"specimen_id": "A", "job_id": "c1",
+                                                    "clusters": [{"name": "A-c0", "size": 90}]})
+    fut = Future()
+    fut.set_result(None)
+    pipeline._futures["A"] = fut
+    with patch.object(pipeline, "_schedule_consensus"), \
+         patch.object(pipeline, "_maybe_queue_incremental_summarize") as queued:
+        pipeline._check_completed_futures()
+    queued.assert_called_once_with("A")
+    assert "A" not in pipeline._futures              # gone first, or the lane would skip it
+    pipeline._shutdown.set()
+    pipeline._executor.shutdown(wait=True)
