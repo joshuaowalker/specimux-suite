@@ -5,6 +5,20 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## 0.3.5 — 2026-09-24
+
+- **Specimens with no reads say so.** A specimen that demultiplexing gave
+  no reads used to show "queued" for ever in batch mode (and after a live
+  run's finalization), and counted in the Queued total. Once no more reads
+  can arrive — batch's demux succeeded, or live finalization completed —
+  it shows **no reads** and leaves the count. The run state carries
+  `demux_finished` for the pages.
+- **`--no-photo-cache`.** The run doesn't download observation photos into
+  the output dir, and the highlights screen loads them from iNaturalist /
+  Mushroom Observer directly (the setting rides `config_summary`). For a
+  dashboard served on the internet: the cache is there for a flaky venue
+  network, and hosted runs were each storing about 0.5 GB of photos.
+
 ## 0.3.4 — 2026-09-23
 
 A live-mode fix.
