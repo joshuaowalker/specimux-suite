@@ -269,11 +269,22 @@ function reprocessAssessment(s, reprocessRatio) {
   return { eligible: ratio > gate, ratio, band: b.band, reason: b.reason };
 }
 
+// Display status of a specimen still waiting for its first consensus:
+// 'no_reads' once no more reads can arrive (demuxFinished: batch's demux
+// succeeded, or live finalization completed) and it has none; otherwise
+// 'queued' when the scheduler would take it (batch takes every specimen with
+// reads; live waits for minReads), else 'waiting'.
+function waitingStatus(s, mode, minReads, demuxFinished) {
+  const reads = s.total_reads || 0;
+  if (demuxFinished && reads === 0) return 'no_reads';
+  return (mode === 'batch' || reads >= minReads) ? 'queued' : 'waiting';
+}
+
 return {
   GENUS_OR_DEEPER_RANKS, NEAR_RANKS, OBSERVATION_PROVIDERS, observationRef,
   hasIdentification, hitIdentity, hitGenusLower, isHitOnTarget,
   communityGenusLower, clusterFilterRouting, activeSeqs, getActiveMatches,
   findTopMatch, getTopMatch, getTopHit, getTargetStatus, agreementRank,
-  effectiveTargetStatus, reprocessBand, reprocessAssessment,
+  effectiveTargetStatus, reprocessBand, reprocessAssessment, waitingStatus,
 };
 });

@@ -22,6 +22,7 @@
   --identified: #2e7d32;
   --no-match: #8b6914;
   --no-clusters: #6a5acd;
+  --no-reads: #8a8a8a;
   --summarized: #14707e;
   --error: #cc0000;
 }
@@ -172,6 +173,7 @@ tr:hover { background: rgba(255,255,255,0.03); }
 .status-identified { background: var(--identified); color: #fff; }
 .status-no_match { background: var(--no-match); color: #fff; }
 .status-no_clusters { background: var(--no-clusters); color: #fff; }
+.status-no_reads { background: var(--no-reads); color: #fff; }
 .status-summarized { background: var(--summarized); color: #fff; }
 .status-error { background: var(--error); color: #fff; }
 
@@ -552,7 +554,7 @@ col.col-sum-reads { width: 12%; }
       <span><b>✓ / ≈ / ✗</b> — how the best database match relates to the iNaturalist community ID: same genus or species (✓ on-target), a different genus in the same family or order (≈ partial), or unrelated (✗ off-target). Hover the symbol for the exact shared rank. The On-target filter shows ✓ specimens; the Off-target filter shows ≈ and ✗. Off-target is often interesting, not wrong: it can be a mycoparasite, a yeast, or a misidentified observation.</span>
       <span><b>%</b> — similarity of the sequence to its best database match. <b>⚠</b> marks matches below 98% (possibly a different species than the match) and red ⚠ below 95% (no close reference — possibly undescribed, not yet sequenced, or a poor read).</span>
       <span><b>★</b> — watched: the operator starred this specimen so it gets processed first. Click to star.</span>
-      <span><b>Status</b> — waiting → queued → processing → consensus built → identified / no match → summarized (final).</span>
+      <span><b>Status</b> — waiting → queued → processing → consensus built → identified / no match → summarized (final). <b>No reads</b>: demultiplexing is over and no reads were assigned to the specimen.</span>
       <span><b>NS / LQ / CHIMERA</b> — quality flags on individual sequences: not statistically significant, low quality, or a suspected PCR chimera. Flagged sequences are excluded from (or marked in) the final Summary.</span>
       <span><b>↻</b> — queued for another processing pass as new reads arrive; the label says why.</span>
     </div>
@@ -657,7 +659,7 @@ col.col-sum-reads { width: 12%; }
 <button id="scroll-top" aria-label="Scroll to top">▲</button>
 
 <script>
-const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, summarizeFilter: {}, demuxHistory: [], genusLineages: {} };
+const state = { specimens: {}, version: 0, totalInputReads: 0, demuxing: false, demuxProgress: null, finalizing: false, finalizationSet: null, mode: null, demuxFinished: false, summarizeFilter: {}, demuxHistory: [], genusLineages: {} };
 
 // Shared decision logic lives in derived.js (also parity-tested under node);
 // these adapters bind it to this page's state. Anything beyond a one-line
@@ -761,6 +763,7 @@ function applyEvent(event) {
   switch (event.type) {
     case 'pipeline.started':
       state.mode = d.mode || null;
+      if (state.mode === 'live') state.demuxFinished = false;   // a resumed live run takes files again
       if (d.config_summary) {
         if (d.config_summary.min_reads) minReads = d.config_summary.min_reads;
         if (d.config_summary.reprocess_ratio != null) reprocessRatio = d.config_summary.reprocess_ratio;
@@ -814,6 +817,7 @@ function applyEvent(event) {
         state.specimens[name].total_reads = reads;
       }
       state.totalInputReads += d.input_reads || 0;
+      if (state.mode === 'batch' && d.exit_code === 0) state.demuxFinished = true;
       // Per-file snapshot for the Forecast tab: cumulative matched clock.
       // matched_reads and the per-specimen counts are cumulative already.
       // (History from before this page connected comes from the /api/state
@@ -834,6 +838,7 @@ function applyEvent(event) {
     case 'finalization.completed':
       state.finalizing = false;
       state.finalizationSet = null;
+      state.demuxFinished = true;
       break;
     case 'specimen.updated':
       if (!state.specimens[d.specimen_id]) state.specimens[d.specimen_id] = { specimen_id: d.specimen_id, total_reads: 0, status: 'waiting', clusters: [], identification: [], consensus_version: 0, reads_at_last_consensus: 0, watched: false };
@@ -906,7 +911,7 @@ function getIdResult(s) {
 }
 
 const STATUS_LABELS = {
-  queued: 'queued', no_match: 'no match', no_clusters: 'no consensus',
+  queued: 'queued', no_reads: 'no reads', no_match: 'no match', no_clusters: 'no consensus',
   consensus_running: 'processing', consensus_done: 'consensus built',
   updating: 'updating', identified: 'identified', summarized: 'summarized',
 };
@@ -1011,7 +1016,7 @@ function getDisplayStatus(s) {
     return hasIdentification(s) ? 'updating' : 'consensus_running';
   }
   if (s.status === 'waiting') {
-    return (state.mode === 'batch' || s.total_reads >= minReads) ? 'queued' : 'waiting';
+    return SpecimuxDerived.waitingStatus(s, state.mode, minReads, state.demuxFinished);
   }
   if (s.status === 'consensus_done' && (s.clusters || []).length === 0) {
     return 'no_clusters';
@@ -1523,6 +1528,7 @@ function renderProcessing() {
     document.getElementById('stat-processing').textContent = all.filter(s => s.status === 'consensus_running').length;
     document.getElementById('stat-queued-new').textContent = all.filter(s =>
       (s.consensus_version || 0) === 0 && s.total_reads >= effectiveMinReads && s.status !== 'consensus_running'
+      && getDisplayStatus(s) !== 'no_reads'
     ).length;
     document.getElementById('stat-queued-reprocess').textContent =
       all.filter(isReprocessCandidate).length;
@@ -2030,6 +2036,7 @@ SpecimuxRuntime.fetch('/api/state').then(r => r.json()).then(data => {
     state.version = data.version || 0;
   }
   state.mode = data.mode || null;
+  state.demuxFinished = !!data.demux_finished;
   state.totalInputReads = data.total_input_reads || 0;
   state.demuxHistory = (data.demux_history || []).map(h => ({
     ts: h.ts, inputCum: h.input_cum, matchedCum: h.matched_cum, counts: h.counts || {},

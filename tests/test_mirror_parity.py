@@ -228,3 +228,33 @@ def test_synthetic_edge_parity():
     assert py["low_identity"]["band"] == 2
     assert py["minority"]["reason"] == "minority_on_target"
     assert py["zero_base"]["assessments"][0]["ratio"] == "inf"
+
+
+def test_zero_read_specimens_leave_queued_once_demux_is_finished(tmp_path):
+    """A batch specimen that demux gave no reads shows 'no reads' rather
+    than 'queued' for ever: the state snapshot's demux_finished drives
+    derived.js waitingStatus."""
+    import subprocess
+
+    from specimux_suite.events import EventLog
+    from specimux_suite.state import PipelineState
+
+    log = EventLog(tmp_path / "events.jsonl")
+    log.emit("pipeline.started", {"mode": "batch"})
+    log.emit("specimens.loaded", {"specimens": [{"specimen_id": "S0"}, {"specimen_id": "S1"}]})
+    before = PipelineState()
+    before.rebuild(log)
+    log.emit("specimux.completed", {"job_id": "a", "exit_code": 0, "specimens": {"S1": 3}})
+    after = PipelineState()
+    after.rebuild(log)
+    script = (
+        "const d = require(process.argv[1]);"
+        "const snaps = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+        "console.log(JSON.stringify(snaps.map(st => Object.fromEntries(Object.values(st.specimens).map("
+        "s => [s.specimen_id, d.waitingStatus(s, st.mode, 10, st.demux_finished)])))));"
+    )
+    out = subprocess.run([NODE, "-e", script, str(DERIVED_JS)],
+                         input=json.dumps([before.to_dict(), after.to_dict()]),
+                         capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout) == [{"S0": "queued", "S1": "queued"},
+                                      {"S0": "no_reads", "S1": "queued"}]

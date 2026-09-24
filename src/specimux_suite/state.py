@@ -97,6 +97,10 @@ class PipelineState:
         self.files: dict[str, FileState] = {}
         self.version: int = 0
         self.mode: Optional[str] = None
+        # No more reads will arrive: batch's one demux succeeded, or a live
+        # run's finalization completed. A specimen still without reads then
+        # has none, rather than being queued (pages show "no reads").
+        self.demux_finished: bool = False
         self.errors: list[dict] = []
         self.total_input_reads: int = 0
         self.total_matched_reads: int = 0
@@ -201,6 +205,7 @@ class PipelineState:
             return {
                 "version": self.version,
                 "mode": self.mode,
+                "demux_finished": self.demux_finished,
                 "summarize_filter": dict(self.summarize_filter),
                 "total_input_reads": self.total_input_reads,
                 "total_matched_reads": self.total_matched_reads,
@@ -221,6 +226,9 @@ class PipelineState:
 
     def _on_pipeline_started(self, data: dict):
         self.mode = data.get("mode")
+        if self.mode == "live":
+            # a live run resumed after finalizing takes new files again
+            self.demux_finished = False
         config_summary = data.get("config_summary") or {}
         filt = config_summary.get("summarize_filter")
         if filt:
@@ -280,6 +288,9 @@ class PipelineState:
     def _on_specimux_started(self, data: dict):
         pass  # tracked for logging, no state change needed
 
+    def _on_finalization_completed(self, data: dict):
+        self.demux_finished = True
+
     def _on_specimux_completed(self, data: dict):
         self.specimux_runs += 1
         specimens = data.get("specimens", {})
@@ -292,6 +303,8 @@ class PipelineState:
         file_path = data.get("file_path")
         if file_path and file_path in self.files:
             self.files[file_path].processed = True
+        if self.mode == "batch" and data.get("exit_code") == 0:
+            self.demux_finished = True
         self.total_input_reads += data.get("input_reads", 0)
         # Recompute matched reads from specimen totals (scan_specimen_reads
         # returns cumulative counts, so accumulating would double-count)
@@ -430,6 +443,7 @@ class PipelineState:
         "summarize.completed": _on_summarize_completed,
         "specimen.watched": _on_specimen_watched,
         "command.outcome": _on_command_outcome,
+        "finalization.completed": _on_finalization_completed,
         "pipeline.error": _on_pipeline_error,
     }
 
