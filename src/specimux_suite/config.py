@@ -77,6 +77,12 @@ class PipelineConfig:
     # near-instant either way.
     inat_blocking: bool = True
 
+    # Cache observation photos in the output dir (photos.prefetch_photos) so
+    # the pages show them on a flaky venue network. False: pages load them
+    # from the provider's host (config_summary tells them), which is what a
+    # hosted run on the internet wants: no copy of every photo per run.
+    photo_cache: bool = True
+
     # Live mode: subsample reads for incremental consensus (0 = no limit)
     live_presample: int = 100
 
@@ -206,6 +212,7 @@ class PipelineConfig:
             "reprocess_ratio": self.reprocess_ratio,
             "workers": self.workers,
             "summarize_filter": self.resolve_summarize_thresholds(),
+            "photo_cache": self.photo_cache,
         }
 
 

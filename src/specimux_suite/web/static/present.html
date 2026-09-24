@@ -553,10 +553,14 @@ function fmt(n) { return (n || 0).toLocaleString('en-US'); }
 
 // Local photo cache first; fall back to the provider's host if not
 // prefetched yet. MO records carry large_url; iNat's is a size substitution.
+// A run without a photo cache (config_summary.photo_cache false: a hosted
+// dashboard) goes straight to the provider.
+let photoCache = true;
 function photoSources(photo) {
+  const remote = photo.large_url || (photo.url || '').replace('/square.', '/large.');
   return {
-    local: SpecimuxRuntime.apiUrl(`/photos/${photo.id}_large.jpg`),
-    remote: photo.large_url || (photo.url || '').replace('/square.', '/large.'),
+    local: photoCache ? SpecimuxRuntime.apiUrl(`/photos/${photo.id}_large.jpg`) : remote,
+    remote,
   };
 }
 
@@ -1593,6 +1597,7 @@ async function bootstrap() {
     state.totalMatched = snap.total_matched_reads || 0;
     state.genusLineages = snap.genus_lineages || {};
     state.summarizeFilter = snap.summarize_filter || {};
+    photoCache = (snap.config_summary || {}).photo_cache !== false;
     for (const [sid, s] of Object.entries(snap.specimens || {})) state.specimens[sid] = s;
     // Everything in the snapshot is history: seed the genera set so only
     // genuinely new genera get the first-of-genus eyebrow.

@@ -70,7 +70,7 @@ class Pipeline:
 
         self.scheduler = Scheduler(config, self.state)
 
-        if config.mirror_dir is not None:
+        if config.mirror_dir is not None and config.photo_cache:
             _link_photo_cache(config.output_dir, config.mirror_dir)
         self.specimux = SpecimuxRunner(config, self.event_log)
         # A demux the previous process died inside left appended reads that
@@ -331,7 +331,7 @@ class Pipeline:
                 for genus in genera:
                     if genus not in lineages:
                         self._lineage_seen.discard(genus.lower())
-            if taxa:
+            if taxa and self.config.photo_cache:
                 # Photos are a nice-to-have for the UIs — every page falls
                 # back to the iNat photo URL when the local cache misses —
                 # so only the cache warmup runs here, on a daemon thread.
@@ -397,6 +397,8 @@ class Pipeline:
             return
         # Photo prefetch rides the same daemon thread, after the taxa event is
         # out — display names shouldn't wait on ~MBs of images.
+        if not self.config.photo_cache:
+            return
         try:
             prefetch_photos(
                 taxa, photo_cache_dir(self.config.output_dir), abort=self._shutdown,
@@ -470,10 +472,11 @@ class Pipeline:
                 if taxa:
                     self.event_log.emit("specimens.taxa", {"taxa": taxa})
                     logger.info(f"Applied iNat correction for {sid} -> {new_obs}")
-                    prefetch_photos(
-                        taxa, photo_cache_dir(self.config.output_dir),
-                        abort=self._shutdown,
-                    )
+                    if self.config.photo_cache:
+                        prefetch_photos(
+                            taxa, photo_cache_dir(self.config.output_dir),
+                            abort=self._shutdown,
+                        )
                 else:
                     logger.warning(f"Corrected observation {new_obs} for {sid} "
                                    "not found on iNaturalist")

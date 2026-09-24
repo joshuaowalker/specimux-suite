@@ -116,6 +116,7 @@ TGCATGCA...
 | `--summarize-args` | — | Extra arguments passed through to speconsense-summarize |
 | `--no-incremental-summarize` | — | Only summarize in the final round instead of per specimen as identifications land |
 | `--inat-background` | — | Fetch iNaturalist data in the background instead of blocking with progress bars at startup |
+| `--no-photo-cache` | — | Don't cache observation photos in the output dir; the pages load them from iNaturalist / Mushroom Observer directly. For a dashboard served on the internet, where a copy of every photo per run is wasted |
 | `--log-level` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
 ### Web dashboard options

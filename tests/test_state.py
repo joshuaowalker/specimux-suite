@@ -455,3 +455,30 @@ def test_unversioned_summarize_completed_still_applies(tmp_output):
     spec = state.specimens["spec1"]
     assert spec.status == SpecimenStatus.SUMMARIZED
     assert spec.summarize_consensus_version == 1  # adopted current generation
+
+
+def test_demux_finished_batch_and_live(tmp_output):
+    """No more reads can arrive once batch's demux succeeds or a live run's
+    finalization completes; a resumed live run takes files again."""
+    state = PipelineState()
+    log = EventLog(tmp_output / "events.jsonl")
+    log.emit("pipeline.started", {"mode": "batch"})
+    log.emit("specimux.completed", {"job_id": "a", "exit_code": 1, "specimens": {}})
+    state.rebuild(log)
+    assert state.to_dict()["demux_finished"] is False          # a failed demux settles nothing
+    log.emit("specimux.completed", {"job_id": "b", "exit_code": 0, "specimens": {"S1": 12}})
+    state.rebuild(log)
+    assert state.to_dict()["demux_finished"] is True
+
+    live = EventLog(tmp_output / "live.jsonl")
+    live.emit("pipeline.started", {"mode": "live"})
+    live.emit("specimux.completed", {"job_id": "c", "exit_code": 0, "specimens": {"S1": 12}})
+    state = PipelineState()
+    state.rebuild(live)
+    assert state.demux_finished is False                       # more files may come
+    live.emit("finalization.completed", {})
+    state.rebuild(live)
+    assert state.demux_finished is True
+    live.emit("pipeline.started", {"mode": "live"})
+    state.rebuild(live)
+    assert state.demux_finished is False
