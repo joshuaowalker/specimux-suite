@@ -134,3 +134,35 @@ def test_background_mode_spawns_fetch_thread(tmp_path):
     finally:
         pipeline._shutdown.set()
         pipeline._executor.shutdown(wait=False)
+
+
+def test_no_photo_cache_fetches_taxa_but_no_photos(tmp_path):
+    """--no-photo-cache (a hosted dashboard): field IDs are fetched as
+    usual, photos are never downloaded (blocking or background path), no
+    cache link is made in the mirror, and config_summary tells the pages."""
+    _write_specimens(tmp_path)
+    for blocking in (True, False):
+        out = tmp_path / f"out-{blocking}"
+        config = _make_config(tmp_path, output_dir=out, mirror_dir=tmp_path / f"mirror-{blocking}",
+                              inat_blocking=blocking, photo_cache=False)
+        assert config.summary()["photo_cache"] is False
+        pipeline = _make_pipeline(config)
+        try:
+            taxa = {"specA--iNat111": {"name": "Amanita x", "genus": "Amanita"}}
+            with patch("specimux_suite.pipeline.fetch_community_taxa", return_value=taxa), \
+                 patch("specimux_suite.pipeline.run_inat_check"), \
+                 patch("specimux_suite.pipeline.prefetch_photos") as photos:
+                if blocking:
+                    pipeline.prefetch_inat(show_progress=False)
+                else:
+                    pipeline._fetch_inat_taxa({"specA--iNat111": "111"})
+                time.sleep(0.2)                      # a stray photo thread would have run
+            # (other tests' photo threads may still be running and call the
+            # patched function for their own output dirs: only ours count)
+            assert not [c for c in photos.call_args_list if str(out) in str(c.args[1:2])]
+            assert "specimens.taxa" in [e.type for e in pipeline.event_log.replay()]
+            assert not (out / "inat_photos").exists()
+        finally:
+            pipeline._shutdown.set()
+            pipeline._executor.shutdown(wait=False)
+    assert _make_config(tmp_path).summary()["photo_cache"] is True    # the default

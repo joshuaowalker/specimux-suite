@@ -145,6 +145,7 @@ def main():
         live_presample=getattr(args, "presample", 100),
         incremental_summarize=not args.no_incremental_summarize,
         inat_blocking=not args.inat_background,
+        photo_cache=not args.no_photo_cache,
     )
 
     from .pipeline import Pipeline
@@ -268,6 +269,10 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Fetch iNaturalist data (field IDs, ID audit, photos) in the "
                              "background instead of blocking with progress bars at startup; "
                              "the dashboard fills in as data arrives")
+    parser.add_argument("--no-photo-cache", action="store_true",
+                        help="Don't cache observation photos in the output dir; the pages load "
+                             "them from iNaturalist / Mushroom Observer directly (for a "
+                             "dashboard served on the internet)")
 
 
 def _arg_was_explicit(args: argparse.Namespace, attr_name: str) -> bool:
