@@ -249,7 +249,7 @@ Operator keys: **space** pauses, **→** advances, **f** toggles fullscreen. Any
 
 ## Admin page
 
-`/admin` (linked from the dashboard header, available only from localhost) reviews the iNaturalist observation-ID audit: specimen IDs whose embedded observation resolves to a non-fungal taxon or to nothing are checked against single-digit-edit candidates, ranked by evidence (candidate's observer has other specimens in the run, candidate's taxon matches the sequence). Accepting a correction heals the running pipeline live — field ID, photos, and agreement recover, and the corrected mapping is written to `summary/inat_id_corrections.tsv` for patching before MycoMap upload. All suspects, suggestions, and statuses are also written to `summary/inat_id_suggestions.tsv`. Mushroom Observer ids that don't resolve are listed on the same page (no automatic correction: fix the sheet and restart).
+`/admin` (linked from the dashboard header, available only from localhost) reviews the iNaturalist observation-ID audit: specimen IDs whose embedded observation resolves to a non-fungal taxon or to nothing are checked against single-digit-edit candidates, ranked by evidence (candidate's observer has other specimens in the run, candidate's taxon matches the sequence). Accepting a correction heals the running pipeline live — field ID, photos, and agreement recover, and the corrected mapping is written to `inat_id_corrections.tsv` in the output directory for patching before MycoMap upload. All suspects, suggestions, and statuses are also written to `inat_id_suggestions.tsv` there. Mushroom Observer ids that don't resolve are listed on the same page (no automatic correction: fix the sheet and restart).
 
 The correction approach — recovering the intended observation from a mistyped ID by checking digit-edit permutations against plausible observations — was inspired by Alan Rockefeller's [inat.finder.py](https://github.com/AlanRockefeller/inat.finder.py).
 
@@ -287,6 +287,8 @@ output_dir/
 ├── inat_taxon_cache.json           # Cached iNaturalist observations (taxa, photos, observers)
 ├── mo_taxon_cache.json             # Cached Mushroom Observer observations (same shape)
 ├── inat_lineage_cache.json         # Cached genus lineages for taxonomy-level agreement
+├── inat_id_suggestions.tsv         # iNat observation-ID audit (suspects + suggested fixes)
+├── inat_id_corrections.tsv         # Admin-accepted ID corrections, for pre-upload patching
 ├── inat_photos/                    # Local photo cache (iNat + MO) for the dashboard and highlights screen
 ├── specimux-inflight.json          # Present only while a demux runs; a restart rolls the demux back from it
 ├── forward-ack.json                # With --forward-events: last event version the receiver acknowledged
@@ -295,11 +297,9 @@ output_dir/
 │   └── {specimen_id}.fastq         # Demultiplexed reads per specimen
 ├── consensus/{specimen_id}/
 │   └── {specimen_id}-all.fasta     # Consensus sequences (one or more clusters)
-├── summary/
+├── summary/                        # speconsense-summarize's output only (the MycoMap package)
 │   ├── {variant_id}-RiC*.fasta     # Individual variant sequences
-│   ├── summary.fasta               # Aggregated summary sequences
-│   ├── inat_id_suggestions.tsv     # iNat observation-ID audit (suspects + suggested fixes)
-│   └── inat_id_corrections.tsv     # Admin-accepted ID corrections, for pre-upload patching
+│   └── summary.fasta               # Aggregated summary sequences
 └── identification/
     └── {specimen_id}.tsv           # vsearch hits with adjusted-identity scores
 ```

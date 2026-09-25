@@ -5,6 +5,26 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## Unreleased
+
+- **Host status on the dashboard.** `create_viewer_app` takes an optional
+  `status` callable: a host (such as a hosted service) reports a run's
+  progress before the pipeline has started, for example an upload or
+  basecalling, as `{"text", "progress"}`. It is served in `/api/state`
+  and the dashboard's viewer poll, and the dashboard shows it as a banner
+  with a progress bar, reloading once when it goes away. Nothing changes
+  when no status is given.
+- **`summary/` holds only speconsense-summarize's output**, so it can be
+  zipped as the MycoMap summary package as is. The per-specimen
+  `*-variants-combined.fasta` (the input to identifying a specimen's
+  variants) now lives in `.staging/`, and the iNat ID audit files
+  (`inat_id_suggestions.tsv`, `inat_id_corrections.tsv`) are written to the
+  output directory. Restarting a run from an earlier version moves its
+  audit files and removes the old combined FASTAs.
+- Requires speconsense 0.8.8, whose `--aggregate-only` writes
+  `quality_report.txt`, so an incrementally summarized run's `summary/`
+  now has the same quality report as a single speconsense-summarize run.
+
 ## 0.3.6 — 2026-09-24
 
 - **A run without a reference database is summarized.** Summarizing was

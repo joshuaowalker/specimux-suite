@@ -641,3 +641,40 @@ def test_live_consensus_without_a_reference_goes_to_the_summarize_lane(tmp_path)
     assert "A" not in pipeline._futures              # gone first, or the lane would skip it
     pipeline._shutdown.set()
     pipeline._executor.shutdown(wait=True)
+
+
+def test_summary_holds_only_speconsense_output(tmp_path):
+    """summary/ is the MycoMap package, so the suite keeps its own files out
+    of it: the variants-combined FASTA (variant identification's input)
+    goes to staging, and a run from before 0.3.7 has its iNat audit TSVs
+    moved to the output dir and its stale combined FASTAs removed at start."""
+    config = _make_config(tmp_path)
+    summary = config.summarize_output_dir
+    summary.mkdir(parents=True)
+    (summary / "S1-1.v1-RiC5.fasta").write_text(">S1-1.v1\nACGT\n")
+    (summary / "S1-variants-combined.fasta").write_text(">S1-1.v1\nACGT\n")
+    (summary / "inat_id_suggestions.tsv").write_text("old suggestions\n")
+    (summary / "inat_id_corrections.tsv").write_text("old corrections\n")
+    (config.output_dir / "inat_id_corrections.tsv").write_text("newer corrections\n")
+
+    pipeline = _quiet_pipeline(tmp_path)
+    assert sorted(p.name for p in summary.iterdir()) == ["S1-1.v1-RiC5.fasta"]
+    assert (config.output_dir / "inat_id_suggestions.tsv").read_text() == "old suggestions\n"
+    assert (config.output_dir / "inat_id_corrections.tsv").read_text() == "newer corrections\n"
+
+    pipeline.state.get_specimen("S1").variants = [{"name": "S1-1.v1"}]
+    combined = pipeline._build_variant_fasta("S1")
+    assert combined.parent.parent == config.staging_dir
+    assert combined.read_text() == ">S1-1.v1\nACGT\n"
+    assert sorted(p.name for p in summary.iterdir()) == ["S1-1.v1-RiC5.fasta"]
+
+    combined.unlink()
+
+    # identifying the variants reads its own copy, then it goes
+    seen = []
+    pipeline.identify = MagicMock()
+    pipeline.identify.run.side_effect = lambda sid, path, **kw: seen.append(path.read_text()) or []
+    pipeline._submit_variant_identification("S1")
+    pipeline._futures["S1"].result(timeout=10)
+    assert seen == [">S1-1.v1\nACGT\n"] and not list(combined.parent.iterdir())
+    pipeline._executor.shutdown(wait=True)
