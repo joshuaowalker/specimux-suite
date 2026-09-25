@@ -5,7 +5,7 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
-## Unreleased
+## 0.3.7 — 2026-09-25
 
 - **Host status on the dashboard.** `create_viewer_app` takes an optional
   `status` callable: a host (such as a hosted service) reports a run's
