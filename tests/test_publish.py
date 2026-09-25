@@ -207,3 +207,16 @@ def test_the_prune_only_examines_the_specimens_own_names(tmp_path):
     # 600 + 2 stale, less S7's four old files, plus the new one
     assert sum(1 for p in final.rglob("*") if p.is_file()) == 599
 
+
+
+def test_publish_from_a_missing_staging_dir_prunes_the_specimen(tmp_path):
+    """speconsense-summarize --specimen creates no --summary-dir when every
+    cluster is below --min-ric: nothing is published, and the specimen's
+    previous summary files go (it has no variants now); others stay."""
+    from specimux_suite.util import owned_by, publish_tree
+    final = tmp_path / "summary"
+    final.mkdir()
+    (final / "S1-1.v1-RiC5.fasta").write_text("old")
+    (final / "S2-1.v1-RiC5.fasta").write_text("other")
+    assert publish_tree(tmp_path / "never-created", final, prune=owned_by("S1"), prefix="S1") == []
+    assert sorted(p.name for p in final.iterdir()) == ["S2-1.v1-RiC5.fasta"]

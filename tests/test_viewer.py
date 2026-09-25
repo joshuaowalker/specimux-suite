@@ -74,6 +74,24 @@ def test_state_snapshot_and_extras(tmp_path):
     assert ids == {"S1", "S2"}
 
 
+def test_host_status_rides_in_the_snapshot_and_the_viewer_poll(tmp_path):
+    """The host's word on a run the pipeline has not started: asked per
+    request, so it is always current; a failing provider is left out."""
+    current = {"text": "Basecalling: about 62%", "progress": 0.62}
+    app, _, _ = _app(tmp_path, status=lambda: current.get("text") and dict(current))
+    c = TestClient(app)
+    assert c.get("/api/state").json()["status"] == {"text": "Basecalling: about 62%", "progress": 0.62}
+    assert c.get("/api/viewers").json()["status"]["progress"] == 0.62
+    current.clear()                                            # the pipeline started
+    assert "status" not in c.get("/api/state").json()
+    assert c.get("/api/viewers").json() == {"sse_clients": 0}
+
+    def broken():
+        raise RuntimeError("store down")
+    app, _, _ = _app(tmp_path / "b", status=broken)
+    assert "status" not in TestClient(app).get("/api/state").json()
+
+
 def test_snapshot_omits_extras_when_not_given(tmp_path):
     app, _, _ = _app(tmp_path)
     snap = TestClient(app).get("/api/state").json()

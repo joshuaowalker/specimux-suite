@@ -1,12 +1,14 @@
 """Pipeline orchestrator: wires components together for batch and live modes."""
 
 import logging
+import os
 import queue
 import shutil
 import signal
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
 from pathlib import Path
 
@@ -17,7 +19,7 @@ from .events import EventLog
 from .state import PipelineState, SpecimenStatus
 from .scheduler import Scheduler
 from .inat import apply_corrections, extract_inat_ids, fetch_community_taxa, fetch_genus_lineages
-from .inat_check import run_inat_check, write_corrections_tsv
+from .inat_check import CORRECTIONS_FILENAME, SUGGESTIONS_FILENAME, run_inat_check, write_corrections_tsv
 from .mo import extract_mo_ids, fetch_mo_taxa
 from .photos import photo_cache_dir, prefetch_photos
 from .plugins import PluginContext
@@ -54,6 +56,26 @@ def _link_photo_cache(output_dir: Path, mirror_dir: Path) -> None:
     else:
         logger.warning(f"{link} is a directory; photos stay there instead of in the mirror")
 
+
+def _move_suite_files_out_of_summary(config) -> None:
+    """summary/ holds only speconsense-summarize's output (it is the MycoMap
+    package). Runs from before 0.3.7 also kept the suite's own files there:
+    the iNat ID audit TSVs move to the output dir (unless it already has
+    newer ones), and the scratch variants-combined FASTAs go."""
+    summary = config.summarize_output_dir
+    if not summary.is_dir():
+        return
+    for name in (SUGGESTIONS_FILENAME, CORRECTIONS_FILENAME):
+        old = summary / name
+        if old.exists():
+            target = config.output_dir / name
+            if target.exists():
+                old.unlink()
+            else:
+                os.replace(old, target)
+    for f in summary.glob("*-variants-combined.fasta"):
+        f.unlink(missing_ok=True)
+
 class Pipeline:
     """Main pipeline orchestrator."""
 
@@ -80,6 +102,7 @@ class Pipeline:
         # Tool output staged but never published belongs to jobs the
         # previous process died inside; nothing is in flight now.
         shutil.rmtree(config.staging_dir, ignore_errors=True)
+        _move_suite_files_out_of_summary(config)
         self.speconsense = SpeconsenseRunner(config, self.event_log)
         self.identify = IdentifyRunner(config, self.event_log) if config.reference_db else None
         self.summarize = SummarizeRunner(config, self.event_log)
@@ -481,7 +504,7 @@ class Pipeline:
                     logger.warning(f"Corrected observation {new_obs} for {sid} "
                                    "not found on iNaturalist")
                 write_corrections_tsv(
-                    self.state.inat_corrections, self.config.summarize_output_dir,
+                    self.state.inat_corrections, self.config.output_dir,
                 )
             except Exception as e:
                 logger.warning(f"Failed to apply iNat correction for {sid}: {e}")
@@ -1221,11 +1244,9 @@ class Pipeline:
             return
         logger.info(f"Identifying variants for {sid}")
         try:
-            fut = self._executor.submit(
-                self.identify.run, sid, combined,
-                consensus_version=cv, output_name=f"{sid}-variants",
-            )
+            fut = self._executor.submit(self._identify_variants, sid, combined, cv)
         except RuntimeError:
+            combined.unlink(missing_ok=True)
             return  # executor shut down
         self._variant_futures[sid] = fut
         fut.add_done_callback(lambda f, sid=sid: self._on_variant_id_done(sid, f))
@@ -1283,13 +1304,19 @@ class Pipeline:
                 break
 
     def _build_variant_fasta(self, specimen_id: str) -> Path | None:
-        """Combine all variant FASTA files for a specimen into one file for identification."""
+        """Combine all variant FASTA files for a specimen into one file for
+        identification. The file is the identification's input, not a
+        result: it lives in staging, since summary/ holds only what
+        speconsense-summarize wrote (it is the MycoMap package)."""
         spec = self.state.get_specimen(specimen_id)
         if not spec or not spec.variants:
             return None
 
         summary_dir = self.config.summarize_output_dir
-        combined = summary_dir / f"{specimen_id}-variants-combined.fasta"
+        # one file per submission: two for the same specimen never share one
+        combined = (self.config.staging_dir / "variant-identification"
+                    / f"{specimen_id}-variants-combined.{uuid.uuid4().hex[:8]}.fasta")
+        combined.parent.mkdir(parents=True, exist_ok=True)
         found_any = False
 
         with open(combined, "w", encoding="utf-8") as out:
@@ -1314,12 +1341,19 @@ class Pipeline:
             return
         spec = self.state.get_specimen(specimen_id)
         logger.info(f"Identifying variants for {specimen_id}")
-        future = self._executor.submit(
-            self.identify.run, specimen_id, combined_fasta,
-            consensus_version=spec.consensus_version,
-            output_name=f"{specimen_id}-variants",
-        )
+        future = self._executor.submit(self._identify_variants, specimen_id, combined_fasta,
+                                       spec.consensus_version)
         self._futures[specimen_id] = future
+
+    def _identify_variants(self, specimen_id: str, combined_fasta: Path, consensus_version: int):
+        """Identify a specimen's variants from their combined FASTA, which is
+        only the input (the result is identification/<id>-variants.tsv), so
+        it goes afterwards."""
+        try:
+            return self.identify.run(specimen_id, combined_fasta, consensus_version=consensus_version,
+                                     output_name=f"{specimen_id}-variants")
+        finally:
+            combined_fasta.unlink(missing_ok=True)
 
     def _submit_summarize(self, specimen_id: str) -> None:
         """Submit a summarize job to the thread pool."""
@@ -1415,7 +1449,7 @@ class Pipeline:
     def _run_inat_id_check(self, progress=None) -> None:
         """Audit specimen iNat IDs and publish correction suggestions (network)."""
         run_inat_check(
-            self.state, self.event_log, self.config.summarize_output_dir,
+            self.state, self.event_log, self.config.output_dir,
             abort=self._shutdown, progress=progress,
         )
 
