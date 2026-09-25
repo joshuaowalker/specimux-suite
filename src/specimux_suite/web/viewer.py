@@ -22,12 +22,13 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Iterable, Optional, Protocol
+from typing import Callable, Iterable, Optional, Protocol
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from sse_starlette.sse import EventSourceResponse
 
 from ..events import Event, EventLog, _event_to_dict
@@ -234,6 +235,7 @@ def create_viewer_app(
     *,
     config_summary: Optional[dict] = None,
     share: Optional[dict] = None,
+    status: Optional[Callable[[], Optional[dict]]] = None,
     max_clients: int = 0,
     runtime: Optional[dict] = None,
     allowed_origins: Iterable[str] = (),
@@ -244,6 +246,12 @@ def create_viewer_app(
     ``config_summary`` and ``share`` ride along in ``/api/state`` when given
     (the pages read thresholds from the former and draw a QR code from the
     latter); ``max_clients`` caps concurrent SSE connections (0 = no cap).
+    ``status`` is the host's word on a run the pipeline has not started
+    yet (an upload, basecalling): called per request, it returns
+    ``{"text", "progress"}`` (progress a 0–1 fraction, or None when there
+    is no estimate) or None, and rides in ``/api/state`` and the polled
+    ``/api/viewers``. The dashboard shows it as a banner, and reloads once
+    it goes away, since the pipeline's own events take over from there.
     ``runtime`` is injected into the pages this app serves (see
     ``pages.py``; the defaults point everything at this app's own origin).
     ``allowed_origins`` lists page origins that may call this API from a
@@ -301,12 +309,30 @@ def create_viewer_app(
         if share:
             result["share"] = dict(share)
         result["sse_clients"] = broadcaster.clients
+        host_status = await _host_status()
+        if host_status:
+            result["status"] = host_status
         return result
 
     @app.get("/api/viewers")
     async def get_viewers():
-        """Lightweight endpoint for viewer count polling."""
-        return {"sse_clients": broadcaster.clients}
+        """Lightweight endpoint for viewer count polling (and the host's
+        status, which the dashboard polls with it)."""
+        result = {"sse_clients": broadcaster.clients}
+        host_status = await _host_status()
+        if host_status:
+            result["status"] = host_status
+        return result
+
+    async def _host_status() -> Optional[dict]:
+        if status is None:
+            return None
+        try:
+            # a host may look it up (a database read): off the event loop
+            return await run_in_threadpool(status)
+        except Exception:
+            logger.warning("Host status failed", exc_info=True)
+            return None
 
     @app.get("/api/specimens")
     async def get_specimens():

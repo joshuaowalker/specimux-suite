@@ -28,7 +28,7 @@ from specimux_suite.config import PipelineConfig
 from specimux_suite.events import EventLog
 from specimux_suite.web.pages import DEFAULT_RUNTIME, STATIC_DIR, inject_runtime, render_page
 from specimux_suite.web.server import create_app
-from specimux_suite.web.viewer import load_run, serve_in_thread
+from specimux_suite.web.viewer import create_viewer_app, load_run, serve_in_thread
 
 PAGES = ["index.html", "present.html", "admin.html"]
 
@@ -400,4 +400,34 @@ def test_cross_origin_token_endpoint_is_a_bounce_with_a_fragment_token(tmp_path,
         assert len(authorize_calls) == 1
     # the API was only ever answered with the cookie after the exchange
     assert ("GET", "/events") in paths
+    page.close()
+
+
+def test_host_status_banner_until_the_pipeline_starts(tmp_path, browser):
+    """A host's status (create_viewer_app's ``status``) shows as a banner
+    with a progress bar; once the host drops it, the next poll reloads the
+    page, whose snapshot then has no banner."""
+    EventLog(tmp_path / "events.jsonl")                         # nothing yet: basecalling
+    event_log, state = load_run(tmp_path / "events.jsonl")
+    current = {"text": "Basecalling: about 62%, about 25 min left", "progress": 0.62}
+    app = create_viewer_app(event_log, state, tmp_path, status=lambda: dict(current) if current else None)
+    port = _free_port()
+    serve_in_thread(app, "127.0.0.1", port)
+    origin = f"http://127.0.0.1:{port}"
+    _wait_up(origin + "/api/viewers")
+
+    page = browser.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(origin + "/")
+    page.wait_for_selector("#host-status:not([hidden])", timeout=10000)
+    assert page.inner_text("#host-status-text") == "Basecalling: about 62%, about 25 min left"
+    assert page.evaluate("document.querySelector('#host-status .fill').style.width").startswith("62")
+
+    current.clear()                                             # the pipeline started
+    with page.expect_navigation(timeout=15000):                 # the viewer poll runs every 10 s
+        pass
+    page.wait_for_function("typeof hostStatusShown !== 'undefined'", timeout=10000)
+    assert page.evaluate("document.getElementById('host-status').hidden")
+    assert not errors, errors
     page.close()
