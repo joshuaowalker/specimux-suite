@@ -101,6 +101,24 @@ def main():
                 if not _arg_was_explicit(args, attr_name):
                     setattr(args, attr_name, profile.identify[yaml_key])
 
+    # --set: one run's own tool settings, over the profile's. A tool's
+    # "profile" is its -p, as in a suite profile's sections: passed as an
+    # override it would reach the tool as a second --profile while
+    # resolve_summarize_thresholds (the dashboard's NS/LQ preview) still
+    # read the first.
+    if args.set:
+        from .config import parse_tool_settings
+        try:
+            run_settings = parse_tool_settings(args.set)
+        except ValueError as e:
+            parser.error(str(e))
+        specimux_profile = run_settings["specimux"].pop("profile", specimux_profile)
+        speconsense_profile = run_settings["speconsense"].pop("profile", speconsense_profile)
+        summarize_profile = run_settings["summarize"].pop("profile", summarize_profile)
+        specimux_overrides = {**specimux_overrides, **run_settings["specimux"]}
+        speconsense_overrides = {**speconsense_overrides, **run_settings["speconsense"]}
+        summarize_overrides = {**summarize_overrides, **run_settings["summarize"]}
+
     # Handle --share: bind to all interfaces and detect LAN IP
     web_host = args.web_host
     share_url = None
@@ -235,6 +253,10 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="New/old reads ratio to trigger reprocessing (default: 0.5)")
     parser.add_argument("--workers", type=int, default=0,
                         help="Total processing cores — specimux uses all, consensus uses 1 each (default: half of CPU cores)")
+    parser.add_argument("--set", action="append", default=[], metavar="TOOL.OPTION=VALUE",
+                        help="Set one option of specimux, speconsense or summarize for this run, over the "
+                             "profile's (repeatable), e.g. --set summarize.merge-position-count=5 "
+                             "--set speconsense.presample=500 --set specimux.index-edit-distance=3")
     parser.add_argument("--specimux-args", nargs=argparse.REMAINDER, default=[],
                         help="Extra arguments passed through to specimux")
     parser.add_argument("--speconsense-args", nargs=argparse.REMAINDER, default=[],

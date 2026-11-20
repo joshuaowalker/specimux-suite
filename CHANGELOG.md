@@ -5,6 +5,15 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
+## Unreleased
+
+- **`--set TOOL.OPTION=VALUE`**: one run's own setting for specimux,
+  speconsense or speconsense-summarize, applied over the profile's and under
+  the `--*-args` pass-through. Repeatable. The three `--*-args` options each
+  take the rest of the command line, so only one of them can be used in a
+  command; `--set` reaches all three tools at once. `TOOL.profile` replaces
+  that tool's profile (`-p`), as in a suite profile. See INTEGRATION.md.
+
 ## 0.3.8 — 2026-11-15
 
 - **Fix: consensus sequences were not primer-trimmed.** The suite never

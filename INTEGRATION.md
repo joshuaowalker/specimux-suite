@@ -97,6 +97,26 @@ identify:
 - Other keys in those sections become `--key value` arguments.
 - This means a suite profile can fully configure a pipeline run without the user touching tool-level profiles directly.
 
+### One run's own settings: `--set`
+
+`--set TOOL.OPTION=VALUE` (repeatable) sets one key of a suite profile's
+`specimux`, `speconsense` or `summarize` section for this run only, over the
+profile's value and under the `--*-args` pass-through:
+
+```
+specimux-suite batch primers.fasta Index.txt reads.fastq -p lab \
+    --set specimux.index-edit-distance=3 --set speconsense.presample=500 \
+    --set summarize.merge-position-count=5
+```
+
+- `OPTION` is the tool's own long option without the dashes, as in the profile sections. `TOOL.profile` replaces that section's `profile` (the `-p`).
+- `true` and `false` are flags. As in a profile, `false` means the flag is not passed: it removes the suite profile's `true`, but cannot turn off a flag that the tool profile or the tool's own default turns on.
+- Any other value is passed as written. An item with no value, or for another tool, is refused at startup.
+- The suite does not check option names; the tool does when it runs, so a misspelled option fails every job of the run. A host that takes settings from its users should accept only a list it knows (specimux-cloud's `toolsettings.py` does).
+
+`--set` exists because each `--*-args` option takes the rest of the command
+line, so a command can use only one of them.
+
 ### Two-pass CLI parsing
 
 Both specimux and speconsense use two-pass CLI parsing:
@@ -165,8 +185,8 @@ specimux <primers> <specimens> <fastq> \
 | Segment | Source | Precedence |
 |---|---|---|
 | Positional args, `-F`, `-O`, `-t` | Suite hardcoded / computed | Base (lowest) |
-| `-p <profile>` | Suite profile `specimux.profile` or `--specimux-profile` CLI | Middle |
-| `--key value` pairs | Suite profile `specimux.*` keys or suite CLI flags | Higher |
+| `-p <profile>` | Suite profile `specimux.profile`, or `--set specimux.profile=` | Middle |
+| `--key value` pairs | Suite profile `specimux.*` keys, then `--set specimux.*` | Higher |
 | `--progress-file <path>` | Suite-generated temp path | N/A (additive) |
 | `--specimux-args` contents | User escape hatch, passed through verbatim | Highest |
 
@@ -184,8 +204,8 @@ speconsense <specimen.fastq> \
 | Segment | Source | Precedence |
 |---|---|---|
 | Positional args, `-O`, `--presample` | Suite hardcoded / computed | Base (lowest) |
-| `-p <profile>` | Suite profile `speconsense.profile` or `--speconsense-profile` CLI | Middle |
-| `--key value` pairs | Suite profile `speconsense.*` keys or suite CLI flags | Higher |
+| `-p <profile>` | Suite profile `speconsense.profile`, or `--set speconsense.profile=` | Middle |
+| `--key value` pairs | Suite profile `speconsense.*` keys, then `--set speconsense.*` | Higher |
 | `--speconsense-args` contents | User escape hatch, passed through verbatim | Highest |
 
 #### Consensus FASTA header contract
@@ -226,8 +246,8 @@ The suite invokes speconsense-summarize in two modes:
 | Segment | Source | Precedence |
 |---|---|---|
 | `--source`, `--summary-dir`, `--specimen` | Suite hardcoded / computed | Base (lowest) |
-| `-p <profile>` | Suite profile `summarize.profile` | Middle |
-| `--key value` pairs | Suite profile `summarize.*` keys | Higher |
+| `-p <profile>` | Suite profile `summarize.profile`, or `--set summarize.profile=` | Middle |
+| `--key value` pairs | Suite profile `summarize.*` keys, then `--set summarize.*` | Higher |
 | `--summarize-args` contents | User escape hatch, passed through verbatim | Highest |
 
 #### `.ns` / `.lq` routing preview (0.8.x)
@@ -240,8 +260,8 @@ returned in the single-specimen JSON, so they never reach the Summary tab.
 
 To preview which raw clusters summarize will drop, the suite resolves the
 effective thresholds (`PipelineConfig.resolve_summarize_thresholds`, precedence:
-tool defaults `1.0`/`1.5` < `summarize` profile < `summarize.*` overrides <
-`--summarize-args`) and emits them in `pipeline.started`'s `config_summary`
+tool defaults `1.0`/`1.5` < `summarize` profile < `summarize.*` overrides
+(suite profile, then `--set`) < `--summarize-args`) and emits them in `pipeline.started`'s `config_summary`
 under `summarize_filter`. The Processing tab badges each cluster `LQ`/`NS`
 client-side using the same comparison speconsense applies, and a "Hide NS/LQ"
 toggle (shown only when some cluster is actually routable, so never on 0.7.x
