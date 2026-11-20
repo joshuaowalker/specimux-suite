@@ -111,6 +111,7 @@ TGCATGCA...
 | `--reprocess-ratio` | `0.5` | Ratio of new/previous reads to trigger reprocessing |
 | `--workers` | half of CPU cores | Number of worker threads |
 | `--identify-min-coverage` | `0.5` | Minimum query/target coverage for identification hits |
+| `--set TOOL.OPTION=VALUE` | — | Set one option of `specimux`, `speconsense` or `summarize` for this run, over the profile's (repeatable): `--set summarize.merge-position-count=5 --set speconsense.presample=500` |
 | `--specimux-args` | — | Extra arguments passed through to specimux |
 | `--speconsense-args` | — | Extra arguments passed through to speconsense |
 | `--summarize-args` | — | Extra arguments passed through to speconsense-summarize |

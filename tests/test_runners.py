@@ -482,3 +482,28 @@ def test_count_fastq_reads_fast_gzip(tmp_path):
 
     assert count_fastq_reads_fast(plain) == 250
     assert count_fastq_reads_fast(gz) == 250
+
+
+def test_a_runs_tool_settings_reach_each_tools_command(tmp_path):
+    from specimux_suite.runners.summarize_runner import SummarizeRunner
+
+    config = _make_config(
+        tmp_path,
+        specimux_overrides={"index-edit-distance": "3"},
+        speconsense_overrides={"presample": "500"},
+        summarize_overrides={"merge-position-count": "5", "select-max-variants": "-1", "fasta-fields": "ric,snp"},
+    )
+    log = EventLog(tmp_path / "events.jsonl")
+
+    demux = SpecimuxRunner(config, log)._build_command(Path("/data/reads.fastq"), config.specimux_output_dir)
+    assert demux[demux.index("--index-edit-distance") + 1] == "3"
+
+    cons = SpeconsenseRunner(config, log)._build_command(Path("/data/A.fastq"), config.consensus_output_dir / "A")
+    assert cons[cons.index("--presample") + 1] == "500"
+
+    summ = SummarizeRunner(config, log)
+    for cmd in (summ._build_command(config.consensus_output_dir / "A", tmp_path / "s", "A"),
+                summ._build_command(config.consensus_output_dir, tmp_path / "s", aggregate_only=True)):
+        assert cmd[cmd.index("--merge-position-count") + 1] == "5"
+        assert cmd[cmd.index("--select-max-variants") + 1] == "-1"
+        assert cmd[cmd.index("--fasta-fields") + 1] == "ric,snp"
