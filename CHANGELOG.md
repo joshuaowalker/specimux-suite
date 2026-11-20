@@ -5,7 +5,7 @@ Notable changes to specimux-suite. The format loosely follows
 [semantic versioning](https://semver.org/) within the 0.x caveat that
 minor releases may change APIs and formats.
 
-## Unreleased
+## 0.3.9 — 2026-11-19
 
 - **`--set TOOL.OPTION=VALUE`**: one run's own setting for specimux,
   speconsense or speconsense-summarize, applied over the profile's and under
